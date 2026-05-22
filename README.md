@@ -46,10 +46,10 @@
 </table>
 
 
-<img src="screenshots/settings.png" width="600"/>
+<img src="screenshots/settings_image.png" width="600"/>
 
 
-<em>The Wallpaper Settings Configuration Page</em>
+<em>The Wallpaper Settings Configuration Page (Image Mode)</em>
 </div>
 
 <h3>How does it work?</h3>
