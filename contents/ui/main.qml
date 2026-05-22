@@ -12,6 +12,7 @@ WallpaperItem {
 
     readonly property string mode: wallpaper.configuration.Mode || "Image"
     readonly property var configImages: wallpaper.configuration.Images || []
+    readonly property int slideInterval: (wallpaper.configuration.SlideInterval !== undefined) ? wallpaper.configuration.SlideInterval : 10
 
     property int currentIdx: 0
     property int nextIdx: 0
@@ -27,9 +28,11 @@ WallpaperItem {
 
     Timer {
         id: intervalTimer
-        interval: 5000
+
         running: root.mode === "Slideshow" && root.configImages.length > 1
+        interval: root.slideInterval * 1000
         repeat: true
+
         onTriggered: {
             root.nextIdx = (root.currentIdx + 1) % root.configImages.length;
             crossfadeAnimation.start();
@@ -38,12 +41,16 @@ WallpaperItem {
 
     NumberAnimation {
         id: crossfadeAnimation
-        target: shaderContainer
+
         property: "transitionProgress"
+        target: shaderContainer
+
         from: 0.0
         to: 1.0
+
         duration: 1000
         easing.type: Easing.InOutQuad
+
         onFinished: {
             root.currentIdx = root.nextIdx;
             shaderContainer.transitionProgress = 0.0;
@@ -56,6 +63,7 @@ WallpaperItem {
     function resetSlideshow() {
         crossfadeAnimation.stop();
         shaderContainer.transitionProgress = 0.0;
+        
         root.currentIdx = 0;
         root.nextIdx = 0;
     }

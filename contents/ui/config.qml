@@ -20,6 +20,8 @@ Kirigami.ScrollablePage {
     property string cfg_Mode: "Image"
     property alias cfg_Detail: detailSlider.value
     property alias cfg_Grayscale: grayscaleCheck.checked
+    property alias cfg_SlideInterval: intervalSlider.value
+
 
     ListModel { id: imageList }
     property int _activePicker: -1
@@ -197,7 +199,7 @@ Kirigami.ScrollablePage {
                 Timer {
                     id: previewTimer
                     
-                    interval: 5000
+                    interval: root.cfg_SlideInterval * 1000
                     running: root.cfg_Mode === "Slideshow" && imageList.count > 1
                     repeat: true
 
@@ -248,7 +250,7 @@ Kirigami.ScrollablePage {
                 ShaderEffectSource {
                     id: previewImage
                     sourceItem: offscreenBuffer
-                    
+
                     anchors.fill: parent
                     anchors.centerIn: parent
                     
@@ -349,7 +351,9 @@ Kirigami.ScrollablePage {
 
                             Controls.ToolButton {
                                 icon.name: "arrow-up"
-                                enabled: index > 0
+                                visible: root.cfg_Mode === "Slideshow"
+                                enabled: visible && index > 0
+
                                 
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
@@ -364,7 +368,8 @@ Kirigami.ScrollablePage {
 
                             Controls.ToolButton {
                                 icon.name: "arrow-down"
-                                enabled: index < imageList.count - 1
+                                visible: root.cfg_Mode === "Slideshow"
+                                enabled: visible && index < imageList.count - 1
 
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
@@ -460,14 +465,18 @@ Kirigami.ScrollablePage {
                 
                 Controls.Slider {
                     id: detailSlider
+                    Layout.fillWidth: true
+
+                    snapMode: Controls.Slider.SnapOnRelease
+                    stepSize: 1
+
                     from: 2
                     to: 0
-                    stepSize: 1
-                    snapMode: Controls.Slider.SnapOnRelease
-                    Layout.fillWidth: true
                 }
                 
                 Controls.Label {
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 7
+                    
                     text: {
                         let w = (detailSlider.value === 0) ? 2 : (detailSlider.value === 1 ? 4 : 8);
                         let h = w * 2;
@@ -475,7 +484,33 @@ Kirigami.ScrollablePage {
                         return w + "x" + h + labels[detailSlider.value];
                     }
                     font.weight: Font.Bold
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Slideshow Interval:"
+                visible: root.cfg_Mode === "Slideshow"
+
+                Controls.Slider {
+                    id: intervalSlider
+                    Layout.fillWidth: true
+
+                    snapMode: Controls.Slider.SnapOnRelease
+                    stepSize: 2.5
+
+                    from: 5
+                    to: 30
+
+                    onValueChanged: {
+                        previewContainer.resetPreview()
+                    }
+                }
+                
+                Controls.Label {
                     Layout.preferredWidth: Kirigami.Units.gridUnit * 7
+
+                    text: intervalSlider.value + " seconds"
+                    font.weight: Font.Bold
                 }
             }
 

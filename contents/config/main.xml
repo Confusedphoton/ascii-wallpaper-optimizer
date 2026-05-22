@@ -6,7 +6,10 @@
   <kcfgfile name=""/>
 
   <group name="Wallpaper">
-    <entry name="Image" type="String">
+    <entry name="Mode" type="String">
+      <default>Image</default>
+    </entry>
+    <entry name="Images" type="StringList">
       <default></default>
     </entry>
   </group>
@@ -22,6 +25,9 @@
     </entry>
    <entry name="Grayscale" type="Bool">
       <default>false</default>
+    </entry>
+    <entry name="SlideInterval" type="Int">
+      <default>10</default>
     </entry>
   </group>
 </kcfg>
