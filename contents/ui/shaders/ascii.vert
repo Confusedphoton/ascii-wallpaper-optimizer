@@ -12,6 +12,8 @@ layout(std140, binding = 0) uniform buf {
     vec2 viewSize;
     int atlasCount;
     int isGrayscaled;
+    float invAtlasCount;
+    float progress;
 };
 
 void main() {

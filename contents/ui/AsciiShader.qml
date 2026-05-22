@@ -9,6 +9,9 @@ import QtQuick.Controls
 Item {
     id: asciiRoot
     property url source: ""
+    property url sourceNext: ""
+    property real transitionProgress: 0.0
+
     property int detail: 1
     property bool grayscale: false
 
@@ -20,6 +23,13 @@ Item {
     Image {
         id: sourceImg
         source: asciiRoot.source
+        visible: false
+        asynchronous: true
+    }
+
+    Image {
+        id: sourceNextImg
+        source: asciiRoot.sourceNext
         visible: false
         asynchronous: true
     }
@@ -64,9 +74,11 @@ Item {
         anchors.fill: parent
         
         property variant src: sourceImg
+        property variant srcNext: sourceNextImg
         property variant atlas: atlasGenerator 
 
         property real invAtlasCount: 1.0 / asciiChars.length
+        property real progress: asciiRoot.transitionProgress
 
         property size charSize: Qt.size(charWidth, charHeight)
         property size viewSize: Qt.size(width, height)
