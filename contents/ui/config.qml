@@ -75,7 +75,22 @@ Kirigami.ScrollablePage {
     Component.onCompleted: {
         imageList.clear();
 
+        let migrated = false;
         let currentImages = root.cfg_Images || [];
+
+        const oldImage = wallpaper.configuration.Image;
+        if (oldImage && String(oldImage).trim() !== "") {
+            const cleaned = String(oldImage).trim();
+            const alreadyExists = currentImages.some(p => String(p).trim() === cleaned);
+
+            if (!alreadyExists) {
+                currentImages.push(cleaned);
+            }
+
+            migrated = true;
+            wallpaper.configuration.Image = "";
+        }
+
         for (let i = 0; i < currentImages.length; i++) {
             if (String(currentImages[i]).trim() !== "") {
                 imageList.append({ "path": String(currentImages[i]).trim() });
@@ -84,6 +99,10 @@ Kirigami.ScrollablePage {
 
         if (imageList.count === 0 && root.cfg_Mode !== "Slideshow") {
             imageList.append({ "path": "" });
+        }
+
+        if (migrated) {
+            root.syncToConfig();
         }
 
         var all = Qt.fontFamilies()

@@ -9,6 +9,9 @@
     <entry name="Mode" type="String">
       <default>Image</default>
     </entry>
+    <entry name="Image" type="String">
+      <default></default>
+    </entry>
     <entry name="Images" type="StringList">
       <default></default>
     </entry>
