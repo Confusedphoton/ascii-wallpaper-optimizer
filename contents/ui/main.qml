@@ -77,6 +77,7 @@ WallpaperItem {
         
         detail: (wallpaper.configuration.Detail !== undefined) ? wallpaper.configuration.Detail : 1
         grayscale: wallpaper.configuration.Grayscale || false
+        fontFamily: wallpaper.configuration.FontFamily || "Monospace"
     }
 
     Component.onCompleted: {

@@ -16,12 +16,14 @@ Kirigami.ScrollablePage {
     property var configDialog
     property var wallpaperConfiguration
 
-    property list<string> cfg_Images: []
     property string cfg_Mode: "Image"
+    property string cfg_FontFamily: "Monospace"
+    property list<string> cfg_Images: []
+    property var monoFonts: []
+
     property alias cfg_Detail: detailSlider.value
     property alias cfg_Grayscale: grayscaleCheck.checked
     property alias cfg_SlideInterval: intervalSlider.value
-
 
     ListModel { id: imageList }
     property int _activePicker: -1
@@ -82,6 +84,24 @@ Kirigami.ScrollablePage {
         if (imageList.count === 0 && root.cfg_Mode !== "Slideshow") {
             imageList.append({ "path": "" });
         }
+
+        var all = Qt.fontFamilies()
+        var mono = []
+        for (var i = 0; i < all.length; i++) {
+            fontProbe.font = Qt.font({ family: all[i], pointSize: 12 })
+
+            var widthI = fontProbe.advanceWidth("i")
+            var widthW   = fontProbe.advanceWidth("W")
+            
+            if (widthI > 0 && widthI === widthW) {
+                mono.push(all[i])
+            }
+        }
+        monoFonts = mono.sort()
+    }
+
+    FontMetrics {
+        id: fontProbe
     }
 
     FileDialog {
@@ -306,11 +326,13 @@ Kirigami.ScrollablePage {
 
             Kirigami.Separator {
                 Kirigami.FormData.isSection: true
-                Kirigami.FormData.label: "Mode"
+                Kirigami.FormData.label: "Font & Mode"
             }
 
             Controls.ComboBox {
                 id: modeCombo
+                Layout.fillWidth: true
+
                 Kirigami.FormData.label: "Wallpaper Mode:"
                 
                 model: ["Image", "Slideshow"]
@@ -327,6 +349,32 @@ Kirigami.ScrollablePage {
 
                     if (root.configDialog) {
                         root.configDialog.changed = true;
+                    }
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Font Family:"
+
+                Controls.ComboBox {
+                    id: fontCombo
+                    Layout.fillWidth: true
+                    editable: true
+
+                    model: root.monoFonts
+
+                    onModelChanged: {
+                        currentIndex = find(root.cfg_FontFamily)
+                    }
+
+                    onActivated: {
+                        root.cfg_FontFamily = currentText
+                        if (root.configDialog) root.configDialog.changed = true
+                    }
+
+                    onAccepted: {
+                        root.cfg_FontFamily = editText
+                        if (root.configDialog) root.configDialog.changed = true
                     }
                 }
             }

@@ -14,12 +14,13 @@ Item {
 
     property int detail: 1
     property bool grayscale: false
+    property string fontFamily: "Monospace"
 
+    property var asciiChars: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@"]
+    
     readonly property int charWidth: [2, 4, 8][detail]
     readonly property int charHeight: charWidth * 2
     
-    property var asciiChars: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@"]
-
     Image {
         id: sourceImg
         source: asciiRoot.source
@@ -43,8 +44,19 @@ Item {
         visible: false
         renderTarget: Canvas.FramebufferObject
 
+        onAvailableChanged: if (available) requestPaint()
+        onVisibleChanged: if (visible) requestPaint()
+        Component.onCompleted: requestPaint()
+
         onWidthChanged: requestPaint()
         onHeightChanged: requestPaint()
+
+        Connections {
+            target: asciiRoot
+            function onFontFamilyChanged() {
+                atlasGenerator.requestPaint();
+            }
+        }
 
         onPaint: {
             var ctx = getContext("2d");
@@ -52,12 +64,12 @@ Item {
 
             ctx.reset();
             ctx.clearRect(0, 0, width, height);
-
-            ctx.font = charHeight + "px monospace";
-            ctx.textBaseline = "middle";
             
-            ctx.textAlign = "center";
             ctx.fillStyle = "white";
+
+            ctx.font = charHeight + "px " + fontFamily;
+            ctx.textBaseline = "middle";
+            ctx.textAlign = "center";
 
             let slotWidth = charWidth * 2;
             for (var i = 0; i < asciiChars.length; i++) {
@@ -65,9 +77,6 @@ Item {
                 ctx.fillText(asciiChars[i], xCenter, charHeight / 2);
             }
         }
-        onAvailableChanged: if (available) requestPaint()
-        onVisibleChanged: if (visible) requestPaint()
-        Component.onCompleted: requestPaint()
     }
 
     ShaderEffect {
