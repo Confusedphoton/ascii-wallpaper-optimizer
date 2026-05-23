@@ -18,6 +18,7 @@ Kirigami.ScrollablePage {
 
     property string cfg_Mode: "Image"
     property string cfg_FontFamily: "Monospace"
+    property list<string> cfg_AsciiChars: ["#", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@"]
     property list<string> cfg_Images: []
     property var monoFonts: []
 
@@ -268,6 +269,7 @@ Kirigami.ScrollablePage {
                         
                         detail: root.cfg_Detail
                         grayscale: root.cfg_Grayscale
+                        asciiChars: root.cfg_AsciiChars
                     }
                 }
 
@@ -326,14 +328,14 @@ Kirigami.ScrollablePage {
 
             Kirigami.Separator {
                 Kirigami.FormData.isSection: true
-                Kirigami.FormData.label: "Font & Mode"
+                Kirigami.FormData.label: "Source"
             }
 
             Controls.ComboBox {
                 id: modeCombo
                 Layout.fillWidth: true
 
-                Kirigami.FormData.label: "Wallpaper Mode:"
+                Kirigami.FormData.label: "Mode:"
                 
                 model: ["Image", "Slideshow"]
                 currentIndex: model.indexOf(root.cfg_Mode)
@@ -351,37 +353,6 @@ Kirigami.ScrollablePage {
                         root.configDialog.changed = true;
                     }
                 }
-            }
-
-            RowLayout {
-                Kirigami.FormData.label: "Font Family:"
-
-                Controls.ComboBox {
-                    id: fontCombo
-                    Layout.fillWidth: true
-                    editable: true
-
-                    model: root.monoFonts
-
-                    onModelChanged: {
-                        currentIndex = find(root.cfg_FontFamily)
-                    }
-
-                    onActivated: {
-                        root.cfg_FontFamily = currentText
-                        if (root.configDialog) root.configDialog.changed = true
-                    }
-
-                    onAccepted: {
-                        root.cfg_FontFamily = editText
-                        if (root.configDialog) root.configDialog.changed = true
-                    }
-                }
-            }
-
-            Kirigami.Separator {
-                Kirigami.FormData.isSection: true
-                Kirigami.FormData.label: "Wallpapers"
             }
 
             ColumnLayout {
@@ -450,8 +421,8 @@ Kirigami.ScrollablePage {
                         Controls.Button {
                             icon.name: "document-open"
 
+                            visible: root.cfg_Mode !== "Slideshow"
                             enabled: root.cfg_Mode !== "Slideshow"
-                            visible: root.cfg_Mode === "Slideshow" ? false : true
 
                             onClicked: {
                                 root._activePicker = index;
@@ -516,7 +487,83 @@ Kirigami.ScrollablePage {
 
             Kirigami.Separator {
                 Kirigami.FormData.isSection: true
-                Kirigami.FormData.label: "Adjustments"
+                Kirigami.FormData.label: "Appearance"
+            }
+
+            Controls.ComboBox {
+                id: fontCombo
+                Layout.fillWidth: true
+                editable: true
+
+                Kirigami.FormData.label: "Font Family:"
+
+                model: root.monoFonts
+
+                onModelChanged: {
+                    currentIndex = find(root.cfg_FontFamily)
+                }
+
+                onActivated: {
+                    root.cfg_FontFamily = currentText
+                    if (root.configDialog) root.configDialog.changed = true
+                }
+
+                onAccepted: {
+                    root.cfg_FontFamily = editText
+                    if (root.configDialog) root.configDialog.changed = true
+                }
+            }
+
+            ColumnLayout {
+                Kirigami.FormData.label: "Characters:"
+                Layout.fillWidth: true
+
+                Grid {
+                    Layout.fillWidth: true
+
+                    columns: 12
+                    spacing: Kirigami.Units.smallSpacing
+
+                    Repeater {
+                        model: root.cfg_AsciiChars
+
+                        delegate: Controls.TextField {
+                            width: Kirigami.Units.gridUnit * 1.15
+                            height: Kirigami.Units.gridUnit * 1.45
+
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                                                        
+                            text: modelData
+                            font.family: root.cfg_FontFamily
+
+                            maximumLength: 1
+
+                            color: activeFocus ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
+                            background: Rectangle {
+                                radius: Kirigami.Units.smallSpacing
+                                color: activeFocus
+                                    ? Kirigami.Theme.highlightColor
+                                    : Kirigami.Theme.alternateBackgroundColor
+                                border.width: 1
+                                border.color: activeFocus
+                                    ? Kirigami.Theme.highlightColor
+                                    : Qt.alpha(Kirigami.Theme.textColor, 0.2)
+                            }
+
+                            onEditingFinished: {
+                                let arr = Array.from(root.cfg_AsciiChars)
+
+                                arr[index] = text
+                                root.cfg_AsciiChars = arr
+
+                                if (root.configDialog) {
+                                    root.configDialog.changed = true
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             RowLayout {
@@ -547,7 +594,7 @@ Kirigami.ScrollablePage {
             }
 
             RowLayout {
-                Kirigami.FormData.label: "Slideshow Interval:"
+                Kirigami.FormData.label: "Interval:"
                 visible: root.cfg_Mode === "Slideshow"
 
                 Controls.Slider {
@@ -575,8 +622,7 @@ Kirigami.ScrollablePage {
 
             Controls.CheckBox {
                 id: grayscaleCheck
-                Kirigami.FormData.label: "Visual Style:"
-                text: "Enable Grayscale effect"
+                Kirigami.FormData.label: "Grayscaled:"
             }
         }
 

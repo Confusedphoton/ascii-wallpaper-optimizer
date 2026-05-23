@@ -15,9 +15,8 @@ Item {
     property int detail: 1
     property bool grayscale: false
     property string fontFamily: "Monospace"
-
     property var asciiChars: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@"]
-    
+
     readonly property int charWidth: [2, 4, 8][detail]
     readonly property int charHeight: charWidth * 2
     
@@ -38,7 +37,7 @@ Item {
     Canvas {
         id: atlasGenerator
         
-        width: asciiChars.length * (charWidth * 2)
+        width: (asciiChars ? asciiChars.length : 1) * (charWidth * 2)
         height: charHeight
 
         visible: false
@@ -53,12 +52,15 @@ Item {
 
         Connections {
             target: asciiRoot
-            function onFontFamilyChanged() {
-                atlasGenerator.requestPaint();
-            }
+            function onFontFamilyChanged() { atlasGenerator.requestPaint(); }
+            function onAsciiCharsChanged() { atlasGenerator.requestPaint(); }
         }
 
         onPaint: {
+            if (!asciiChars || asciiChars.length === 0) {
+                return;
+            }
+
             var ctx = getContext("2d");
             ctx.imageSmoothingEnabled = true;
 
@@ -86,13 +88,13 @@ Item {
         property variant srcNext: sourceNextImg
         property variant atlas: atlasGenerator 
 
-        property real invAtlasCount: 1.0 / asciiChars.length
+        property real invAtlasCount: asciiChars && asciiChars.length > 0 ? 1.0 / asciiChars.length : 1.0
         property real progress: asciiRoot.transitionProgress
 
         property size charSize: Qt.size(charWidth, charHeight)
         property size viewSize: Qt.size(width, height)
         
-        property int atlasCount: asciiChars.length
+        property int atlasCount: asciiChars ? asciiChars.length : 1
         property int isGrayscaled: asciiRoot.grayscale ? 1 : 0
 
         vertexShader: "shaders/ascii.vert.qsb"

@@ -78,6 +78,7 @@ WallpaperItem {
         detail: (wallpaper.configuration.Detail !== undefined) ? wallpaper.configuration.Detail : 1
         grayscale: wallpaper.configuration.Grayscale || false
         fontFamily: wallpaper.configuration.FontFamily || "Monospace"
+        asciiChars: wallpaper.configuration.AsciiChars || ["#", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@"]
     }
 
     Component.onCompleted: {
