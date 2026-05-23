@@ -78,6 +78,10 @@ Kirigami.ScrollablePage {
                 imageList.append({ "path": String(currentImages[i]).trim() });
             }
         }
+
+        if (imageList.count === 0 && root.cfg_Mode !== "Slideshow") {
+            imageList.append({ "path": "" });
+        }
     }
 
     FileDialog {
@@ -314,7 +318,11 @@ Kirigami.ScrollablePage {
 
                 onCurrentTextChanged: {
                     root.cfg_Mode = currentText
-        
+
+                    if (currentText !== "Slideshow" && imageList.count === 0) {
+                        imageList.append({ "path": "" });
+                        root.syncToConfig();
+                    }
 
                     if (root.configDialog) {
                         root.configDialog.changed = true
