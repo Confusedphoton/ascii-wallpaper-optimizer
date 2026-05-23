@@ -14,16 +14,26 @@ WallpaperItem {
     readonly property var configImages: wallpaper.configuration.Images || []
     readonly property int slideInterval: (wallpaper.configuration.SlideInterval !== undefined) ? wallpaper.configuration.SlideInterval : 10
 
+    readonly property string legacyImage: wallpaper.configuration.Image || ""
+
     property int currentIdx: 0
     property int nextIdx: 0
 
     function getImage(index) {
-        if (!configImages || configImages.length === undefined || configImages.length === 0 || index >= configImages.length) {
+        if (configImages && configImages.length !== undefined && configImages.length > 0) {
+            if (index < configImages.length) {
+                let raw = String(configImages[index] || "").trim();
+                return raw !== "" ? "file://" + raw : "";
+            }
+            
             return "";
         }
 
-        let raw = String(configImages[index] || "").trim();
-        return raw !== "" ? "file://" + raw : "";
+        if (legacyImage && legacyImage.trim() !== "") {
+            return "file://" + legacyImage.trim();
+        }
+
+        return "";
     }
 
     Timer {

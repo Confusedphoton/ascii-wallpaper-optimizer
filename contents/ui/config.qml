@@ -26,6 +26,8 @@ Kirigami.ScrollablePage {
     property alias cfg_Grayscale: grayscaleCheck.checked
     property alias cfg_SlideInterval: intervalSlider.value
 
+    property string cfg_Image: ""
+
     ListModel { id: imageList }
     property int _activePicker: -1
 
@@ -76,11 +78,10 @@ Kirigami.ScrollablePage {
         imageList.clear();
 
         let migrated = false;
-        let currentImages = root.cfg_Images || [];
+        let currentImages = Array.from(root.cfg_Images || []);
 
-        const oldImage = wallpaper.configuration.Image;
-        if (oldImage && String(oldImage).trim() !== "") {
-            const cleaned = String(oldImage).trim();
+        if (root.cfg_Image && root.cfg_Image.trim() !== "") {
+            const cleaned = root.cfg_Image.trim();
             const alreadyExists = currentImages.some(p => String(p).trim() === cleaned);
 
             if (!alreadyExists) {
@@ -88,7 +89,16 @@ Kirigami.ScrollablePage {
             }
 
             migrated = true;
-            wallpaper.configuration.Image = "";
+            root.cfg_Image = ""; 
+            root.cfg_Images = currentImages;
+        }
+
+        let currentChars = Array.from(root.cfg_AsciiChars || []);
+        if (currentChars.length === 23 && currentChars[0] !== " ") {
+            currentChars.unshift(" ");
+
+            migrated = true;
+            root.cfg_AsciiChars = currentChars;
         }
 
         for (let i = 0; i < currentImages.length; i++) {
