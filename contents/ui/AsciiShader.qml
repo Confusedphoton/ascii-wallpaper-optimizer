@@ -79,9 +79,14 @@ Item {
                 ctx.fillText(asciiChars[i], xCenter, charHeight / 2);
             }
         }
+
+        onPainted: {
+            asciiShader.update();
+        }
     }
 
     ShaderEffect {
+        id: asciiShader
         anchors.fill: parent
         
         property variant src: sourceImg
