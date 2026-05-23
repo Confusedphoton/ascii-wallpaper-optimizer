@@ -13,7 +13,8 @@
     </div>
     </br>
     <p>
-        ASCII Wallpapers is a wallpaper addon for KDE Plasma transforming any static image into ASCII-Art.<br>Choose between different degrees of details and toggle grayscale for a monochrome look.
+        ASCII Wallpapers is a wallpaper addon for KDE Plasma transforming any static image into ASCII-Art.<br>
+        Choose your font and character set, adjust detail-level and grayscale and switch between image and slideshow mode!
     </p>
     <br>
 </div>
@@ -46,10 +47,10 @@
 </table>
 
 
-<img src="screenshots/settings_image.png" width="600"/>
+<img src="screenshots/settings.png" width="600"/>
 
 
-<em>The Wallpaper Settings Configuration Page (Image Mode)</em>
+<em>The Wallpaper Settings Configuration Page</em>
 </div>
 
 <h3>How does it work?</h3>
