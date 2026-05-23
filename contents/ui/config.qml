@@ -316,16 +316,17 @@ Kirigami.ScrollablePage {
                 model: ["Image", "Slideshow"]
                 currentIndex: model.indexOf(root.cfg_Mode)
 
-                onCurrentTextChanged: {
-                    root.cfg_Mode = currentText
+                onActivated: (index) => {
+                    let newMode = model[index];
+                    root.cfg_Mode = newMode;
 
-                    if (currentText !== "Slideshow" && imageList.count === 0) {
+                    if (newMode !== "Slideshow" && imageList.count === 0) {
                         imageList.append({ "path": "" });
                         root.syncToConfig();
                     }
 
                     if (root.configDialog) {
-                        root.configDialog.changed = true
+                        root.configDialog.changed = true;
                     }
                 }
             }
@@ -406,6 +407,8 @@ Kirigami.ScrollablePage {
 
                             onClicked: {
                                 root._activePicker = index;
+
+                                imagePicker.fileMode = FileDialog.OpenFile;
                                 imagePicker.open();
                             }
                         }
