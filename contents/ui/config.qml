@@ -18,7 +18,7 @@ Kirigami.ScrollablePage {
 
     property string cfg_Mode: "Image"
     property string cfg_FontFamily: "Monospace"
-    property list<string> cfg_AsciiChars: ["#", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@"]
+    property list<string> cfg_AsciiChars: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@"]
     property list<string> cfg_Images: []
     property var monoFonts: []
 

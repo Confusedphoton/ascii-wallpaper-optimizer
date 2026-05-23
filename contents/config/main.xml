@@ -24,7 +24,7 @@
       <default>1</default>
     </entry>
     <entry name="AsciiChars" type="StringList">
-      <default> ,.,´,:,r,s,z,u,n,v,c,x,L,O,G,D,Q,0,K,N,M,W,&amp;,@</default>
+      <default>\s,.,´,:,r,s,z,u,n,v,c,x,L,O,G,D,Q,0,K,N,M,W,&amp;,@</default>
     </entry>
     <entry name="FontFamily" type="String">
       <default>Monospace</default>
