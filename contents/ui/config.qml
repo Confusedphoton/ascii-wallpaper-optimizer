@@ -71,7 +71,20 @@ Kirigami.ScrollablePage {
     }
 
     function cleanPath(url) {
-        return url.replace(/^file:\/{2}/,"").trim();
+        const stripped = String(url).replace(/^file:\/{2}/, "").trim();
+        
+        try {
+            return decodeURIComponent(stripped);
+        } catch (e) {
+            return stripped;
+        }
+    }
+
+    function toFileUrl(path) {
+        if (!path) return "";
+        const clean = String(path).trim();
+        if (clean === "") return "";
+        return "file://" + clean.split("/").map(encodeURIComponent).join("/");
     }
 
     Component.onCompleted: {
@@ -102,9 +115,15 @@ Kirigami.ScrollablePage {
         }
 
         for (let i = 0; i < currentImages.length; i++) {
-            if (String(currentImages[i]).trim() !== "") {
-                imageList.append({ "path": String(currentImages[i]).trim() });
+            const original = String(currentImages[i]).trim();
+            if (original === "") continue;
+
+            const decoded = root.cleanPath(original);
+            if (decoded !== original) {
+                migrated = true;
             }
+
+            imageList.append({ "path": decoded });
         }
 
         if (imageList.count === 0 && root.cfg_Mode !== "Slideshow") {
@@ -158,7 +177,7 @@ Kirigami.ScrollablePage {
                     }
 
                     if (!exists) {
-                        imageList.append({ "path": file.toString() });
+                        imageList.append({ "path": clean });
                     }
                 }
             } else {
@@ -178,7 +197,7 @@ Kirigami.ScrollablePage {
                     }
 
                     if (!duplicate) {
-                        imageList.setProperty(_activePicker, "path", selectedFile.toString())
+                        imageList.setProperty(_activePicker, "path", clean)
                     }
                 }
 
@@ -247,7 +266,7 @@ Kirigami.ScrollablePage {
                     }
 
                     let path = imageList.get(index).path;
-                    return path.startsWith("file://") ? path : "file://" + path;
+                    return root.toFileUrl(path);
                 }
 
                 Timer {
@@ -658,3 +677,4 @@ Kirigami.ScrollablePage {
         Item { Layout.fillHeight: true }
     }
 }
+

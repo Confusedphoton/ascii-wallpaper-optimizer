@@ -12,9 +12,25 @@ WallpaperItem {
 
     readonly property string mode: wallpaper.configuration.Mode || "Image"
     readonly property var configImages: wallpaper.configuration.Images || []
-    readonly property int slideInterval: (wallpaper.configuration.SlideInterval !== undefined) ? wallpaper.configuration.SlideInterval : 10
+    readonly property int slideInterval: {
+        let v = (wallpaper.configuration.SlideInterval !== undefined) ? wallpaper.configuration.SlideInterval : 10;
+        return Math.max(5, v);
+    }
 
     readonly property string legacyImage: wallpaper.configuration.Image || ""
+
+    readonly property var defaultAsciiChars: ["#", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@"]
+    readonly property var asciiChars: {
+        let chars = wallpaper.configuration.AsciiChars;
+        return (chars && chars.length > 0) ? chars : root.defaultAsciiChars;
+    }
+
+    function toFileUrl(rawPath) {
+        if (!rawPath) return "";
+        const clean = String(rawPath).trim();
+        if (clean === "") return "";
+        return "file://" + clean.split("/").map(encodeURIComponent).join("/");
+    }
 
     property int currentIdx: 0
     property int nextIdx: 0
@@ -23,14 +39,14 @@ WallpaperItem {
         if (configImages && configImages.length !== undefined && configImages.length > 0) {
             if (index < configImages.length) {
                 let raw = String(configImages[index] || "").trim();
-                return raw !== "" ? "file://" + raw : "";
+                return raw !== "" ? root.toFileUrl(raw) : "";
             }
             
             return "";
         }
 
         if (legacyImage && legacyImage.trim() !== "") {
-            return "file://" + legacyImage.trim();
+            return root.toFileUrl(legacyImage.trim());
         }
 
         return "";
@@ -88,7 +104,7 @@ WallpaperItem {
         detail: (wallpaper.configuration.Detail !== undefined) ? wallpaper.configuration.Detail : 1
         grayscale: wallpaper.configuration.Grayscale || false
         fontFamily: wallpaper.configuration.FontFamily || "Monospace"
-        asciiChars: wallpaper.configuration.AsciiChars || ["#", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@"]
+        asciiChars: root.asciiChars
     }
 
     Component.onCompleted: {

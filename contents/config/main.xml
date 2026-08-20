@@ -24,7 +24,9 @@
       0: 2x4
      -->
     <entry name="Detail" type="Int">
-      <default>1</default>
+        <default>1</default>
+        <min>0</min>
+        <max>2</max>
     </entry>
     <entry name="AsciiChars" type="StringList">
       <default>\s,.,´,:,r,s,z,u,n,v,c,x,L,O,G,D,Q,0,K,N,M,W,&amp;,@</default>
@@ -36,7 +38,9 @@
       <default>false</default>
     </entry>
     <entry name="SlideInterval" type="Int">
-      <default>10</default>
+        <default>10</default>
+        <min>5</min>
+        <max>3600</max>
     </entry>
   </group>
 </kcfg>
