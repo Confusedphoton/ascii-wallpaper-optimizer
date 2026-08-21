@@ -8,6 +8,7 @@ import QtQuick
 import QtQuick.Controls as Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
+import QtQuick.Effects
 import org.kde.kirigami as Kirigami
 
 Kirigami.ScrollablePage {
@@ -217,22 +218,40 @@ Kirigami.ScrollablePage {
         anchors.right: parent.right
         spacing: Kirigami.Units.largeSpacing
 
-        // --- Preview ---
-        Kirigami.Card {
+        // --- Preview Card ---
+        Kirigami.ShadowedRectangle {
             id: previewCard
 
             Layout.alignment: Qt.AlignHCenter
             Layout.fillWidth: true
             Layout.maximumWidth: Kirigami.Units.gridUnit * 25
-            Layout.preferredHeight: (width * 9) / 16
             
-            contentItem: Item {
+            implicitHeight: (width * 9) / 16
+
+            Kirigami.Theme.colorSet: Kirigami.Theme.View
+            Kirigami.Theme.inherit: false
+
+            color: Kirigami.Theme.backgroundColor
+            
+            border.color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.15)
+            border.width: 1
+            
+            radius: Kirigami.Units.largeSpacing
+
+            shadow.size: 4
+            shadow.yOffset: 2
+            shadow.color: Qt.rgba(0, 0, 0, 0.1)
+
+            Item {
                 id: previewContainer
+
+                anchors.fill: parent
+                anchors.margins: Kirigami.Units.smallSpacing
+
                 clip: true
 
                 property int currentIdx: 0
                 property int nextIdx: 0
-
 
                 function resetPreview() {
                     previewTimer.stop();
@@ -305,8 +324,8 @@ Kirigami.ScrollablePage {
                 Item {
                     id: offscreenBuffer
 
-                    width: 1280
-                    height: 720
+                    width: 854
+                    height: 480
 
                     AsciiShader {
                         id: previewShader
@@ -317,8 +336,18 @@ Kirigami.ScrollablePage {
                         
                         detail: root.cfg_Detail
                         grayscale: root.cfg_Grayscale
+                        fontFamily: root.cfg_FontFamily
                         asciiChars: root.cfg_AsciiChars
                     }
+                }
+
+                Rectangle {
+                    id: maskRect
+                    anchors.fill: parent
+                    radius: Kirigami.Units.mediumSpacing
+                    
+                    visible: false
+                    layer.enabled: true
                 }
 
                 ShaderEffectSource {
@@ -326,19 +355,25 @@ Kirigami.ScrollablePage {
                     sourceItem: offscreenBuffer
 
                     anchors.fill: parent
-                    anchors.centerIn: parent
-                    
-                    textureSize: Qt.size(1280, 720)
-                    width: parent.width
-                    height: parent.height
-                    
-                    samples: 5
-                    mipmap: true
+                    textureSize: Qt.size(854, 480)
+                    format: ShaderEffectSource.RGBA8
+
+                    mipmap: false
                     smooth: true
+                    samples: 0
 
                     live: true
-                    recursive: true
                     hideSource: true
+                    recursive: false
+                    
+                    visible: false
+                }
+
+                MultiEffect {
+                    anchors.fill: parent
+                    source: previewImage
+                    maskEnabled: true
+                    maskSource: maskRect
                 }
 
                 Controls.Label {
@@ -430,7 +465,6 @@ Kirigami.ScrollablePage {
                                 visible: root.cfg_Mode === "Slideshow"
                                 enabled: visible && index > 0
 
-                                
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
 
@@ -677,4 +711,3 @@ Kirigami.ScrollablePage {
         Item { Layout.fillHeight: true }
     }
 }
-
