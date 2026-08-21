@@ -17,6 +17,20 @@ Item {
     property string fontFamily: "Monospace"
     property var asciiChars: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@"]
 
+    property real autoCropThreshold: 1.35
+
+    function _resolveFillMode(imgItem) {
+        if (!imgItem || imgItem.implicitWidth <= 0 || imgItem.implicitHeight <= 0
+                || asciiRoot.width <= 0 || asciiRoot.height <= 0) {
+            return Image.PreserveAspectCrop;
+        }
+
+        const ratio = (imgItem.implicitWidth * asciiRoot.height) / (imgItem.implicitHeight * asciiRoot.width);
+        const mismatched = ratio > asciiRoot.autoCropThreshold || ratio < 1 / asciiRoot.autoCropThreshold;
+
+        return mismatched ? Image.PreserveAspectFit : Image.PreserveAspectCrop;
+    }
+
     readonly property int charWidth: [2, 4, 8][Math.max(0, Math.min(2, detail))]
     readonly property int charHeight: charWidth * 2
     
@@ -25,6 +39,13 @@ Item {
         source: asciiRoot.source
         visible: false
         asynchronous: true
+
+        width: asciiRoot.width
+        height: asciiRoot.height
+        fillMode: asciiRoot._resolveFillMode(sourceImg)
+
+        layer.enabled: true
+        layer.smooth: true
     }
 
     Image {
@@ -32,6 +53,13 @@ Item {
         source: asciiRoot.sourceNext
         visible: false
         asynchronous: true
+
+        width: asciiRoot.width
+        height: asciiRoot.height
+        fillMode: asciiRoot._resolveFillMode(sourceNextImg)
+
+        layer.enabled: true
+        layer.smooth: true
     }
 
     Canvas {
