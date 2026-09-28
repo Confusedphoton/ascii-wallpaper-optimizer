@@ -21,11 +21,8 @@
   </group>
 
   <group name="Options">
-    <!-- ASCII - Level of Detail
-      2: 8x16  
-      1: 4x8
-      0: 2x4
-     -->
+    <!-- Target columns on a 2560-pixel-wide display: 0=180, 1=120, 2=80.
+         Cell size scales with the display resolution. -->
     <entry name="Detail" type="Int">
         <default>1</default>
         <min>0</min>

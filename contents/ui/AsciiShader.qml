@@ -18,7 +18,7 @@ Item {
 
     readonly property bool ready: glyphMap.status === Image.Ready
         && colorMap.status === Image.Ready && atlasImage.status === Image.Ready
-        && metadataImage.status === Image.Ready
+        && metadataImage.status === Image.Ready && backgroundMap.status === Image.Ready
 
     readonly property bool transitioning: currentIndex !== nextIndex
     readonly property int frameIndex: Math.min(transitionFrames - 1,
@@ -61,6 +61,16 @@ Item {
     }
 
     Image {
+        id: backgroundMap
+        source: asciiRoot.mapPath("background")
+        visible: false
+        smooth: false
+        cache: true
+        layer.enabled: true
+        asynchronous: true
+    }
+
+    Image {
         id: atlasImage
         source: asciiRoot.fileUrl("atlas.png")
         visible: false
@@ -86,6 +96,7 @@ Item {
         blending: false
         property variant glyphs: glyphMap
         property variant colors: colorMap
+        property variant backgrounds: backgroundMap
         property variant atlas: atlasImage
         property variant metadata: metadataImage
         property size gridSize: Qt.size(glyphMap.implicitWidth, glyphMap.implicitHeight)

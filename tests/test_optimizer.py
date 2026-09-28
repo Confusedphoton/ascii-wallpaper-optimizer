@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from ascii_optimizer.assets import blue_noise
+from ascii_optimizer.assets import blue_noise, cell_for_display
 from ascii_optimizer.cli import build
 from ascii_optimizer.optimizer import Grid, _loss, render_grid, solve
 from ascii_optimizer.service import _validated_request
@@ -21,6 +21,24 @@ def test_render_uses_mask_once_and_preserves_linear_color():
     image = render_grid(grid, masks)
     np.testing.assert_allclose(image[0, 1], [0.4, 0.2, 0.1], atol=1e-6)
     np.testing.assert_allclose(image[1, 0], [0.8, 0.4, 0.2], atol=1e-6)
+
+
+def test_underpaint_fills_glyph_gaps_without_changing_full_coverage():
+    masks = np.array([[[0.0, 0.5], [1.0, 0.25]]], dtype=np.float32)
+    grid = Grid(np.array([[0]], dtype=np.uint8),
+                np.array([[[0.8, 0.4, 0.2]]], dtype=np.float32),
+                np.array([[[0.2, 0.3, 0.4]]], dtype=np.float32))
+    image = render_grid(grid, masks)
+    np.testing.assert_allclose(image[0, 0], [0.2, 0.3, 0.4], atol=1e-6)
+    np.testing.assert_allclose(image[0, 1], [0.5, 0.35, 0.3], atol=1e-6)
+    np.testing.assert_allclose(image[1, 0], [0.8, 0.4, 0.2], atol=1e-6)
+
+
+def test_detail_uses_physical_display_size():
+    cells = [cell_for_display((2560, 1600), detail) for detail in range(3)]
+    assert cells == [(14, 28), (21, 42), (32, 64)]
+    assert [(2560 + w - 1) // w for w, _ in cells] == [183, 122, 80]
+    assert cell_for_display((1280, 800), 2) == (16, 32)
 
 
 def test_full_frame_loss_couples_cells_across_boundary():
@@ -82,7 +100,7 @@ def test_batch_transition_endpoints_equal_stills(tmp_path: Path, capsys):
         candidates=3, dither=0.003, seed=1, device="cpu", force=False)
     build(args)
     pair = output / "transitions" / "0000-0001"
-    for kind in ("glyph", "color"):
+    for kind in ("glyph", "color", "background"):
         assert (pair / "0000" / f"{kind}.png").read_bytes() == (output / "stills" / "0000" / f"{kind}.png").read_bytes()
         assert (pair / "0002" / f"{kind}.png").read_bytes() == (output / "stills" / "0001" / f"{kind}.png").read_bytes()
     assert json.loads((output / "manifest.json").read_text())["frame_count"] == 3
@@ -92,3 +110,7 @@ def test_batch_transition_endpoints_equal_stills(tmp_path: Path, capsys):
     assert tuple(metadata[0, 1]) == (0, 9, 4)
     build(args)
     assert "Already rendered" in capsys.readouterr().out
+    args.dither = 0.02
+    build(args)
+    assert json.loads((output / "manifest.json").read_text())["signature"]["dither"] == 0.02
+    assert "Already rendered" not in capsys.readouterr().out

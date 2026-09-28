@@ -32,6 +32,7 @@ Item {
     property int fontScanIndex: 0
     property bool fontScanStarted: false
     property int renderRevision: 0
+    property bool controlsReady: false
 
     property alias cfg_Detail: detailSlider.value
     property alias cfg_Grayscale: grayscaleCheck.checked
@@ -172,6 +173,7 @@ Item {
     Component.onCompleted: {
         loadFromConfig()
         fontCombo.editText = cfg_FontFamily
+        Qt.callLater(function() { root.controlsReady = true })
     }
 
     function startFontScan() {
@@ -829,13 +831,17 @@ Item {
                 }
                 
                 Controls.Label {
-                    Layout.preferredWidth: Kirigami.Units.gridUnit * 7
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 10
                     
                     text: {
-                        let w = (detailSlider.value === 0) ? 2 : (detailSlider.value === 1 ? 4 : 8);
-                        let h = w * 2;
+                        const columns = [180, 120, 80][detailSlider.value];
+                        const physicalWidth = Math.round(Screen.width * Screen.devicePixelRatio);
+                        const physicalHeight = Math.round(Screen.height * Screen.devicePixelRatio);
+                        const cellWidth = Math.min(127, Math.max(2, Math.round(physicalWidth / columns)));
+                        const rows = Math.ceil(physicalHeight / (cellWidth * 2));
+                        const actualColumns = Math.ceil(physicalWidth / cellWidth);
                         let labels = [" (High Detail)", " (Mid Detail)", " (Low Detail)"];
-                        return w + "x" + h + labels[detailSlider.value];
+                        return actualColumns + "×" + rows + labels[detailSlider.value];
                     }
                     font.weight: Font.Bold
                 }
@@ -850,10 +856,13 @@ Item {
                     from: 0
                     to: 0.05
                     stepSize: 0.001
-                    onMoved: if (root.configDialog) root.configDialog.changed = true
+                    onValueChanged: {
+                        if (root.controlsReady && root.configDialog)
+                            root.configDialog.changed = true
+                    }
                 }
                 Controls.Label {
-                    Layout.preferredWidth: Kirigami.Units.gridUnit * 7
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 10
                     text: ditherSlider.value.toFixed(3)
                 }
             }

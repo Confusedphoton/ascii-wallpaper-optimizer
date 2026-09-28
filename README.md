@@ -2,7 +2,7 @@
 
 This fork of [ASCII Wallpaper](https://gitlab.com/Korvexx/ascii-wallpaper) renders KDE Plasma wallpapers with an offline numerical optimizer. It chooses font glyphs and their foreground colors by scoring the actual rendered pixels, including structure across character cells. Slideshow transitions are sequences of optimized glyph/color grids: one character occupies each cell at every instant, without blending two ASCII images on screen.
 
-The Plasma package displays prepared assets. A small local service starts rendering when images or appearance settings change. It runs PyTorch in a separate process, so opening wallpaper settings does not load the numerical runtime into Plasma. Rendering can take time, especially at the 2×4 detail level or for a slideshow. PyTorch can run the solve on a CPU or CUDA GPU.
+The Plasma package displays prepared assets. A small local service starts rendering when images or appearance settings change. It runs PyTorch in a separate process, so opening wallpaper settings does not load the numerical runtime into Plasma. Rendering can take time, especially with a dense grid or a slideshow. PyTorch can run the solve on a CPU or CUDA GPU.
 
 ## Install and prepare a wallpaper
 
@@ -35,7 +35,7 @@ The rendered directory contains `atlas.png`, `metadata.png`, still grids, transi
 
 ## Quality controls
 
-- `--detail 0`, `1`, `2` uses 2×4, 4×8, or 8×16 pixel cells. `--cell WIDTHxHEIGHT` overrides this; the prepared asset's metadata controls playback cell size.
+- `--detail 0`, `1`, `2` targets about 180, 120, or 80 columns on a 2560-pixel-wide display. Cell dimensions scale with the monitor's physical resolution, keeping character density similar across displays. `--cell WIDTHxHEIGHT` overrides this; the prepared asset's metadata controls playback cell size.
 - `--chars ' ...'` sets the exact glyph set. Include a literal leading space if desired. Characters must be unique, and the Plasma character list must match the rendered assets.
 - `--crop fill` fills the display by cropping; `--crop fit` letterboxes onto black. `--grayscale` converts the source before optimization.
 - `--dither` controls deterministic, spectrally filtered blue noise in glyph selection; `0` disables it. `--seed` makes the result reproducible.
@@ -44,7 +44,7 @@ The rendered directory contains `atlas.png`, `metadata.png`, still grids, transi
 
 ## How the optimizer works
 
-The renderer rasterizes each glyph from the selected font at final cell size. It fits a foreground color in linear light for each candidate, then optimizes candidate weights and colors against a full-frame objective with pixel, multiscale color, and edge terms. This full-frame step includes neighboring cells, so tiles are never independently finalized. A final color pass runs with discrete glyphs. The character mask is applied once, avoiding the old shader's double reduction of brightness.
+The renderer rasterizes each glyph from the selected font at final cell size. It fits a foreground color in linear light for each candidate, then optimizes candidate weights and colors against a full-frame objective with pixel, multiscale color, and edge terms. This full-frame step includes neighboring cells, so tiles are never independently finalized. A final color pass runs with discrete glyphs. A restrained, smoothed color beneath the glyphs reduces repeated dark gaps along font rows and columns. The character mask is applied once, avoiding the old shader's double reduction of brightness.
 
 For each slideshow pair, the offline solver starts and ends at the exact optimized stills. Intermediate grids are optimized with temporal shape and color penalties plus a blue noise change schedule. Plasma chooses the prepared frame and draws its glyphs; it performs no pixel crossfade or optimization at display time.
 

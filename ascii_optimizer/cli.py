@@ -12,7 +12,7 @@ import torch
 from PIL import Image
 
 from . import __version__
-from .assets import glyph_masks, linear_to_srgb, load_target, resolve_font, save_atlas, save_metadata
+from .assets import cell_for_display, glyph_masks, linear_to_srgb, load_target, resolve_font, save_atlas, save_metadata
 from .optimizer import Grid, render_grid, solve
 
 
@@ -45,6 +45,9 @@ def _save_grid(grid: Grid, directory: Path, preview: bool, masks: np.ndarray,
     Image.fromarray(indices, "RGB").save(directory / "glyph.png")
     color = linear_to_srgb(torch.as_tensor(grid.color)).numpy()
     Image.fromarray(np.rint(color * 255).astype(np.uint8), "RGB").save(directory / "color.png")
+    background = (np.zeros_like(grid.color) if grid.background is None else grid.background)
+    background_color = linear_to_srgb(torch.as_tensor(background)).numpy()
+    Image.fromarray(np.rint(background_color * 255).astype(np.uint8), "RGB").save(directory / "background.png")
     if preview:
         pixels = render_grid(grid, masks)[:size[1], :size[0]]
         color = linear_to_srgb(torch.as_tensor(pixels)).numpy()
@@ -56,7 +59,9 @@ def _load_grid(directory: Path) -> Grid:
     encoded = np.asarray(Image.open(directory / "color.png").convert("RGB"), dtype=np.float32) / 255
     from .assets import srgb_to_linear
     color = srgb_to_linear(torch.as_tensor(encoded)).numpy()
-    return Grid(glyph, color)
+    encoded_background = np.asarray(Image.open(directory / "background.png").convert("RGB"), dtype=np.float32) / 255
+    background = srgb_to_linear(torch.as_tensor(encoded_background)).numpy()
+    return Grid(glyph, color, background)
 
 
 def build(args: argparse.Namespace) -> None:
@@ -76,7 +81,7 @@ def build(args: argparse.Namespace) -> None:
     chars = list(args.chars)
     if not chars or len(chars) > 256 or len(set(chars)) != len(chars):
         raise ValueError("Characters must be 1 to 256 distinct glyphs")
-    cell = args.cell or ((2, 4), (4, 8), (8, 16))[args.detail]
+    cell = args.cell or cell_for_display(args.size, args.detail)
     masks = glyph_masks(font, chars, cell)
     images = [path.expanduser().resolve() for path in args.images]
     for path in images:
@@ -99,10 +104,10 @@ def build(args: argparse.Namespace) -> None:
         try:
             old = json.loads(manifest.read_text())
             expected_stills = [output / "stills" / f"{i:04d}" / f"{kind}.png"
-                               for i in range(len(images)) for kind in ("glyph", "color", "preview")]
+                               for i in range(len(images)) for kind in ("glyph", "color", "background", "preview")]
             expected_pairs = [output / "transitions" / f"{i:04d}-{(i+1)%len(images):04d}" / f"{frame:04d}" / f"{kind}.png"
                               for i in range(len(images)) for frame in range(args.frames)
-                              for kind in ("glyph", "color")] if len(images) > 1 else []
+                              for kind in ("glyph", "color", "background")] if len(images) > 1 else []
             if (old.get("signature") == signature and (output / "atlas.png").exists()
                     and (output / "metadata.png").exists()
                     and all(p.exists() for p in expected_stills + expected_pairs)):
@@ -124,7 +129,7 @@ def build(args: argparse.Namespace) -> None:
         still_dir = output / "stills" / f"{index:04d}"
         if (settings_match and index < len(old_hashes)
                 and old_hashes[index] == signature["image_hashes"][index]
-                and all((still_dir / f"{kind}.png").exists() for kind in ("glyph", "color", "preview"))):
+                and all((still_dir / f"{kind}.png").exists() for kind in ("glyph", "color", "background", "preview"))):
             print(f"Reusing still {index + 1}/{len(images)}", flush=True)
             stills.append(_load_grid(still_dir))
             completed_units += 1
@@ -147,7 +152,7 @@ def build(args: argparse.Namespace) -> None:
                     and old_hashes[index] == signature["image_hashes"][index]
                     and old_hashes[following] == signature["image_hashes"][following]
                     and all((base / f"{frame:04d}" / f"{kind}.png").exists()
-                            for frame in range(args.frames) for kind in ("glyph", "color"))):
+                            for frame in range(args.frames) for kind in ("glyph", "color", "background"))):
                 print(f"Reusing transition {index + 1}/{len(images)}", flush=True)
                 completed_units += args.frames - 2
                 report(0.0, f"Reused transition {index + 1}/{len(images)}")

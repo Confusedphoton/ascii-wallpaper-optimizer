@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import __version__
 
 PORT = 48741
 ADDRESS = "127.0.0.1"
@@ -62,9 +63,15 @@ def _validated_request(raw: dict) -> dict:
     size = _screen_size(str(raw.get("screen", "")), hint)
     if any(not 1 <= value <= 16384 for value in size):
         raise ValueError("Invalid physical display size.")
-    image_stats = [(Path(path).stat().st_size, Path(path).stat().st_mtime_ns) for path in images]
+    image_hashes = []
+    for path in images:
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        image_hashes.append(digest.hexdigest())
     return {
-        "images": images, "image_stats": image_stats, "font": str(raw["font"]),
+        "version": __version__, "images": images, "image_hashes": image_hashes, "font": str(raw["font"]),
         "chars": chars, "detail": detail, "grayscale": bool(raw["grayscale"]),
         "frames": frames, "dither": dither, "size": list(size),
     }

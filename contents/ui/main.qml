@@ -18,7 +18,6 @@ WallpaperItem {
         return Math.max(5, v);
     }
 
-    readonly property string renderDirectory: wallpaper.configuration.RenderDirectory || ""
     readonly property int transitionFrames: wallpaper.configuration.TransitionFrames || 16
     property int renderRevision: 0
 
@@ -94,7 +93,7 @@ WallpaperItem {
         id: shaderContainer
         anchors.fill: parent
         
-        renderDirectory: renderer.renderState === "ready" ? renderer.directory : root.renderDirectory
+        renderDirectory: renderer.renderState === "ready" ? renderer.directory : ""
         currentIndex: root.currentIdx
         nextIndex: root.nextIdx
         transitionFrames: root.transitionFrames

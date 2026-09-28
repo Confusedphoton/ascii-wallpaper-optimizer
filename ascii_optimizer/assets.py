@@ -9,6 +9,16 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 
+DETAIL_COLUMNS = (180, 120, 80)
+
+
+def cell_for_display(size: tuple[int, int], detail: int) -> tuple[int, int]:
+    """Keep character density stable across monitor resolutions."""
+    target_columns = DETAIL_COLUMNS[detail]
+    width = min(127, max(2, round(size[0] / target_columns)))
+    return width, width * 2
+
+
 def resolve_font(name: str) -> Path:
     candidate = Path(name).expanduser()
     if candidate.is_file():
