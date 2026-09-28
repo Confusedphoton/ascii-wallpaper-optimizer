@@ -6,3 +6,4 @@ __pycache__/
 *.egg-info/
 rendered/
 screenshots/test_image.png
+dist/

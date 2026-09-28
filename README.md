@@ -9,10 +9,11 @@ The Plasma package only plays prepared assets. Rendering can take time, especial
 Install the Plasma wallpaper package from this directory:
 
 ```sh
-kpackagetool6 --type Plasma/Wallpaper --install "$PWD"
+python3 scripts/build_plasma_package.py
+kpackagetool6 --type Plasma/Wallpaper --install "$PWD/dist/plasma-wallpaper"
 ```
 
-For subsequent updates, use `--upgrade "$PWD"` instead of `--install "$PWD"`.
+For subsequent updates, rebuild the package, then use `--upgrade "$PWD/dist/plasma-wallpaper"` instead of `--install`. The staged package contains only Plasma files; the offline renderer stays in the project directory.
 
 Install the Python renderer in a virtual environment:
 
