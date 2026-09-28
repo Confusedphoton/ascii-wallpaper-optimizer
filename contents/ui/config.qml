@@ -358,7 +358,7 @@ Item {
             Layout.fillWidth: true
             Layout.maximumWidth: Kirigami.Units.gridUnit * 25
             
-            implicitHeight: (width * 9) / 16
+            implicitHeight: width * renderer.physicalHeight / Math.max(1, renderer.physicalWidth)
 
             Kirigami.Theme.colorSet: Kirigami.Theme.View
             Kirigami.Theme.inherit: false
@@ -413,7 +413,7 @@ Item {
                 Image {
                     anchors.fill: parent
                     source: previewContainer.getPreviewPath(previewContainer.currentIdx)
-                    sourceSize: Qt.size(854, 480)
+                    sourceSize: Qt.size(offscreenBuffer.width, offscreenBuffer.height)
                     fillMode: Image.PreserveAspectCrop
                     asynchronous: true
                     visible: renderer.renderState !== "ready" || !previewShader.ready
@@ -457,7 +457,8 @@ Item {
                     id: offscreenBuffer
 
                     width: 854
-                    height: 480
+                    height: Math.max(1, Math.round(width * renderer.physicalHeight
+                        / Math.max(1, renderer.physicalWidth)))
 
                     AsciiShader {
                         id: previewShader
@@ -486,7 +487,7 @@ Item {
                     sourceItem: offscreenBuffer
 
                     anchors.fill: parent
-                    textureSize: Qt.size(854, 480)
+                    textureSize: Qt.size(offscreenBuffer.width, offscreenBuffer.height)
                     format: ShaderEffectSource.RGBA8
 
                     mipmap: false
