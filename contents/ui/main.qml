@@ -35,6 +35,12 @@ WallpaperItem {
         grayscale: !!wallpaper.configuration.Grayscale
         frames: root.transitionFrames
         dither: (wallpaper.configuration.Dither !== undefined) ? wallpaper.configuration.Dither : 0.005
+        structureDither: (wallpaper.configuration.StructureDither !== undefined)
+            ? wallpaper.configuration.StructureDither : 0.06
+        renderStyle: wallpaper.configuration.RenderStyle || "headroom"
+        invertInk: !!wallpaper.configuration.InvertInk
+        background: wallpaper.configuration.BackgroundMode === 1
+            ? (wallpaper.configuration.BackgroundColor || "#202028") : "auto"
         onRenderStateChanged: if (renderState === "ready") root.renderRevision++
     }
 

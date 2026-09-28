@@ -16,7 +16,7 @@ python3 -m venv .venv
 
 If your Python installation does not include `pip`, `uv venv .venv` and `uv pip install --python .venv/bin/python -e .` work as well. Run the installer again after updating the project. It upgrades the Plasma package and restarts the local user service. Reopen wallpaper settings to load the updated QML.
 
-In Plasma's wallpaper settings, select **ASCII Wallpaper Optimizer** and choose an image or slideshow. Rendering starts automatically. A progress bar and status message appear in the settings and on the desktop while the source image is shown. The generated asset directory is recorded in **Render Cache**. **Render now** retries a failed render or rebuilds completed assets. Adjust font, characters, detail, grayscale, transition frames, and dithering strength in **Appearance**; each change schedules another render.
+In Plasma's wallpaper settings, select **ASCII Wallpaper Optimizer** and choose an image or slideshow. Rendering starts automatically. A progress bar and status message appear in the settings and on the desktop while the source image is shown. The generated asset directory is recorded in **Render Cache**. **Render now** retries a failed render or rebuilds completed assets. Adjust style, ink polarity, font, characters, detail, grayscale, transition frames, dithering strength, and background color in **Appearance**; each change schedules another render.
 
 You can also run the renderer from a terminal for export or batch work:
 
@@ -37,14 +37,17 @@ The rendered directory contains `atlas.png`, `metadata.png`, still grids, transi
 
 - `--detail 0`, `1`, `2` targets about 180, 120, or 80 columns on a 2560-pixel-wide display. Cell dimensions scale with the monitor's physical resolution, keeping character density similar across displays. `--cell WIDTHxHEIGHT` overrides this; the prepared asset's metadata controls playback cell size.
 - `--chars ' ...'` sets the exact glyph set. Include a literal leading space if desired. Characters must be unique, and the Plasma character list must match the rendered assets.
+- `--style headroom` (default) uses the full-frame glyph and color solver with a local, chroma-preserving luminance boost. `--style structure` selects glyphs from coverage and within-cell texture with a stronger tone curve and blue-noise dither. Its default characters add `-_/|+[]{}`. The settings switch to this set automatically when the current list is still the standard default; custom lists stay intact.
+- `--invert-ink` selects glyphs for dark ink on a light canvas. Inversion participates in solving and is recorded in the rendered assets, so exported previews and Plasma playback use the same polarity. It can be combined with either style.
 - `--crop fill` fills the display by cropping; `--crop fit` letterboxes onto black. `--grayscale` converts the source before optimization.
-- `--dither` controls deterministic, spectrally filtered blue noise in glyph selection; `0` disables it. `--seed` makes the result reproducible.
+- `--dither` controls deterministic blue noise for the headroom solver; `--structure-dither` controls coverage dithering for the structure solver (default `0.06`). `0` disables either. `--seed` makes the result reproducible.
+- `--background auto` uses one dark color derived from the image; `--background '#202028'` fixes the color. Plasma offers the same modes and a color picker. Every still and transition frame has one uniform background color.
 - `--steps`, `--transition-steps`, and `--candidates` trade rendering time and memory for search quality. `--device cpu` works without a GPU; `--device cuda` uses a supported PyTorch CUDA installation.
 - `--force` rebuilds even if the full input signature matches.
 
 ## How the optimizer works
 
-The renderer rasterizes each glyph from the selected font at final cell size. It fits a foreground color in linear light for each candidate, then optimizes candidate weights and colors against a full-frame objective with pixel, multiscale color, and edge terms. This full-frame step includes neighboring cells, so tiles are never independently finalized. A final color pass runs with discrete glyphs. A restrained, smoothed color beneath the glyphs reduces repeated dark gaps along font rows and columns. The character mask is applied once, avoiding the old shader's double reduction of brightness.
+The renderer rasterizes each glyph from the selected font at final cell size. The headroom style fits a foreground color in linear light for each candidate, then optimizes candidate weights and colors against a full-frame objective with pixel, multiscale color, and edge terms. This full-frame step includes neighboring cells, so tiles are never independently finalized. A final color pass runs with discrete glyphs. The structure style scores glyph coverage and within-cell luminance texture, then uses one bright ink color per cell. Both styles use one uniform background, chosen from the image's darkest areas or set explicitly, and apply the same headroom-aware output boost once. The character mask is applied once, avoiding the old shader's double reduction of brightness.
 
 For each slideshow pair, the offline solver starts and ends at the exact optimized stills. Intermediate grids are optimized with temporal shape and color penalties plus a blue noise change schedule. Plasma chooses the prepared frame and draws its glyphs; it performs no pixel crossfade or optimization at display time.
 

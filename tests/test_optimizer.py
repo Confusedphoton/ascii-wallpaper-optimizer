@@ -8,10 +8,12 @@ import numpy as np
 import torch
 from PIL import Image
 
-from ascii_optimizer.assets import blue_noise, cell_for_display
-from ascii_optimizer.cli import build
+from ascii_optimizer.assets import blue_noise, cell_for_display, linear_to_srgb, srgb_to_linear
+from ascii_optimizer.cli import build, solve_style
 from ascii_optimizer.optimizer import Grid, _loss, render_grid, solve
 from ascii_optimizer.service import _validated_request
+from ascii_optimizer.structure import STRUCTURE_CHARS
+from ascii_optimizer.tone import display_tone, encode_headroom
 
 
 def test_render_uses_mask_once_and_preserves_linear_color():
@@ -23,15 +25,28 @@ def test_render_uses_mask_once_and_preserves_linear_color():
     np.testing.assert_allclose(image[1, 0], [0.8, 0.4, 0.2], atol=1e-6)
 
 
-def test_underpaint_fills_glyph_gaps_without_changing_full_coverage():
+def test_uniform_background_fills_glyph_gaps_without_changing_full_coverage():
     masks = np.array([[[0.0, 0.5], [1.0, 0.25]]], dtype=np.float32)
     grid = Grid(np.array([[0]], dtype=np.uint8),
                 np.array([[[0.8, 0.4, 0.2]]], dtype=np.float32),
-                np.array([[[0.2, 0.3, 0.4]]], dtype=np.float32))
+                np.array([0.2, 0.3, 0.4], dtype=np.float32))
     image = render_grid(grid, masks)
     np.testing.assert_allclose(image[0, 0], [0.2, 0.3, 0.4], atol=1e-6)
     np.testing.assert_allclose(image[0, 1], [0.5, 0.35, 0.3], atol=1e-6)
     np.testing.assert_allclose(image[1, 0], [0.8, 0.4, 0.2], atol=1e-6)
+
+
+def test_fixed_and_dynamic_background_use_one_color_for_the_whole_grid():
+    source = np.zeros((9, 9, 3), dtype=np.float32)
+    source[:, :5] = [0.8, 0.4, 0.2]
+    masks = np.stack((np.zeros((4, 3)), np.ones((4, 3))), axis=0).astype(np.float32)
+    fixed = solve(source, masks, steps=2, background="#203040")
+    np.testing.assert_allclose(fixed.background,
+        srgb_to_linear(torch.tensor([32, 48, 64], dtype=torch.float32) / 255).numpy(), atol=1e-6)
+    assert fixed.background.shape == (3,)
+    dynamic = solve(source, masks, steps=2, background="auto")
+    assert dynamic.background.shape == (3,)
+    assert (dynamic.background >= 0).all()
 
 
 def test_detail_uses_physical_display_size():
@@ -77,6 +92,11 @@ def test_progress_reports_completed_solve_and_space_glyph(tmp_path: Path):
         "chars": "\\s.#", "detail": 1, "grayscale": False, "frames": 2,
         "dither": 0.005, "size": [9, 9], "screen": "nonexistent"})
     assert request["chars"] == " .#"
+    custom = _validated_request({"images": [str(image)], "font": "Monospace",
+        "chars": "\\s.#", "detail": 1, "grayscale": False, "frames": 2,
+        "dither": 0.005, "background": "#203040", "size": [9, 9], "screen": "nonexistent"})
+    assert request["background"] == "auto"
+    assert custom["background"] == "#203040"
     updates = []
     masks = np.stack((np.zeros((4, 3)), np.ones((4, 3))), axis=0).astype(np.float32)
     solve(np.zeros((9, 9, 3), dtype=np.float32), masks, steps=2,
@@ -97,7 +117,7 @@ def test_batch_transition_endpoints_equal_stills(tmp_path: Path, capsys):
     args = argparse.Namespace(images=images, output=output, size=(13, 9),
         font="DejaVu Sans Mono", chars=" .#", cell=(3, 4), detail=1,
         crop="fill", grayscale=False, frames=3, steps=2, transition_steps=2,
-        candidates=3, dither=0.003, seed=1, device="cpu", force=False)
+        candidates=3, dither=0.003, background="auto", seed=1, device="cpu", force=False)
     build(args)
     pair = output / "transitions" / "0000-0001"
     for kind in ("glyph", "color", "background"):
@@ -105,6 +125,7 @@ def test_batch_transition_endpoints_equal_stills(tmp_path: Path, capsys):
         assert (pair / "0002" / f"{kind}.png").read_bytes() == (output / "stills" / "0001" / f"{kind}.png").read_bytes()
     assert json.loads((output / "manifest.json").read_text())["frame_count"] == 3
     assert Image.open(output / "stills" / "0000" / "preview.png").size == (13, 9)
+    assert Image.open(output / "stills" / "0000" / "background.png").size == (1, 1)
     metadata = np.asarray(Image.open(output / "metadata.png"))
     assert tuple(metadata[0, 0]) == (0, 13, 3)
     assert tuple(metadata[0, 1]) == (0, 9, 4)
@@ -114,3 +135,74 @@ def test_batch_transition_endpoints_equal_stills(tmp_path: Path, capsys):
     build(args)
     assert json.loads((output / "manifest.json").read_text())["signature"]["dither"] == 0.02
     assert "Already rendered" not in capsys.readouterr().out
+    args.background = "#203040"
+    build(args)
+    assert json.loads((output / "manifest.json").read_text())["signature"]["background"] == "#203040"
+
+
+def test_headroom_encoding_restores_source_colors_after_display():
+    colors = np.array([[[0.85, 0.65, 0.1], [0.3, 0.45, 0.72],
+                        [0.05, 0.04, 0.03]]], dtype=np.float32)
+    encoded = encode_headroom(colors)
+    displayed = display_tone(srgb_to_linear(torch.from_numpy(encoded)).numpy())
+    restored = linear_to_srgb(torch.from_numpy(displayed)).numpy()
+    np.testing.assert_allclose(restored, colors, atol=0.002)
+    # Mid-gamut colors also survive a solver-side polarity change.
+    inverted = encode_headroom(colors[:, 1:2], invert_ink=True)
+    output = display_tone(srgb_to_linear(torch.from_numpy(inverted)).numpy(), invert_ink=True)
+    np.testing.assert_allclose(linear_to_srgb(torch.from_numpy(output)).numpy(),
+                               colors[:, 1:2], atol=0.002)
+
+
+def test_inverting_structure_changes_selected_glyphs():
+    source = np.zeros((8, 8, 3), dtype=np.float32)
+    source[:, :4] = 0.04
+    source[:, 4:] = 0.96
+    masks = np.zeros((3, 4, 4), dtype=np.float32)
+    masks[1, :2, :2] = 1
+    masks[2, :3, :3] = 1
+    settings = dict(style="structure", background="auto", seed=1, steps=2,
+                    candidates=3, dither=0, structure_dither=0, device="cpu")
+    normal = solve_style(source, masks, invert_ink=False, **settings)
+    inverted = solve_style(source, masks, invert_ink=True, **settings)
+    assert not np.array_equal(normal.glyph, inverted.glyph)
+    assert "|" in STRUCTURE_CHARS and all(char in STRUCTURE_CHARS for char in "[]{}")
+
+
+def test_inverting_headroom_changes_solved_ink():
+    source = np.full((8, 8, 3), 0.7, dtype=np.float32)
+    masks = np.zeros((3, 4, 4), dtype=np.float32)
+    masks[1, :2, :2] = 1
+    masks[2, :3, :3] = 1
+    settings = dict(style="headroom", background="auto", seed=1, steps=2,
+                    candidates=3, dither=0, structure_dither=0, device="cpu")
+    normal = solve_style(source, masks, invert_ink=False, **settings)
+    inverted = solve_style(source, masks, invert_ink=True, **settings)
+    assert inverted.color.mean() < normal.color.mean() * 0.5
+
+
+def test_render_style_and_inversion_are_saved_with_assets(tmp_path: Path):
+    image = tmp_path / "input.png"
+    Image.new("RGB", (12, 8), (100, 130, 170)).save(image)
+    second = tmp_path / "second.png"
+    Image.new("RGB", (12, 8), (160, 90, 70)).save(second)
+    args = argparse.Namespace(images=[image, second], output=tmp_path / "out", size=(12, 8),
+        font="DejaVu Sans Mono", chars=" .#", cell=(3, 4), detail=1,
+        crop="fill", grayscale=False, frames=3, steps=2, transition_steps=2,
+        candidates=3, dither=0.003, structure_dither=0.06, style="structure",
+        invert_ink=True, background="auto", seed=1, device="cpu", force=False)
+    build(args)
+    metadata = np.asarray(Image.open(args.output / "metadata.png"))
+    assert tuple(metadata[0, 2]) == (2, 1, 0)
+    manifest = json.loads((args.output / "manifest.json").read_text())
+    assert manifest["signature"]["style"] == "structure"
+    assert manifest["signature"]["invert_ink"] is True
+    for kind in ("glyph", "color", "background"):
+        assert (args.output / "transitions/0000-0001/0000" / f"{kind}.png").read_bytes() == (args.output / "stills/0000" / f"{kind}.png").read_bytes()
+        assert (args.output / "transitions/0000-0001/0002" / f"{kind}.png").read_bytes() == (args.output / "stills/0001" / f"{kind}.png").read_bytes()
+    assert (args.output / "transitions/0000-0001/0001/glyph.png").exists()
+    request = _validated_request({"images": [str(image)], "font": "Monospace",
+        "chars": " .#", "detail": 1, "grayscale": False, "frames": 2,
+        "dither": 0.005, "structure_dither": 0.06, "style": "structure",
+        "invert_ink": True, "size": [12, 8], "screen": "nonexistent"})
+    assert request["style"] == "structure" and request["invert_ink"] is True

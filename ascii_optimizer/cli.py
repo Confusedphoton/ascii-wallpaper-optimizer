@@ -5,15 +5,19 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
 from PIL import Image
 
 from . import __version__
-from .assets import cell_for_display, glyph_masks, linear_to_srgb, load_target, resolve_font, save_atlas, save_metadata
-from .optimizer import Grid, render_grid, solve
+from .assets import cell_for_display, glyph_masks, linear_to_srgb, load_target, resolve_font, save_atlas, save_metadata, srgb_to_linear
+from .optimizer import Grid, _choose_background, render_grid, solve
+from .structure import STRUCTURE_CHARS, STRUCTURE_DITHER, solve_structure
+from .tone import display_tone, encode_headroom, encoded_background, invert_source
 
 
 DEFAULT_CHARS = " .´:rszunvcxLOGDQ0KNMW&@"
@@ -38,18 +42,18 @@ def _file_hash(path: Path) -> str:
 
 
 def _save_grid(grid: Grid, directory: Path, preview: bool, masks: np.ndarray,
-               size: tuple[int, int]) -> None:
+               size: tuple[int, int], invert_ink: bool = False) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     indices = np.zeros((*grid.glyph.shape, 3), dtype=np.uint8)
     indices[:, :, 0] = grid.glyph
     Image.fromarray(indices, "RGB").save(directory / "glyph.png")
     color = linear_to_srgb(torch.as_tensor(grid.color)).numpy()
     Image.fromarray(np.rint(color * 255).astype(np.uint8), "RGB").save(directory / "color.png")
-    background = (np.zeros_like(grid.color) if grid.background is None else grid.background)
-    background_color = linear_to_srgb(torch.as_tensor(background)).numpy()
+    background = np.zeros(3, dtype=np.float32) if grid.background is None else grid.background
+    background_color = linear_to_srgb(torch.as_tensor(background)).numpy().reshape(1, 1, 3)
     Image.fromarray(np.rint(background_color * 255).astype(np.uint8), "RGB").save(directory / "background.png")
     if preview:
-        pixels = render_grid(grid, masks)[:size[1], :size[0]]
+        pixels = display_tone(render_grid(grid, masks)[:size[1], :size[0]], invert_ink=invert_ink)
         color = linear_to_srgb(torch.as_tensor(pixels)).numpy()
         Image.fromarray(np.rint(color * 255).astype(np.uint8), "RGB").save(directory / "preview.png")
 
@@ -60,11 +64,49 @@ def _load_grid(directory: Path) -> Grid:
     from .assets import srgb_to_linear
     color = srgb_to_linear(torch.as_tensor(encoded)).numpy()
     encoded_background = np.asarray(Image.open(directory / "background.png").convert("RGB"), dtype=np.float32) / 255
-    background = srgb_to_linear(torch.as_tensor(encoded_background)).numpy()
+    background = srgb_to_linear(torch.as_tensor(encoded_background)).numpy().reshape(3)
     return Grid(glyph, color, background)
 
 
+def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
+                invert_ink: bool, background: str, seed: int, steps: int,
+                candidates: int, dither: float, structure_dither: float,
+                device: str, previous: Grid | None = None,
+                destination: Grid | None = None, progress: float | None = None,
+                on_progress: Callable[[float, str], None] | None = None) -> Grid:
+    """Prepare a grid whose displayed pixels follow the chosen ink polarity."""
+    if style not in ("headroom", "structure"):
+        raise ValueError(f"Unknown render style: {style}")
+    source_linear = srgb_to_linear(torch.from_numpy(target)).permute(2, 0, 1)
+    original_background = _choose_background(source_linear, background).numpy()
+    if invert_ink:
+        solve_background = (np.zeros(3, dtype=np.float32) if background == "auto"
+                            else original_background)
+    else:
+        solve_background = encoded_background(original_background)
+
+    if style == "headroom":
+        encoded_target = encode_headroom(target, invert_ink=invert_ink)
+        return solve(encoded_target, masks, seed=seed, steps=steps,
+                     candidates=candidates, dither=dither,
+                     background_linear=solve_background, device=device,
+                     previous=previous, destination=destination,
+                     progress=progress, on_progress=on_progress)
+
+    selection_target = invert_source(target) if invert_ink else target
+    selection_background = solve_background if invert_ink else original_background
+    grid = solve_structure(selection_target, masks, selection_background,
+                           seed=seed, dither=structure_dither,
+                           previous=previous, destination=destination,
+                           progress=progress, on_progress=on_progress)
+    grid.background = solve_background
+    return grid
+
+
 def build(args: argparse.Namespace) -> None:
+    style = getattr(args, "style", "headroom")
+    invert_ink = bool(getattr(args, "invert_ink", False))
+    structure_dither = float(getattr(args, "structure_dither", STRUCTURE_DITHER))
     report_progress = getattr(args, "progress_json", False)
     total_units = len(args.images) + (len(args.images) * (args.frames - 2) if len(args.images) > 1 else 0)
     completed_units = 0
@@ -78,7 +120,8 @@ def build(args: argparse.Namespace) -> None:
 
     report(0.0, "Preparing input images")
     font = resolve_font(args.font)
-    chars = list(args.chars)
+    effective_chars = STRUCTURE_CHARS if style == "structure" and args.chars == DEFAULT_CHARS else args.chars
+    chars = list(effective_chars)
     if not chars or len(chars) > 256 or len(set(chars)) != len(chars):
         raise ValueError("Characters must be 1 to 256 distinct glyphs")
     cell = args.cell or cell_for_display(args.size, args.detail)
@@ -91,11 +134,12 @@ def build(args: argparse.Namespace) -> None:
         "version": __version__, "images": [str(path) for path in images],
         "image_hashes": [_file_hash(path) for path in images],
         "font": str(font), "font_hash": _file_hash(font),
-        "size": list(args.size), "cell": list(cell), "chars": args.chars,
+        "size": list(args.size), "cell": list(cell), "chars": effective_chars,
+        "style": style, "invert_ink": invert_ink, "structure_dither": structure_dither,
         "crop": args.crop, "grayscale": args.grayscale,
         "frames": args.frames, "steps": args.steps,
         "transition_steps": args.transition_steps,
-        "candidates": args.candidates, "dither": args.dither, "seed": args.seed,
+        "candidates": args.candidates, "dither": args.dither, "background": args.background, "seed": args.seed,
     }
     output = args.output.expanduser().resolve()
     manifest = output / "manifest.json"
@@ -118,7 +162,7 @@ def build(args: argparse.Namespace) -> None:
             pass
     output.mkdir(parents=True, exist_ok=True)
     save_atlas(masks, output / "atlas.png")
-    save_metadata(args.size, cell, len(chars), output / "metadata.png")
+    save_metadata(args.size, cell, len(chars), output / "metadata.png", invert_ink=invert_ink)
     old_signature = old.get("signature", {})
     settings_match = all(old_signature.get(key) == value for key, value in signature.items()
                          if key not in ("images", "image_hashes"))
@@ -136,12 +180,14 @@ def build(args: argparse.Namespace) -> None:
             report(0.0, f"Reused image {index + 1}/{len(images)}")
             continue
         print(f"Optimizing still {index + 1}/{len(images)}: {images[index]}", flush=True)
-        grid = solve(target, masks, seed=args.seed + index, steps=args.steps,
-                     candidates=args.candidates, dither=args.dither, device=args.device,
+        grid = solve_style(target, masks, style=style, invert_ink=invert_ink,
+                     seed=args.seed + index, steps=args.steps,
+                     candidates=args.candidates, dither=args.dither, structure_dither=structure_dither,
+                     background=args.background, device=args.device,
                      on_progress=lambda fraction, stage, index=index: report(
                          fraction, f"Image {index + 1}/{len(images)}: {stage}"))
         stills.append(grid)
-        _save_grid(grid, still_dir, True, masks, args.size)
+        _save_grid(grid, still_dir, True, masks, args.size, invert_ink)
         completed_units += 1
         report(0.0, f"Finished image {index + 1}/{len(images)}")
     if len(images) > 1:
@@ -168,9 +214,11 @@ def build(args: argparse.Namespace) -> None:
                     grid = stills[following]
                 else:
                     target = (1 - progress) * targets[index] + progress * targets[following]
-                    grid = solve(target, masks, seed=args.seed + index * 10007,
+                    grid = solve_style(target, masks, style=style, invert_ink=invert_ink,
+                                 seed=args.seed + index * 10007,
                                  steps=args.transition_steps, candidates=args.candidates,
-                                 dither=args.dither, device=args.device, previous=previous,
+                                 dither=args.dither, structure_dither=structure_dither,
+                                 background=args.background, device=args.device, previous=previous,
                                  destination=stills[following], progress=progress,
                                  on_progress=lambda fraction, stage, index=index, frame=frame: report(
                                      fraction, f"Transition {index + 1}/{len(images)}, frame {frame + 1}/{args.frames}: {stage}"))
@@ -201,6 +249,11 @@ def main() -> None:
     parser.add_argument("--transition-steps", type=int, default=16)
     parser.add_argument("--candidates", type=int, default=6)
     parser.add_argument("--dither", type=float, default=0.005)
+    parser.add_argument("--style", choices=("headroom", "structure"), default="headroom")
+    parser.add_argument("--invert-ink", action="store_true", help="Dark ink on a light canvas")
+    parser.add_argument("--structure-dither", type=float, default=STRUCTURE_DITHER,
+                        help="Blue-noise coverage dither for the structure style")
+    parser.add_argument("--background", default="auto", help="auto or a fixed #RRGGBB color")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--force", action="store_true")
@@ -208,6 +261,10 @@ def main() -> None:
     args = parser.parse_args()
     if args.frames < 2 or args.steps < 1 or args.transition_steps < 1 or args.candidates < 1:
         parser.error("frames must be >= 2 and optimization counts must be positive")
+    if args.background != "auto" and not re.fullmatch(r"#[0-9a-fA-F]{6}", args.background):
+        parser.error("background must be auto or a #RRGGBB color")
+    if not 0 <= args.dither <= 0.05 or not 0 <= args.structure_dither <= 0.12:
+        parser.error("dither must be 0..0.05 and structure-dither must be 0..0.12")
     build(args)
 
 

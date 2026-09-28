@@ -24,6 +24,11 @@ Item {
     property string cfg_FontFamily: "Monospace"
     property string cfg_RenderDirectory: ""
     property int cfg_TransitionFrames: 16
+    property int cfg_BackgroundMode: 0
+    property string cfg_BackgroundColor: "#202028"
+    property string cfg_RenderStyle: "headroom"
+    readonly property string standardChars: " .´:rszunvcxLOGDQ0KNMW&@"
+    readonly property string structureChars: " .´:-_/|+rszunvcxLOGDQ0KNMW&@[]{}"
     property list<string> cfg_AsciiChars: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@"]
     property list<string> cfg_Images: []
     property var monoFonts: [cfg_FontFamily]
@@ -34,10 +39,25 @@ Item {
     property int renderRevision: 0
     property bool controlsReady: false
 
+    function colorHex(color) {
+        return "#" + [color.r, color.g, color.b].map(channel =>
+            Math.round(channel * 255).toString(16).padStart(2, "0")).join("")
+    }
+
+    function applyStyleCharacters(style) {
+        const current = Array.from(cfg_AsciiChars).join("")
+        if (style === "structure" && current === standardChars)
+            cfg_AsciiChars = Array.from(structureChars)
+        else if (style === "headroom" && current === structureChars)
+            cfg_AsciiChars = Array.from(standardChars)
+    }
+
     property alias cfg_Detail: detailSlider.value
     property alias cfg_Grayscale: grayscaleCheck.checked
     property alias cfg_SlideInterval: intervalSlider.value
     property alias cfg_Dither: ditherSlider.value
+    property alias cfg_StructureDither: structureDitherSlider.value
+    property alias cfg_InvertInk: invertInkCheck.checked
 
     property string cfg_Image: ""
 
@@ -172,6 +192,7 @@ Item {
 
     Component.onCompleted: {
         loadFromConfig()
+        applyStyleCharacters(cfg_RenderStyle)
         fontCombo.editText = cfg_FontFamily
         Qt.callLater(function() { root.controlsReady = true })
     }
@@ -215,6 +236,10 @@ Item {
         grayscale: root.cfg_Grayscale
         frames: root.cfg_TransitionFrames
         dither: root.cfg_Dither
+        structureDither: root.cfg_StructureDither
+        renderStyle: root.cfg_RenderStyle
+        invertInk: root.cfg_InvertInk
+        background: root.cfg_BackgroundMode === 1 ? root.cfg_BackgroundColor : "auto"
         onRenderStateChanged: {
             if (renderState === "ready") {
                 root.renderRevision++
@@ -286,6 +311,16 @@ Item {
         }
         onRejected: {
             root._activePicker = -1;
+        }
+    }
+
+    ColorDialog {
+        id: backgroundPicker
+        title: "Select background color"
+        selectedColor: root.cfg_BackgroundColor
+        onAccepted: {
+            root.cfg_BackgroundColor = root.colorHex(selectedColor)
+            if (root.configDialog) root.configDialog.changed = true
         }
     }
     
@@ -731,6 +766,24 @@ Item {
                 text: "Changes render in the background. The source image remains visible until ASCII assets are ready."
             }
 
+            Controls.ComboBox {
+                Kirigami.FormData.label: "Render Style:"
+                Layout.fillWidth: true
+                model: ["Headroom aware", "Structure first"]
+                currentIndex: root.cfg_RenderStyle === "structure" ? 1 : 0
+                onActivated: index => {
+                    root.cfg_RenderStyle = index === 1 ? "structure" : "headroom"
+                    root.applyStyleCharacters(root.cfg_RenderStyle)
+                    if (root.configDialog) root.configDialog.changed = true
+                }
+            }
+
+            Controls.CheckBox {
+                id: invertInkCheck
+                Kirigami.FormData.label: "Ink Polarity:"
+                text: "Dark ink on a light canvas"
+            }
+
             Controls.SpinBox {
                 Kirigami.FormData.label: "Transition Frames:"
                 from: 2
@@ -849,6 +902,7 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Dithering Strength:"
+                visible: root.cfg_RenderStyle === "headroom"
 
                 Controls.Slider {
                     id: ditherSlider
@@ -864,6 +918,54 @@ Item {
                 Controls.Label {
                     Layout.preferredWidth: Kirigami.Units.gridUnit * 10
                     text: ditherSlider.value.toFixed(3)
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Structure Dither:"
+                visible: root.cfg_RenderStyle === "structure"
+
+                Controls.Slider {
+                    id: structureDitherSlider
+                    Layout.fillWidth: true
+                    from: 0
+                    to: 0.12
+                    stepSize: 0.005
+                    onValueChanged: {
+                        if (root.controlsReady && root.configDialog)
+                            root.configDialog.changed = true
+                    }
+                }
+                Controls.Label {
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 10
+                    text: structureDitherSlider.value.toFixed(3)
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Background:"
+
+                Controls.ComboBox {
+                    Layout.fillWidth: true
+                    model: ["Image darks (uniform)", "Choose a color"]
+                    currentIndex: root.cfg_BackgroundMode
+                    onActivated: index => {
+                        root.cfg_BackgroundMode = index
+                        if (root.configDialog) root.configDialog.changed = true
+                    }
+                }
+                Rectangle {
+                    visible: root.cfg_BackgroundMode === 1
+                    Layout.preferredWidth: 24
+                    Layout.preferredHeight: 24
+                    radius: 3
+                    color: root.cfg_BackgroundColor
+                    border.color: Kirigami.Theme.textColor
+                }
+                Controls.Button {
+                    visible: root.cfg_BackgroundMode === 1
+                    text: root.cfg_BackgroundColor
+                    onClicked: backgroundPicker.open()
                 }
             }
 

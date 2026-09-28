@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Callable
 
 import numpy as np
@@ -16,7 +17,7 @@ from .assets import blue_noise, srgb_to_linear
 class Grid:
     glyph: np.ndarray  # rows x columns, uint8
     color: np.ndarray  # rows x columns x RGB, linear float32
-    background: np.ndarray | None = None  # smooth underpaint, linear float32
+    background: np.ndarray | None = None  # one RGB color for the complete image, linear float32
 
 
 def _cells(image: torch.Tensor, rows: int, cols: int, height: int, width: int) -> torch.Tensor:
@@ -29,17 +30,22 @@ def _render(mask: torch.Tensor, color: torch.Tensor, rows: int, cols: int,
     foreground = color.reshape(rows, cols, 3).repeat_interleave(height, 0).repeat_interleave(width, 1)
     pixels = coverage[..., None] * foreground
     if background is not None:
-        underpaint = (_background_frame(background, rows, cols, height, width)
-                      if background.ndim == 2 else background)
-        pixels = pixels + (1 - coverage[..., None]) * underpaint.squeeze(0).permute(1, 2, 0)
+        pixels = pixels + (1 - coverage[..., None]) * background.reshape(3)
     return pixels.permute(2, 0, 1).unsqueeze(0)
 
 
-def _background_frame(background: torch.Tensor, rows: int, cols: int,
-                      height: int, width: int) -> torch.Tensor:
-    cells = background.reshape(rows, cols, 3).permute(2, 0, 1).unsqueeze(0)
-    return F.interpolate(cells, size=(rows * height, cols * width),
-                         mode="bilinear", align_corners=False)
+def _choose_background(image: torch.Tensor, choice: str) -> torch.Tensor:
+    if choice != "auto":
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", choice):
+            raise ValueError("Background must be 'auto' or a #RRGGBB color")
+        return srgb_to_linear(image.new_tensor([int(choice[i:i + 2], 16) / 255 for i in (1, 3, 5)]))
+    # Choose one shadow color for the entire image. Keep it dark enough that
+    # bright glyphs can still describe images with no dark regions.
+    sampled = F.avg_pool2d(image.unsqueeze(0), 4, ceil_mode=True).squeeze(0).permute(1, 2, 0).reshape(-1, 3)
+    luma = (sampled * sampled.new_tensor([0.2126, 0.7152, 0.0722])).sum(1)
+    background = sampled[luma <= torch.quantile(luma, 0.1)].median(0).values
+    background_luma = (background * background.new_tensor([0.2126, 0.7152, 0.0722])).sum()
+    return background * (0.18 / background_luma.clamp_min(1e-8)).clamp(max=1)
 
 
 def _loss(rendered: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -93,7 +99,7 @@ def render_grid(grid: Grid, masks: np.ndarray, device: str = "cpu") -> np.ndarra
         bank = torch.as_tensor(masks, dtype=torch.float32, device=device).flatten(1)
         glyph = torch.as_tensor(grid.glyph.astype(np.int64), device=device).flatten()
         color = torch.as_tensor(grid.color, dtype=torch.float32, device=device).reshape(-1, 3)
-        background = (torch.as_tensor(grid.background, dtype=torch.float32, device=device).reshape(-1, 3)
+        background = (torch.as_tensor(grid.background, dtype=torch.float32, device=device).reshape(3)
                       if grid.background is not None else None)
         image = _render(bank[glyph], color, rows, cols, height, width, background)
     return image.squeeze(0).permute(1, 2, 0).cpu().numpy()
@@ -101,6 +107,7 @@ def render_grid(grid: Grid, masks: np.ndarray, device: str = "cpu") -> np.ndarra
 
 def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
           steps: int = 36, candidates: int = 6, dither: float = 0.005,
+          background: str = "auto", background_linear: np.ndarray | None = None,
           device: str = "cpu", previous: Grid | None = None,
           destination: Grid | None = None, progress: float | None = None,
           on_progress: Callable[[float, str], None] | None = None) -> Grid:
@@ -117,13 +124,9 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
     image = srgb_to_linear(F.pad(image.unsqueeze(0), (0, pad_width, 0, pad_height), mode="replicate").squeeze(0))
     target = image.unsqueeze(0)
     cells = _cells(image, rows, cols, cell_height, cell_width)
-    cell_mean = cells.mean(1).reshape(rows, cols, 3).permute(2, 0, 1).unsqueeze(0)
-    # A restrained, smoothed underpaint fills the dark gaps inherent in font
-    # glyphs. It removes repeated row/column seams without hiding the glyphs.
-    background = (0.5 * F.avg_pool2d(F.pad(cell_mean, (2, 2, 2, 2), mode="replicate"), 5, stride=1)
-                  .squeeze(0).permute(1, 2, 0).reshape(-1, 3))
-    background_frame = _background_frame(background, rows, cols, cell_height, cell_width)
-    background_cells = _cells(background_frame.squeeze(0), rows, cols, cell_height, cell_width)
+    background_color = (_choose_background(image, background) if background_linear is None
+                        else torch.as_tensor(background_linear, dtype=torch.float32, device=device).reshape(3))
+    background_cells = background_color.reshape(1, 1, 3).expand(len(cells), cell_height * cell_width, 3)
     masks = torch.as_tensor(masks_np, dtype=torch.float32, device=device)
     bank = masks.flatten(1)
     noise = torch.as_tensor(blue_noise((rows, cols), seed).flatten(), device=device)
@@ -175,7 +178,7 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         weights = torch.softmax(logits / temperature, dim=1)
         mask = (weights[..., None] * sample_masks).sum(1)
         color = torch.sigmoid(color_parameter)
-        rendered = _render(mask, color, rows, cols, cell_height, cell_width, background_frame)
+        rendered = _render(mask, color, rows, cols, cell_height, cell_width, background_color)
         loss = _loss(rendered, target)
         loss = loss + 0.006 * (-(weights * weights.clamp_min(1e-9).log()).sum(1)).mean()
         loss = loss + dither * ((noise - 0.5) * mask.mean(1)).mean()
@@ -195,7 +198,7 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         hard_color = torch.sigmoid(color_parameter).detach()
 
     def hard_score(chosen_masks: torch.Tensor, chosen_color: torch.Tensor) -> torch.Tensor:
-        score = _loss(_render(chosen_masks, chosen_color, rows, cols, cell_height, cell_width, background_frame), target)
+        score = _loss(_render(chosen_masks, chosen_color, rows, cols, cell_height, cell_width, background_color), target)
         score = score + dither * ((noise - 0.5) * chosen_masks.mean(1)).mean()
         if prev_masks is not None:
             score = score + 0.025 * (chosen_masks - prev_masks).square().mean()
@@ -208,7 +211,7 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
     row_ids = torch.arange(rows, device=device).repeat_interleave(cols)
     col_ids = torch.arange(cols, device=device).repeat(rows)
     for parity in range(4):
-        rendered = _render(hard_masks, hard_color, rows, cols, cell_height, cell_width, background_frame).detach().requires_grad_()
+        rendered = _render(hard_masks, hard_color, rows, cols, cell_height, cell_width, background_color).detach().requires_grad_()
         gradient = torch.autograd.grad(_loss(rendered, target), rendered)[0]
         gradient_cells = _cells(gradient.squeeze(0), rows, cols, cell_height, cell_width)
         with torch.no_grad():
@@ -243,7 +246,7 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
     for polish_step in range(polish_steps):
         color_optimizer.zero_grad(set_to_none=True)
         color = torch.sigmoid(color_parameter)
-        loss = _loss(_render(hard_masks, color, rows, cols, cell_height, cell_width, background_frame), target)
+        loss = _loss(_render(hard_masks, color, rows, cols, cell_height, cell_width, background_color), target)
         if prev_colors is not None:
             loss = loss + 0.010 * (color - prev_colors).square().mean()
         loss.backward()
@@ -253,4 +256,4 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
 
     return Grid(glyph.detach().cpu().numpy().reshape(rows, cols).astype(np.uint8),
                 torch.sigmoid(color_parameter).detach().cpu().numpy().reshape(rows, cols, 3),
-                background.detach().cpu().numpy().reshape(rows, cols, 3))
+                background_color.detach().cpu().numpy())

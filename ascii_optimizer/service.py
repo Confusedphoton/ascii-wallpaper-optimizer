@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -55,8 +56,17 @@ def _validated_request(raw: dict) -> dict:
     detail = int(raw["detail"])
     frames = int(raw["frames"])
     dither = float(raw["dither"])
+    structure_dither = float(raw.get("structure_dither", 0.06))
+    style = str(raw.get("style", "headroom"))
+    invert_ink = raw.get("invert_ink", False)
+    background = str(raw.get("background", "auto"))
     if detail not in (0, 1, 2) or not 2 <= frames <= 120 or not 0 <= dither <= 0.05:
         raise ValueError("Detail, frame count, or dithering strength is out of range.")
+    if style not in ("headroom", "structure") or not isinstance(invert_ink, bool) or not 0 <= structure_dither <= 0.12:
+        raise ValueError("Render style, ink polarity, or structure dithering is invalid.")
+    if background != "auto" and not re.fullmatch(r"#[0-9a-fA-F]{6}", background):
+        raise ValueError("Background must be auto or a #RRGGBB color.")
+    background = background.lower()
     hint = raw.get("size", [1920, 1080])
     if not isinstance(hint, list) or len(hint) != 2 or any(not 1 <= int(v) <= 16384 for v in hint):
         raise ValueError("Invalid display size.")
@@ -73,7 +83,9 @@ def _validated_request(raw: dict) -> dict:
     return {
         "version": __version__, "images": images, "image_hashes": image_hashes, "font": str(raw["font"]),
         "chars": chars, "detail": detail, "grayscale": bool(raw["grayscale"]),
-        "frames": frames, "dither": dither, "size": list(size),
+        "frames": frames, "dither": dither, "structure_dither": structure_dither,
+        "style": style, "invert_ink": invert_ink,
+        "background": background, "size": list(size),
     }
 
 
@@ -123,7 +135,12 @@ class RenderQueue:
                        "--output", directory, "--size", f"{settings['size'][0]}x{settings['size'][1]}",
                        "--font", settings["font"], "--chars", settings["chars"],
                        "--detail", str(settings["detail"]), "--frames", str(settings["frames"]),
-                       "--dither", str(settings["dither"]), "--progress-json"]
+                       "--dither", str(settings["dither"]),
+                       "--style", settings["style"],
+                       "--structure-dither", str(settings["structure_dither"]),
+                       "--background", settings["background"], "--progress-json"]
+            if settings["invert_ink"]:
+                command.append("--invert-ink")
             if settings["grayscale"]:
                 command.append("--grayscale")
             if job["force"]:

@@ -56,14 +56,15 @@ def save_atlas(masks: np.ndarray, path: Path) -> None:
     Image.fromarray(atlas, "RGBA").save(path)
 
 
-def save_metadata(size: tuple[int, int], cell: tuple[int, int], count: int, path: Path) -> None:
+def save_metadata(size: tuple[int, int], cell: tuple[int, int], count: int, path: Path,
+                  *, invert_ink: bool = False) -> None:
     width, height = size
     cell_width, cell_height = cell
     if max(width, height) > 65535 or max(cell_width, cell_height) > 255:
         raise ValueError("Output dimensions exceed the playback metadata format")
     pixels = np.array([[(width >> 8, width & 255, cell_width),
                         (height >> 8, height & 255, cell_height),
-                        (count - 1, 0, 0)]], dtype=np.uint8)
+                        (count - 1, int(invert_ink), 0)]], dtype=np.uint8)
     Image.fromarray(pixels, "RGB").save(path)
 
 

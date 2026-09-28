@@ -12,6 +12,10 @@ Item {
     property bool grayscale: false
     property int frames: 16
     property real dither: 0.005
+    property real structureDither: 0.06
+    property string renderStyle: "headroom"
+    property bool invertInk: false
+    property string background: "auto"
     property string screenName: Screen.name || ""
     property int physicalWidth: Math.round(Screen.width * Screen.devicePixelRatio)
     property int physicalHeight: Math.round(Screen.height * Screen.devicePixelRatio)
@@ -28,6 +32,8 @@ Item {
     readonly property string settingsKey: JSON.stringify({
         images: Array.from(images || []), font: fontFamily, chars: characters,
         detail: detail, grayscale: grayscale, frames: frames, dither: dither,
+        structure_dither: structureDither, style: renderStyle, invert_ink: invertInk,
+        background: background,
         screen: screenName, size: [physicalWidth, physicalHeight]
     })
 
