@@ -15,6 +15,9 @@
     <entry name="Images" type="StringList">
       <default></default>
     </entry>
+    <entry name="RenderDirectory" type="String">
+      <default></default>
+    </entry>
   </group>
 
   <group name="Options">
@@ -41,6 +44,11 @@
         <default>10</default>
         <min>5</min>
         <max>3600</max>
+    </entry>
+    <entry name="TransitionFrames" type="Int">
+        <default>16</default>
+        <min>2</min>
+        <max>120</max>
     </entry>
   </group>
 </kcfg>

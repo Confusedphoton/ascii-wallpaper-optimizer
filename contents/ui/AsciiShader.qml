@@ -4,134 +4,81 @@
  */
 
 import QtQuick
-import QtQuick.Controls
 
 Item {
     id: asciiRoot
-    property url source: ""
-    property url sourceNext: ""
+
+    property string renderDirectory: ""
+    property int currentIndex: 0
+    property int nextIndex: 0
     property real transitionProgress: 0.0
-
+    property int transitionFrames: 16
     property int detail: 1
-    property bool grayscale: false
-    property string fontFamily: "Monospace"
-    property var asciiChars: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@"]
 
-    property real autoCropThreshold: 1.35
+    readonly property bool transitioning: currentIndex !== nextIndex
+    readonly property int frameIndex: Math.min(transitionFrames - 1,
+        Math.floor(transitionProgress * (transitionFrames - 1)))
 
-    function _resolveFillMode(imgItem) {
-        if (!imgItem || imgItem.implicitWidth <= 0 || imgItem.implicitHeight <= 0
-                || asciiRoot.width <= 0 || asciiRoot.height <= 0) {
-            return Image.PreserveAspectCrop;
-        }
-
-        const ratio = (imgItem.implicitWidth * asciiRoot.height) / (imgItem.implicitHeight * asciiRoot.width);
-        const mismatched = ratio > asciiRoot.autoCropThreshold || ratio < 1 / asciiRoot.autoCropThreshold;
-
-        return mismatched ? Image.PreserveAspectFit : Image.PreserveAspectCrop;
+    function fileUrl(relative) {
+        const directory = String(renderDirectory || "").trim().replace(/\/$/, "");
+        if (!directory) return "";
+        return "file://" + (directory + "/" + relative).split("/").map(encodeURIComponent).join("/");
     }
 
-    readonly property int charWidth: [2, 4, 8][Math.max(0, Math.min(2, detail))]
-    readonly property int charHeight: charWidth * 2
-    
-    Image {
-        id: sourceImg
-        source: asciiRoot.source
-        visible: false
-        asynchronous: true
-
-        width: asciiRoot.width
-        height: asciiRoot.height
-        fillMode: asciiRoot._resolveFillMode(sourceImg)
-
-        layer.enabled: true
-        layer.smooth: true
+    function mapPath(kind) {
+        if (transitioning) {
+            const pair = String(currentIndex).padStart(4, "0") + "-" + String(nextIndex).padStart(4, "0");
+            const frame = String(frameIndex).padStart(4, "0");
+            return fileUrl("transitions/" + pair + "/" + frame + "/" + kind + ".png");
+        }
+        return fileUrl("stills/" + String(currentIndex).padStart(4, "0") + "/" + kind + ".png");
     }
 
     Image {
-        id: sourceNextImg
-        source: asciiRoot.sourceNext
+        id: glyphMap
+        source: asciiRoot.mapPath("glyph")
         visible: false
-        asynchronous: true
-
-        width: asciiRoot.width
-        height: asciiRoot.height
-        fillMode: asciiRoot._resolveFillMode(sourceNextImg)
-
+        smooth: false
+        cache: true
         layer.enabled: true
-        layer.smooth: true
     }
 
-    Canvas {
-        id: atlasGenerator
-        
-        width: ((asciiChars && asciiChars.length > 0) ? asciiChars.length : 1) * (charWidth * 2)
-        height: charHeight
-
+    Image {
+        id: colorMap
+        source: asciiRoot.mapPath("color")
         visible: false
-        renderTarget: Canvas.FramebufferObject
+        smooth: false
+        cache: true
+        layer.enabled: true
+    }
 
-        onAvailableChanged: if (available) requestPaint()
-        onVisibleChanged: if (visible) requestPaint()
-        Component.onCompleted: requestPaint()
+    Image {
+        id: atlasImage
+        source: asciiRoot.fileUrl("atlas.png")
+        visible: false
+        smooth: false
+        cache: true
+        layer.enabled: true
+    }
 
-        onWidthChanged: requestPaint()
-        onHeightChanged: requestPaint()
-
-        Connections {
-            target: asciiRoot
-            function onFontFamilyChanged() { atlasGenerator.requestPaint(); }
-            function onAsciiCharsChanged() { atlasGenerator.requestPaint(); }
-        }
-
-        onPaint: {
-            if (!asciiChars || asciiChars.length === 0) {
-                return;
-            }
-
-            var ctx = getContext("2d");
-            ctx.imageSmoothingEnabled = true;
-
-            ctx.reset();
-            ctx.clearRect(0, 0, width, height);
-            
-            ctx.fillStyle = "white";
-
-            ctx.font = charHeight + "px " + fontFamily;
-            ctx.textBaseline = "middle";
-            ctx.textAlign = "center";
-
-            let slotWidth = charWidth * 2;
-            for (var i = 0; i < asciiChars.length; i++) {
-                let xCenter = (i * slotWidth) + (slotWidth / 2);
-                ctx.fillText(asciiChars[i], xCenter, charHeight / 2);
-            }
-        }
-
-        onPainted: {
-            asciiShader.update();
-        }
+    Image {
+        id: metadataImage
+        source: asciiRoot.fileUrl("metadata.png")
+        visible: false
+        smooth: false
+        cache: true
+        layer.enabled: true
     }
 
     ShaderEffect {
-        id: asciiShader
         anchors.fill: parent
-        
-        property variant src: sourceImg
-        property variant srcNext: sourceNextImg
-        property variant atlas: atlasGenerator 
-
-        property real invAtlasCount: asciiChars && asciiChars.length > 0 ? 1.0 / asciiChars.length : 1.0
-        property real progress: asciiRoot.transitionProgress
-
-        property size charSize: Qt.size(charWidth, charHeight)
-        property size viewSize: Qt.size(width, height)
-        
-        property int atlasCount: (asciiChars && asciiChars.length > 0) ? asciiChars.length : 1
-        property int isGrayscaled: asciiRoot.grayscale ? 1 : 0
-
+        blending: false
+        property variant glyphs: glyphMap
+        property variant colors: colorMap
+        property variant atlas: atlasImage
+        property variant metadata: metadataImage
+        property size gridSize: Qt.size(glyphMap.implicitWidth, glyphMap.implicitHeight)
         vertexShader: "shaders/ascii.vert.qsb"
         fragmentShader: "shaders/ascii.frag.qsb"
     }
 }
-

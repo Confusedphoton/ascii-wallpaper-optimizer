@@ -1,92 +1,56 @@
+# ASCII Wallpaper Optimizer
 
-<img src="ascii-kore_projects.png" alt="(ASCII) Kore Projects" style="width: 100%" />
-<div align="center">
-  <h1 style="margin-bottom: 0;">ASCII Wallpapers</h1>
-    <div style="margin-top: 0;">
-        <br>
-        <a href="https://gitlab.com/Korvexx">
-            <img src="https://img.shields.io/badge/made%20by-Korvexx-pink" alt="GitLab" />
-        </a>
-        <a href="https://ko-fi.com/korvexx">
-            <img src="https://img.shields.io/badge/consider%20donating%20💖-white" alt="Donating" />
-        </a>
-    </div>
-    </br>
-    <p>
-        ASCII Wallpapers is a wallpaper addon for KDE Plasma transforming any static image into ASCII-Art.<br>
-        Choose your font and character set, adjust detail-level and grayscale and switch between image and slideshow mode!
-    </p>
-    <br>
-</div>
+This fork of [ASCII Wallpaper](https://gitlab.com/Korvexx/ascii-wallpaper) renders KDE Plasma wallpapers with an offline numerical optimizer. It chooses font glyphs and their foreground colors by scoring the actual rendered pixels, including structure across character cells. Slideshow transitions are sequences of optimized glyph/color grids: one character occupies each cell at every instant, without blending two ASCII images on screen.
 
-<h3>Preview of the addon</h3>
-<div align="center">
-<table style="border: none;">
-<tr>
-<!-- Low res-->
-<td align="center"><img src="screenshots/wallpaper_lowres.png" width="400"/>
+The Plasma package only plays prepared assets. Rendering can take time, especially at the 2×4 detail level or for a slideshow. PyTorch can run the solve on a CPU or CUDA GPU.
 
-<strong>Low Detail</strong></td>
-<!-- Medium res-->
-<td align="center"><img src="screenshots/wallpaper_mediumres.png" width="400"/>
+## Install and prepare a wallpaper
 
-<strong>Medium Detail</strong></td>
-</tr>
-<tr>
+Install the Plasma wallpaper package from this directory:
 
-<!-- High res-->
-<td align="center"><img src="screenshots/wallpaper_highres.png" width="400"/>
+```sh
+kpackagetool6 --type Plasma/Wallpaper --install "$PWD"
+```
 
-<strong>High Detail</strong></td>
+For subsequent updates, use `--upgrade "$PWD"` instead of `--install "$PWD"`.
 
-<!-- Grayscaled-->
-<td align="center"><img src="screenshots/wallpaper_grayscaled.png" width="400"/>
+Install the Python renderer in a virtual environment:
 
-<strong>Grayscale Mode</strong></td>
-</tr>
-</table>
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+```
 
+If your Python installation does not include `pip`, `uv venv .venv` and `uv pip install --python .venv/bin/python -e .` work as well.
 
-<img src="screenshots/settings.png" width="600"/>
+Render at the display's pixel resolution. List slideshow images in their intended order. For one image, pass one path; for a slideshow, pass at least two.
 
+```sh
+.venv/bin/ascii-wallpaper-render \
+  --size 1920x1080 --detail 1 \
+  --font "DejaVu Sans Mono" \
+  --frames 16 \
+  --output "$HOME/Pictures/ascii-rendered" \
+  "$HOME/Pictures/first.jpg" "$HOME/Pictures/second.jpg"
+```
 
-<em>The Wallpaper Settings Configuration Page</em>
-</div>
+In Plasma's wallpaper settings, select **ASCII Wallpaper Optimizer**, select the same source images in the same order, then set **Rendered Assets** to the absolute output directory. Match **Detail Level** and **Transition Frames** to the command. The source image list determines slideshow order; the prepared grids supply the displayed pixels. Re-run the command after changing images, image order, font, characters, detail, grayscale, crop, or resolution. The renderer skips work when its full input signature and outputs match, and reuses unchanged stills and image pairs when possible.
 
-<h3>How does it work?</h3>
-<div>
-    <p>
-    Using a GLSL shader, the wallpaper is converted to ASCII in real-time.<br>
-    The steps to achieve the ASCII-fication are quite simple:
-    </p>
-    <ul>
-        <li><strong>Atlas Generation:</strong> When the wallpaper is loaded, a hidden `canvas` element draws the sequence of ASCII characters from darkest to lightes in the selected detail size onto a texture strip which is called an <strong>Atlas</strong>.</li>
-        <li><strong>Grid Sampling:</strong> The shader divides the screen into a grid which is based on the chosen <strong>Detail Level</strong>. It samples the color of the original image at the center of each grid cell to determine the color for that character</li>
-        <li><strong>Intensity Mapping:</strong> The shader calculates the brightness of the sampled color acting as an index to pick the most appropriate character from the Atlas.</li>
-        <li><strong>Final Render:</strong> Each grid cell is masked by the chosen character. If <strong>Grayscale</strong> is enabled, the original color is desaturated before being multiplied by the character mask, resulting in the final output.</li>
-    </ul>
-</div>
+The rendered directory contains `atlas.png`, `metadata.png`, still grids, transition frame grids, still PNG previews, and `manifest.json`. It can be moved as a unit. The preview PNGs are exports; Plasma displays the compact glyph/color maps through a small shader. Each transition includes both exact still endpoints and optimized intermediate frames. The last slideshow image also transitions to the first.
 
-<h3>How to use it</h3>
-<div>
-    <ol>
-        <li>Navigate: <strong>System settings > Wallpaper</strong></li>
-        <li>Set <strong>Wallpaper type</strong> to "ASCII Wallpaper"</li>
-        <li>Select a Wallpaper</li>
-        <li>Adjust <strong>Detail level</strong> and <strong>Grayscale</strong> if wanted</li>
-        <li>Click apply</li>
-    </ol>
-</div>
+## Quality controls
 
+- `--detail 0`, `1`, `2` uses 2×4, 4×8, or 8×16 pixel cells. `--cell WIDTHxHEIGHT` overrides this; the prepared asset's metadata controls playback cell size.
+- `--chars ' ...'` sets the exact glyph set. Include a literal leading space if desired. Characters must be unique, and the Plasma character list must match the rendered assets.
+- `--crop fill` fills the display by cropping; `--crop fit` letterboxes onto black. `--grayscale` converts the source before optimization.
+- `--dither` controls deterministic, spectrally filtered blue noise in glyph selection; `0` disables it. `--seed` makes the result reproducible.
+- `--steps`, `--transition-steps`, and `--candidates` trade rendering time and memory for search quality. `--device cpu` works without a GPU; `--device cuda` uses a supported PyTorch CUDA installation.
+- `--force` rebuilds even if the full input signature matches.
 
-<h3>Donations</h3>
-<p>
-I develop projects like <strong>ASCII Wallpapers</strong> in my free time, so if you enjoy this addon and want to support me and my projects, consider donating so that I can dedicate more time to mainting my projects and creating new ones!
-</p>
+## How the optimizer works
 
-<div align="center">
-  <a href="https://ko-fi.com/H2H3YHHOC"><img src="https://img.shields.io/badge/Donate%20on-Ko--Fi-magenta" alt="Ko-Fi" /></a>
-  <a href="https://liberapay.com/Korvexx/donate"><img src="https://img.shields.io/badge/Donate%20on-Liberapay-yellow" alt="Liberapay" /></a>
-  <a href="https://www.paypal.com/donate/?hosted_button_id=R32URW6RPXB24"><img src="https://img.shields.io/badge/Donate%20on-Paypal-blue" alt="Paypal" /></a>
-</div>
-</div>
+The renderer rasterizes each glyph from the selected font at final cell size. It fits a foreground color in linear light for each candidate, then optimizes candidate weights and colors against a full-frame objective with pixel, multiscale color, and edge terms. This full-frame step includes neighboring cells, so tiles are never independently finalized. A final color pass runs with discrete glyphs. The character mask is applied once, avoiding the old shader's double reduction of brightness.
+
+For each slideshow pair, the offline solver starts and ends at the exact optimized stills. Intermediate grids are optimized with temporal shape and color penalties plus a blue noise change schedule. Plasma chooses the prepared frame and draws its glyphs; it performs no pixel crossfade or optimization at display time.
+
+The project remains licensed under [AGPL-3.0-or-later](LICENSE.md).

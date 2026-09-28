@@ -22,6 +22,8 @@ Item {
 
     property string cfg_Mode: "Image"
     property string cfg_FontFamily: "Monospace"
+    property string cfg_RenderDirectory: ""
+    property int cfg_TransitionFrames: 16
     property list<string> cfg_AsciiChars: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@"]
     property list<string> cfg_Images: []
     property var monoFonts: []
@@ -332,7 +334,7 @@ Item {
                     to: 1.0
 
                     duration: 1500
-                    easing.type: Easing.InOutQuad
+                    easing.type: Easing.Linear
                     
                     onFinished: {
                         previewContainer.currentIdx = previewContainer.nextIdx;
@@ -349,14 +351,12 @@ Item {
                     AsciiShader {
                         id: previewShader
                         anchors.fill: parent
-                        
-                        source: previewContainer.getPreviewPath(previewContainer.currentIdx)
-                        sourceNext: previewContainer.getPreviewPath(previewContainer.nextIdx)
-                        
+
+                        renderDirectory: root.cfg_RenderDirectory
+                        currentIndex: previewContainer.currentIdx
+                        nextIndex: previewContainer.nextIdx
+                        transitionFrames: root.cfg_TransitionFrames
                         detail: root.cfg_Detail
-                        grayscale: root.cfg_Grayscale
-                        fontFamily: root.cfg_FontFamily
-                        asciiChars: root.cfg_AsciiChars
                     }
                 }
 
@@ -397,9 +397,9 @@ Item {
 
                 Controls.Label {
                     anchors.centerIn: parent
-                    text: "No Image Selected"
+                    text: "Select images and a rendered asset directory"
                     opacity: 0.5
-                    visible: previewContainer.getPreviewPath(previewContainer.currentIdx) === ""
+                    visible: root.cfg_RenderDirectory === "" || previewContainer.getPreviewPath(previewContainer.currentIdx) === ""
                 }
 
                 Rectangle {
@@ -613,6 +613,34 @@ Item {
             Kirigami.Separator {
                 Kirigami.FormData.isSection: true
                 Kirigami.FormData.label: "Appearance"
+            }
+
+            Controls.TextField {
+                Kirigami.FormData.label: "Rendered Assets:"
+                Layout.fillWidth: true
+                text: root.cfg_RenderDirectory
+                placeholderText: "Directory produced by ascii-wallpaper-render"
+                onEditingFinished: {
+                    root.cfg_RenderDirectory = text.trim()
+                    if (root.configDialog) root.configDialog.changed = true
+                }
+            }
+
+            Controls.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: "Font, characters, detail, grayscale, and image order take effect after offline rendering. See the README for the render command."
+            }
+
+            Controls.SpinBox {
+                Kirigami.FormData.label: "Transition Frames:"
+                from: 2
+                to: 120
+                value: root.cfg_TransitionFrames
+                onValueModified: {
+                    root.cfg_TransitionFrames = value
+                    if (root.configDialog) root.configDialog.changed = true
+                }
             }
 
             Controls.ComboBox {

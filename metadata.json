@@ -8,11 +8,11 @@
             }
         ],
         "Category": "",
-        "Description": "See the world of ASCII Wallpapers",
+        "Description": "Offline optimized ASCII wallpaper with glyph-aware slideshow transitions",
         "Icon": "preferences-desktop-color",
-        "Id": "de.korvexx.ascii_wallpaper",
+        "Id": "org.asciiwallpaper.optimizer",
         "License": "AGPLv3+",
-        "Name": "ASCII Wallpaper",
+        "Name": "ASCII Wallpaper Optimizer",
         "Website": ""
     },
     "X-KDE-ParentApp": "org.kde.plasmashell"

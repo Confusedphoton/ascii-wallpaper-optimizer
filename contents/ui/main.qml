@@ -17,40 +17,11 @@ WallpaperItem {
         return Math.max(5, v);
     }
 
-    readonly property string legacyImage: wallpaper.configuration.Image || ""
-
-    readonly property var defaultAsciiChars: ["#", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@"]
-    readonly property var asciiChars: {
-        let chars = wallpaper.configuration.AsciiChars;
-        return (chars && chars.length > 0) ? chars : root.defaultAsciiChars;
-    }
-
-    function toFileUrl(rawPath) {
-        if (!rawPath) return "";
-        const clean = String(rawPath).trim();
-        if (clean === "") return "";
-        return "file://" + clean.split("/").map(encodeURIComponent).join("/");
-    }
+    readonly property string renderDirectory: wallpaper.configuration.RenderDirectory || ""
+    readonly property int transitionFrames: wallpaper.configuration.TransitionFrames || 16
 
     property int currentIdx: 0
     property int nextIdx: 0
-
-    function getImage(index) {
-        if (configImages && configImages.length !== undefined && configImages.length > 0) {
-            if (index < configImages.length) {
-                let raw = String(configImages[index] || "").trim();
-                return raw !== "" ? root.toFileUrl(raw) : "";
-            }
-            
-            return "";
-        }
-
-        if (legacyImage && legacyImage.trim() !== "") {
-            return root.toFileUrl(legacyImage.trim());
-        }
-
-        return "";
-    }
 
     Timer {
         id: intervalTimer
@@ -75,7 +46,7 @@ WallpaperItem {
         to: 1.0
 
         duration: 1000
-        easing.type: Easing.InOutQuad
+        easing.type: Easing.Linear
 
         onFinished: {
             root.currentIdx = root.nextIdx;
@@ -98,13 +69,11 @@ WallpaperItem {
         id: shaderContainer
         anchors.fill: parent
         
-        source: root.getImage(root.currentIdx)
-        sourceNext: root.getImage(root.nextIdx)
-        
+        renderDirectory: root.renderDirectory
+        currentIndex: root.currentIdx
+        nextIndex: root.nextIdx
+        transitionFrames: root.transitionFrames
         detail: (wallpaper.configuration.Detail !== undefined) ? wallpaper.configuration.Detail : 1
-        grayscale: wallpaper.configuration.Grayscale || false
-        fontFamily: wallpaper.configuration.FontFamily || "Monospace"
-        asciiChars: root.asciiChars
     }
 
     Component.onCompleted: {

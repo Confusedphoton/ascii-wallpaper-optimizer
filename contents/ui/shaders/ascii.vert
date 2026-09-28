@@ -8,12 +8,7 @@ layout(location = 0) out vec2 qt_TexCoord0;
 layout(std140, binding = 0) uniform buf {
     mat4 qt_Matrix;
     float qt_Opacity;
-    vec2 charSize;
-    vec2 viewSize;
-    int atlasCount;
-    int isGrayscaled;
-    float invAtlasCount;
-    float progress;
+    vec2 gridSize;
 };
 
 void main() {
