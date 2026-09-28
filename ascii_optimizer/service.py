@@ -24,6 +24,28 @@ from . import __version__
 PORT = 48741
 ADDRESS = "127.0.0.1"
 MAX_BODY = 65536
+OVERRIDE_PATH = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "ascii-wallpaper-optimizer" / "override.json"
+override_lock = threading.Lock()
+
+
+def get_override() -> str:
+    with override_lock:
+        try:
+            profile = json.loads(OVERRIDE_PATH.read_text()).get("profile", "auto")
+            return profile if profile in ("auto", "A", "B") else "auto"
+        except (OSError, ValueError, TypeError):
+            return "auto"
+
+
+def set_override(profile: str) -> str:
+    if profile not in ("auto", "A", "B"):
+        raise ValueError("Override must be auto, A, or B.")
+    with override_lock:
+        OVERRIDE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary = OVERRIDE_PATH.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"profile": profile}) + "\n")
+        temporary.replace(OVERRIDE_PATH)
+    return profile
 
 
 def _screen_size(name: str, fallback: list[int]) -> tuple[int, int]:
@@ -58,12 +80,18 @@ def _validated_request(raw: dict) -> dict:
     dither = float(raw["dither"])
     structure_dither = float(raw.get("structure_dither", 0.06))
     style = str(raw.get("style", "headroom"))
+    transition_pace = str(raw.get("transition_pace", "ease-in-out"))
+    transition_field = str(raw.get("transition_field", "blue-noise"))
+    transition_spread = float(raw.get("transition_spread", 0.65))
     invert_ink = raw.get("invert_ink", False)
     background = str(raw.get("background", "auto"))
     if detail not in (0, 1, 2) or not 2 <= frames <= 120 or not 0 <= dither <= 0.05:
         raise ValueError("Detail, frame count, or dithering strength is out of range.")
     if style not in ("headroom", "structure") or not isinstance(invert_ink, bool) or not 0 <= structure_dither <= 0.12:
         raise ValueError("Render style, ink polarity, or structure dithering is invalid.")
+    if transition_pace not in ("linear", "ease-in", "ease-out", "ease-in-out") or transition_field not in (
+            "blue-noise", "ripple", "spiral", "directional", "edge", "salience") or not 0 <= transition_spread <= 0.9:
+        raise ValueError("Transition pace, field, or spread is invalid.")
     if background != "auto" and not re.fullmatch(r"#[0-9a-fA-F]{6}", background):
         raise ValueError("Background must be auto or a #RRGGBB color.")
     background = background.lower()
@@ -84,6 +112,8 @@ def _validated_request(raw: dict) -> dict:
         "version": __version__, "images": images, "image_hashes": image_hashes, "font": str(raw["font"]),
         "chars": chars, "detail": detail, "grayscale": bool(raw["grayscale"]),
         "frames": frames, "dither": dither, "structure_dither": structure_dither,
+        "transition_pace": transition_pace, "transition_field": transition_field,
+        "transition_spread": transition_spread,
         "style": style, "invert_ink": invert_ink,
         "background": background, "size": list(size),
     }
@@ -135,6 +165,9 @@ class RenderQueue:
                        "--output", directory, "--size", f"{settings['size'][0]}x{settings['size'][1]}",
                        "--font", settings["font"], "--chars", settings["chars"],
                        "--detail", str(settings["detail"]), "--frames", str(settings["frames"]),
+                       "--transition-pace", settings["transition_pace"],
+                       "--transition-field", settings["transition_field"],
+                       "--transition-spread", str(settings["transition_spread"]),
                        "--dither", str(settings["dither"]),
                        "--style", settings["style"],
                        "--structure-dither", str(settings["structure_dither"]),
@@ -194,6 +227,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/v1/health":
             self._json(200, {"service": "ascii-wallpaper-optimizer", "version": 1})
+        elif path == "/v1/override":
+            self._json(200, {"profile": get_override()})
         elif path.startswith("/v1/status/"):
             job = self.queue.status(path.removeprefix("/v1/status/"))
             self._json(200 if job else 404, job or {"error": "Unknown render job"})
@@ -201,7 +236,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "Unknown endpoint"})
 
     def do_POST(self) -> None:
-        if self.path != "/v1/render":
+        if self.path not in ("/v1/render", "/v1/override"):
             self._json(404, {"error": "Unknown endpoint"})
             return
         if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
@@ -212,7 +247,10 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < length <= MAX_BODY:
                 raise ValueError("Render request is too large or empty.")
             request = json.loads(self.rfile.read(length))
-            self._json(200, self.queue.submit(request))
+            if self.path == "/v1/override":
+                self._json(200, {"profile": set_override(request["profile"])})
+            else:
+                self._json(200, self.queue.submit(request))
         except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
             self._json(400, {"error": str(error)})
 

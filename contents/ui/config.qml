@@ -21,9 +21,21 @@ Item {
     property var wallpaperConfiguration
 
     property string cfg_Mode: "Image"
+    property string cfg_ModeB: "Image"
+    property list<string> cfg_ImagesB: []
+    property bool cfg_ScheduleEnabled: false
+    property string cfg_ProfileAStart: "07:00"
+    property string cfg_ProfileBStart: "19:00"
+    property int editProfile: 0
+    readonly property string editMode: editProfile === 0 ? cfg_Mode : cfg_ModeB
+    readonly property var editImages: editProfile === 0 ? cfg_Images : cfg_ImagesB
     property string cfg_FontFamily: "Monospace"
     property string cfg_RenderDirectory: ""
     property int cfg_TransitionFrames: 16
+    property int cfg_TransitionDuration: 1500
+    property string cfg_TransitionPace: "ease-in-out"
+    property string cfg_TransitionField: "blue-noise"
+    property real cfg_TransitionSpread: 0.65
     property int cfg_BackgroundMode: 0
     property string cfg_BackgroundColor: "#202028"
     property string cfg_RenderStyle: "headroom"
@@ -66,7 +78,12 @@ Item {
     property bool _isInternalUpdate: false
 
     onCfg_ImagesChanged: {
-        loadFromConfig();
+        if (editProfile === 0) loadFromConfig();
+    }
+    onCfg_ImagesBChanged: if (editProfile === 1) loadFromConfig()
+    onEditProfileChanged: {
+        loadFromConfig()
+        if (controlsReady) previewContainer.resetPreview()
     }
     onCfg_FontFamilyChanged: {
         if (!monoFonts.includes(cfg_FontFamily))
@@ -81,9 +98,9 @@ Item {
         imageList.clear();
 
         let migrated = false;
-        let currentImages = Array.from(root.cfg_Images || []);
+        let currentImages = Array.from(root.editImages || []);
 
-        if (root.cfg_Image && root.cfg_Image.trim() !== "") {
+        if (editProfile === 0 && root.cfg_Image && root.cfg_Image.trim() !== "") {
             const cleaned = root.cfg_Image.trim();
             const alreadyExists = currentImages.some(p => String(p).trim() === cleaned);
 
@@ -121,7 +138,7 @@ Item {
             imageList.append({ "path": decoded });
         }
 
-        if (imageList.count === 0 && root.cfg_Mode !== "Slideshow") {
+        if (imageList.count === 0 && root.editMode !== "Slideshow") {
             imageList.append({ "path": "" });
         }
 
@@ -146,7 +163,8 @@ Item {
             }
         }
         
-        root.cfg_Images = Array.from(unique);
+        if (editProfile === 0) root.cfg_Images = Array.from(unique);
+        else root.cfg_ImagesB = Array.from(unique);
         if (root.configDialog) {
             root.configDialog.changed = true;
         }
@@ -156,7 +174,7 @@ Item {
     function clearImages() {
         imageList.clear()
 
-        if (root.cfg_Mode !== "Slideshow") {
+        if (root.editMode !== "Slideshow") {
             imageList.append({ "path": "" })
         }
 
@@ -229,12 +247,15 @@ Item {
 
     RenderClient {
         id: renderer
-        images: root.cfg_Mode === "Slideshow" ? Array.from(root.cfg_Images) : Array.from(root.cfg_Images).slice(0, 1)
+        images: root.editMode === "Slideshow" ? Array.from(root.editImages) : Array.from(root.editImages).slice(0, 1)
         fontFamily: root.cfg_FontFamily
         characters: Array.from(root.cfg_AsciiChars).join("")
         detail: root.cfg_Detail
         grayscale: root.cfg_Grayscale
         frames: root.cfg_TransitionFrames
+        transitionPace: root.cfg_TransitionPace
+        transitionField: root.cfg_TransitionField
+        transitionSpread: root.cfg_TransitionSpread
         dither: root.cfg_Dither
         structureDither: root.cfg_StructureDither
         renderStyle: root.cfg_RenderStyle
@@ -260,7 +281,7 @@ Item {
         title: "Select Wallpaper"
 
         currentFolder: StandardPaths.standardLocations(StandardPaths.PicturesLocation)[0]
-        fileMode: root.cfg_Mode === "Slideshow" ? FileDialog.OpenFiles : FileDialog.OpenFile
+        fileMode: root.editMode === "Slideshow" ? FileDialog.OpenFiles : FileDialog.OpenFile
         nameFilters: ["Image files (*.png *.jpg *.jpeg)"]
 
         onAccepted: {
@@ -366,28 +387,18 @@ Item {
 
                 function resetPreview() {
                     previewTimer.stop();
-                    
-                    if (currentIdx !== 0 && imageList.count > 0) {
-                        crossfadeAnimation.stop();
-                        previewShader.transitionProgress = 0.0;
-
-                        nextIdx = 0;
-                        crossfadeAnimation.restart();
-                    } else {
-                        crossfadeAnimation.stop();
-                        previewShader.transitionProgress = 0.0;
-
-                        currentIdx = 0;
-                        nextIdx = 0;
-                    }
-
+                    crossfadeAnimation.stop();
+                    previewShader.transitionProgress = 0.0;
+                    currentIdx = 0;
+                    nextIdx = 0;
                     previewTimer.restart();
                 }
 
                 onCurrentIdxChanged: previewShader.transitionProgress = 0.0
                 Connections {
                     target: root
-                    onCfg_ModeChanged: previewContainer.resetPreview()
+                    function onCfg_ModeChanged() { previewContainer.resetPreview() }
+                    function onCfg_ModeBChanged() { previewContainer.resetPreview() }
                 }
 
                 function getPreviewPath(index) {
@@ -412,7 +423,8 @@ Item {
                     id: previewTimer
                     
                     interval: root.cfg_SlideInterval * 1000
-                    running: root.cfg_Mode === "Slideshow" && imageList.count > 1
+                    running: root.editMode === "Slideshow" && imageList.count > 1
+                        && previewContainer.currentIdx === previewContainer.nextIdx
                     repeat: true
 
                     onTriggered: {
@@ -432,7 +444,7 @@ Item {
                     from: 0.0
                     to: 1.0
 
-                    duration: 1500
+                    duration: root.cfg_TransitionDuration
                     easing.type: Easing.Linear
                     
                     onFinished: {
@@ -552,7 +564,7 @@ Item {
                 Controls.Button {
                     text: renderer.renderState === "error" ? "Retry" : "Render now"
                     onClicked: renderer.start(renderer.renderState === "ready")
-                    enabled: root.cfg_Images.length > 0
+                    enabled: root.editImages.length > 0
                 }
             }
         }
@@ -564,6 +576,50 @@ Item {
             Kirigami.Separator {
                 Kirigami.FormData.isSection: true
                 Kirigami.FormData.label: "Source"
+            }
+
+            Controls.ComboBox {
+                Kirigami.FormData.label: "Editing Profile:"
+                Layout.fillWidth: true
+                model: ["Profile A", "Profile B"]
+                currentIndex: root.editProfile
+                onActivated: index => root.editProfile = index
+            }
+
+            Controls.CheckBox {
+                Kirigami.FormData.label: "Time of Day:"
+                text: "Switch profiles automatically"
+                checked: root.cfg_ScheduleEnabled
+                onToggled: {
+                    root.cfg_ScheduleEnabled = checked
+                    if (root.configDialog) root.configDialog.changed = true
+                }
+            }
+
+            Controls.TextField {
+                Kirigami.FormData.label: "Profile A From:"
+                visible: root.cfg_ScheduleEnabled
+                text: root.cfg_ProfileAStart
+                inputMask: "99:99"
+                onEditingFinished: {
+                    if (/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(text)) {
+                        root.cfg_ProfileAStart = text
+                        if (root.configDialog) root.configDialog.changed = true
+                    } else text = root.cfg_ProfileAStart
+                }
+            }
+
+            Controls.TextField {
+                Kirigami.FormData.label: "Profile B From:"
+                visible: root.cfg_ScheduleEnabled
+                text: root.cfg_ProfileBStart
+                inputMask: "99:99"
+                onEditingFinished: {
+                    if (/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(text)) {
+                        root.cfg_ProfileBStart = text
+                        if (root.configDialog) root.configDialog.changed = true
+                    } else text = root.cfg_ProfileBStart
+                }
             }
 
             RowLayout {
@@ -580,11 +636,12 @@ Item {
                     Layout.fillWidth: true
 
                     model: ["Image", "Slideshow"]
-                    currentIndex: model.indexOf(root.cfg_Mode)
+                    currentIndex: model.indexOf(root.editMode)
 
                     onActivated: (index) => {
                         let newMode = model[index];
-                        root.cfg_Mode = newMode;
+                        if (root.editProfile === 0) root.cfg_Mode = newMode;
+                        else root.cfg_ModeB = newMode;
 
                         if (newMode !== "Slideshow" && imageList.count === 0) {
                             imageList.append({ "path": "" });
@@ -626,7 +683,7 @@ Item {
 
                             delegate: RowLayout {
                                 Layout.fillWidth: true
-                                visible: root.cfg_Mode === "Slideshow" || index === 0
+                                visible: root.editMode === "Slideshow" || index === 0
 
                                 ColumnLayout {
                                     spacing: -5
@@ -636,7 +693,7 @@ Item {
 
                                     Controls.ToolButton {
                                         icon.name: "arrow-up"
-                                        visible: root.cfg_Mode === "Slideshow"
+                                        visible: root.editMode === "Slideshow"
                                         enabled: visible && index > 0
 
                                         Layout.fillWidth: true
@@ -652,7 +709,7 @@ Item {
 
                                     Controls.ToolButton {
                                         icon.name: "arrow-down"
-                                        visible: root.cfg_Mode === "Slideshow"
+                                        visible: root.editMode === "Slideshow"
                                         enabled: visible && index < imageList.count - 1
 
                                         Layout.fillWidth: true
@@ -677,8 +734,8 @@ Item {
                                 Controls.Button {
                                     icon.name: "document-open"
 
-                                    visible: root.cfg_Mode !== "Slideshow"
-                                    enabled: root.cfg_Mode !== "Slideshow"
+                                    visible: root.editMode !== "Slideshow"
+                                    enabled: root.editMode !== "Slideshow"
 
                                     onClicked: {
                                         root._activePicker = index;
@@ -692,7 +749,7 @@ Item {
                                     icon.name: "list-remove"
 
                                     enabled: imageList.count > 1
-                                    visible: root.cfg_Mode === "Slideshow" ? true : false
+                                    visible: root.editMode === "Slideshow" ? true : false
 
                                     onClicked: {
                                         root.removeImage(index)
@@ -706,7 +763,7 @@ Item {
                 RowLayout {
                     Layout.fillWidth: true
 
-                    visible: root.cfg_Mode === "Slideshow"
+                    visible: root.editMode === "Slideshow"
 
                     Controls.Button {
                         Kirigami.FormData.label: ""
@@ -714,7 +771,7 @@ Item {
                         Layout.fillWidth: true
                         Layout.preferredWidth: 0
 
-                        enabled: root.cfg_Mode === "Slideshow"
+                        enabled: root.editMode === "Slideshow"
                         
                         text: "Select Images"
                         icon.name: "list-add"
@@ -731,7 +788,7 @@ Item {
                         Layout.fillWidth: true
                         Layout.preferredWidth: 0
 
-                        enabled: root.cfg_Mode === "Slideshow"
+                        enabled: root.editMode === "Slideshow"
                         
                         text: "Clear Images"
                         icon.name: "edit-delete"
@@ -793,6 +850,57 @@ Item {
                     root.cfg_TransitionFrames = value
                     if (root.configDialog) root.configDialog.changed = true
                 }
+            }
+
+            Controls.SpinBox {
+                Kirigami.FormData.label: "Transition Time (ms):"
+                from: 100
+                to: 30000
+                stepSize: 100
+                value: root.cfg_TransitionDuration
+                onValueModified: {
+                    root.cfg_TransitionDuration = value
+                    if (root.configDialog) root.configDialog.changed = true
+                }
+            }
+
+            Controls.ComboBox {
+                Kirigami.FormData.label: "Transition Pacing:"
+                Layout.fillWidth: true
+                model: ["Linear", "Ease in", "Ease out", "Ease in and out"]
+                currentIndex: ["linear", "ease-in", "ease-out", "ease-in-out"].indexOf(root.cfg_TransitionPace)
+                onActivated: index => {
+                    root.cfg_TransitionPace = ["linear", "ease-in", "ease-out", "ease-in-out"][index]
+                    if (root.configDialog) root.configDialog.changed = true
+                }
+            }
+
+            Controls.ComboBox {
+                Kirigami.FormData.label: "Morph Pattern:"
+                Layout.fillWidth: true
+                model: ["Blue noise dissolve", "Ripple", "Spiral", "Directional flow", "From edges", "Image salience"]
+                currentIndex: ["blue-noise", "ripple", "spiral", "directional", "edge", "salience"].indexOf(root.cfg_TransitionField)
+                onActivated: index => {
+                    root.cfg_TransitionField = ["blue-noise", "ripple", "spiral", "directional", "edge", "salience"][index]
+                    if (root.configDialog) root.configDialog.changed = true
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Spatial Stagger:"
+                Controls.Slider {
+                    id: staggerSlider
+                    Layout.fillWidth: true
+                    from: 0
+                    to: 0.9
+                    stepSize: 0.05
+                    value: root.cfg_TransitionSpread
+                    onMoved: {
+                        root.cfg_TransitionSpread = value
+                        if (root.configDialog) root.configDialog.changed = true
+                    }
+                }
+                Controls.Label { text: staggerSlider.value.toFixed(2) }
             }
 
             Controls.ComboBox {
@@ -971,7 +1079,7 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Interval:"
-                visible: root.cfg_Mode === "Slideshow"
+                visible: root.editMode === "Slideshow"
 
                 Controls.Slider {
                     id: intervalSlider

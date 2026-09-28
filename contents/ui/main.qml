@@ -11,14 +11,36 @@ import org.kde.plasma.wallpapers.image
 WallpaperItem {
     id: root
 
-    readonly property string mode: wallpaper.configuration.Mode || "Image"
-    readonly property var configImages: wallpaper.configuration.Images || []
+    property string overrideProfile: "auto"
+    property int timeRevision: 0
+    readonly property string scheduledProfile: {
+        timeRevision
+        if (!wallpaper.configuration.ScheduleEnabled) return "A"
+        const parse = value => {
+            const parts = String(value).split(":").map(Number)
+            return parts.length === 2 && parts[0] >= 0 && parts[0] < 24 && parts[1] >= 0 && parts[1] < 60
+                ? parts[0] * 60 + parts[1] : 0
+        }
+        const a = parse(wallpaper.configuration.ProfileAStart || "07:00")
+        const b = parse(wallpaper.configuration.ProfileBStart || "19:00")
+        if (a === b) return "A"
+        const now = new Date()
+        const minute = now.getHours() * 60 + now.getMinutes()
+        return a <= b ? (minute >= a && minute < b ? "A" : "B")
+                      : (minute >= a || minute < b ? "A" : "B")
+    }
+    readonly property string activeProfile: overrideProfile === "auto" ? scheduledProfile : overrideProfile
+    readonly property string mode: activeProfile === "A" ? (wallpaper.configuration.Mode || "Image")
+        : (wallpaper.configuration.ModeB || "Image")
+    readonly property var configImages: activeProfile === "A" ? (wallpaper.configuration.Images || [])
+        : (wallpaper.configuration.ImagesB || [])
     readonly property int slideInterval: {
         let v = (wallpaper.configuration.SlideInterval !== undefined) ? wallpaper.configuration.SlideInterval : 10;
         return Math.max(5, v);
     }
 
     readonly property int transitionFrames: wallpaper.configuration.TransitionFrames || 16
+    readonly property int transitionDuration: Math.max(100, wallpaper.configuration.TransitionDuration || 1500)
     property int renderRevision: 0
 
     property int currentIdx: 0
@@ -34,6 +56,10 @@ WallpaperItem {
         detail: (wallpaper.configuration.Detail !== undefined) ? wallpaper.configuration.Detail : 1
         grayscale: !!wallpaper.configuration.Grayscale
         frames: root.transitionFrames
+        transitionPace: wallpaper.configuration.TransitionPace || "ease-in-out"
+        transitionField: wallpaper.configuration.TransitionField || "blue-noise"
+        transitionSpread: (wallpaper.configuration.TransitionSpread !== undefined)
+            ? wallpaper.configuration.TransitionSpread : 0.65
         dither: (wallpaper.configuration.Dither !== undefined) ? wallpaper.configuration.Dither : 0.005
         structureDither: (wallpaper.configuration.StructureDither !== undefined)
             ? wallpaper.configuration.StructureDither : 0.06
@@ -56,7 +82,8 @@ WallpaperItem {
     Timer {
         id: intervalTimer
 
-        running: root.mode === "Slideshow" && root.configImages.length > 1 && shaderContainer.ready
+        running: root.mode === "Slideshow" && root.configImages.length > 1
+            && root.currentIdx === root.nextIdx && shaderContainer.ready
         interval: root.slideInterval * 1000
         repeat: true
 
@@ -75,7 +102,7 @@ WallpaperItem {
         from: 0.0
         to: 1.0
 
-        duration: 1000
+        duration: root.transitionDuration
         easing.type: Easing.Linear
 
         onFinished: {
@@ -86,6 +113,31 @@ WallpaperItem {
 
     onConfigImagesChanged: resetSlideshow()
     onModeChanged: resetSlideshow()
+    onActiveProfileChanged: resetSlideshow()
+
+    Timer {
+        interval: 2000
+        repeat: true
+        running: true
+        onTriggered: {
+            root.timeRevision++
+            root.fetchOverride()
+        }
+    }
+
+    function fetchOverride() {
+        const xhr = new XMLHttpRequest()
+        xhr.open("GET", "http://127.0.0.1:48741/v1/override", true)
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState === XMLHttpRequest.DONE && xhr.status === 200) {
+                try {
+                    const value = JSON.parse(xhr.responseText).profile
+                    if (["auto", "A", "B"].includes(value)) root.overrideProfile = value
+                } catch (failure) { /* keep the last known override */ }
+            }
+        }
+        xhr.send()
+    }
 
     function resetSlideshow() {
         crossfadeAnimation.stop();
@@ -143,5 +195,6 @@ WallpaperItem {
 
     Component.onCompleted: {
         root.loading = false;
+        root.fetchOverride();
     }
 }

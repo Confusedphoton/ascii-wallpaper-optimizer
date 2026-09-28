@@ -1,0 +1,11 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Id": "org.asciiwallpaper.profile-switch",
+        "Name": "ASCII Wallpaper Profile",
+        "Description": "Switch ASCII wallpaper profiles from a Plasma panel or dock",
+        "Icon": "preferences-desktop-wallpaper",
+        "License": "AGPL-3.0-or-later"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}

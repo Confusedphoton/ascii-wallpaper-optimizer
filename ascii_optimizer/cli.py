@@ -18,6 +18,7 @@ from .assets import cell_for_display, glyph_masks, linear_to_srgb, load_target, 
 from .optimizer import Grid, _choose_background, render_grid, solve
 from .structure import STRUCTURE_CHARS, STRUCTURE_DITHER, solve_structure
 from .tone import display_tone, encode_headroom, encoded_background, invert_source
+from .transition import FIELDS, PACES, ease, glyph_paths, local_progress, path_glyphs, phase_offsets, recolor
 
 
 DEFAULT_CHARS = " .´:rszunvcxLOGDQ0KNMW&@"
@@ -107,6 +108,9 @@ def build(args: argparse.Namespace) -> None:
     style = getattr(args, "style", "headroom")
     invert_ink = bool(getattr(args, "invert_ink", False))
     structure_dither = float(getattr(args, "structure_dither", STRUCTURE_DITHER))
+    transition_pace = getattr(args, "transition_pace", "ease-in-out")
+    transition_field = getattr(args, "transition_field", "blue-noise")
+    transition_spread = float(getattr(args, "transition_spread", 0.65))
     report_progress = getattr(args, "progress_json", False)
     total_units = len(args.images) + (len(args.images) * (args.frames - 2) if len(args.images) > 1 else 0)
     completed_units = 0
@@ -139,6 +143,8 @@ def build(args: argparse.Namespace) -> None:
         "crop": args.crop, "grayscale": args.grayscale,
         "frames": args.frames, "steps": args.steps,
         "transition_steps": args.transition_steps,
+        "transition_pace": transition_pace, "transition_field": transition_field,
+        "transition_spread": transition_spread,
         "candidates": args.candidates, "dither": args.dither, "background": args.background, "seed": args.seed,
     }
     output = args.output.expanduser().resolve()
@@ -164,14 +170,18 @@ def build(args: argparse.Namespace) -> None:
     save_atlas(masks, output / "atlas.png")
     save_metadata(args.size, cell, len(chars), output / "metadata.png", invert_ink=invert_ink)
     old_signature = old.get("signature", {})
-    settings_match = all(old_signature.get(key) == value for key, value in signature.items()
-                         if key not in ("images", "image_hashes"))
+    still_settings_match = all(old_signature.get(key) == value for key, value in signature.items()
+                               if key not in ("images", "image_hashes", "frames", "transition_steps",
+                                              "transition_pace", "transition_field", "transition_spread"))
+    transition_settings_match = still_settings_match and all(
+        old_signature.get(key) == signature[key] for key in
+        ("frames", "transition_steps", "transition_pace", "transition_field", "transition_spread"))
     old_hashes = old_signature.get("image_hashes", [])
     targets = [load_target(path, args.size, args.crop, args.grayscale) for path in images]
     stills = []
     for index, target in enumerate(targets):
         still_dir = output / "stills" / f"{index:04d}"
-        if (settings_match and index < len(old_hashes)
+        if (still_settings_match and index < len(old_hashes)
                 and old_hashes[index] == signature["image_hashes"][index]
                 and all((still_dir / f"{kind}.png").exists() for kind in ("glyph", "color", "background", "preview"))):
             print(f"Reusing still {index + 1}/{len(images)}", flush=True)
@@ -191,10 +201,11 @@ def build(args: argparse.Namespace) -> None:
         completed_units += 1
         report(0.0, f"Finished image {index + 1}/{len(images)}")
     if len(images) > 1:
+        paths = glyph_paths(masks)
         for index in range(len(images)):
             following = (index + 1) % len(images)
             base = output / "transitions" / f"{index:04d}-{following:04d}"
-            if (settings_match and index < len(old_hashes) and following < len(old_hashes)
+            if (transition_settings_match and index < len(old_hashes) and following < len(old_hashes)
                     and old_hashes[index] == signature["image_hashes"][index]
                     and old_hashes[following] == signature["image_hashes"][following]
                     and all((base / f"{frame:04d}" / f"{kind}.png").exists()
@@ -205,23 +216,39 @@ def build(args: argparse.Namespace) -> None:
                 continue
             print(f"Optimizing transition {index + 1}/{len(images)}", flush=True)
             previous = stills[index]
+            shape = previous.glyph.shape
+            longest = max(len(paths[int(a)][int(b)]) - 1 for a, b in np.unique(
+                np.stack((previous.glyph.ravel(), stills[following].glyph.ravel()), axis=1), axis=0))
+            if longest > args.frames - 1:
+                raise ValueError(f"This transition needs at least {longest + 1} frames for adjacent glyph steps")
+            offsets = phase_offsets(shape, transition_field, args.seed + index * 10007,
+                                    targets[index])
+            cell_height, cell_width = cell[1], cell[0]
             for frame in range(args.frames):
                 fraction = frame / (args.frames - 1)
-                progress = fraction * fraction * (3 - 2 * fraction)
+                progress = ease(fraction, transition_pace)
                 if frame == 0:
                     grid = stills[index]
                 elif frame == args.frames - 1:
                     grid = stills[following]
                 else:
-                    target = (1 - progress) * targets[index] + progress * targets[following]
+                    local = local_progress(progress, offsets, transition_spread)
+                    pixel_progress = np.repeat(np.repeat(local, cell_height, axis=0), cell_width, axis=1)
+                    pixel_progress = pixel_progress[:args.size[1], :args.size[0], None]
+                    target = (1 - pixel_progress) * targets[index] + pixel_progress * targets[following]
                     grid = solve_style(target, masks, style=style, invert_ink=invert_ink,
                                  seed=args.seed + index * 10007,
                                  steps=args.transition_steps, candidates=args.candidates,
                                  dither=args.dither, structure_dither=structure_dither,
                                  background=args.background, device=args.device, previous=previous,
-                                 destination=stills[following], progress=progress,
+                                 destination=stills[following], progress=float(local.mean()),
                                  on_progress=lambda fraction, stage, index=index, frame=frame: report(
                                      fraction, f"Transition {index + 1}/{len(images)}, frame {frame + 1}/{args.frames}: {stage}"))
+                    grid.glyph = path_glyphs(stills[index].glyph, stills[following].glyph, local, paths,
+                                             previous.glyph, args.frames - 1 - frame)
+                    if style == "headroom":
+                        grid.color = recolor(encode_headroom(target, invert_ink=invert_ink),
+                                             masks, grid.glyph, grid.background)
                 _save_grid(grid, base / f"{frame:04d}", False, masks, args.size)
                 previous = grid
                 if frame not in (0, args.frames - 1):
@@ -245,6 +272,9 @@ def main() -> None:
     parser.add_argument("--crop", choices=("fill", "fit"), default="fill")
     parser.add_argument("--grayscale", action="store_true")
     parser.add_argument("--frames", type=int, default=16, help="Frames per slideshow transition")
+    parser.add_argument("--transition-pace", choices=PACES, default="ease-in-out")
+    parser.add_argument("--transition-field", choices=FIELDS, default="blue-noise")
+    parser.add_argument("--transition-spread", type=float, default=0.65)
     parser.add_argument("--steps", type=int, default=36, help="Still optimization steps")
     parser.add_argument("--transition-steps", type=int, default=16)
     parser.add_argument("--candidates", type=int, default=6)
@@ -265,6 +295,8 @@ def main() -> None:
         parser.error("background must be auto or a #RRGGBB color")
     if not 0 <= args.dither <= 0.05 or not 0 <= args.structure_dither <= 0.12:
         parser.error("dither must be 0..0.05 and structure-dither must be 0..0.12")
+    if not 0 <= args.transition_spread <= 0.9:
+        parser.error("transition-spread must be 0..0.9")
     build(args)
 
 

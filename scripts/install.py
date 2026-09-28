@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_ID = json.loads((ROOT / "metadata.json").read_text())["KPlugin"]["Id"]
 PACKAGE = ROOT / "dist" / "plasma-wallpaper"
+APPLET = ROOT / "dist" / "plasma-profile-switch"
 UNIT = Path.home() / ".config/systemd/user/ascii-wallpaper-renderer.service"
 
 
@@ -30,6 +31,9 @@ def main() -> None:
     installed = Path.home() / ".local/share/plasma/wallpapers" / PACKAGE_ID
     action = "--upgrade" if installed.exists() else "--install"
     run("kpackagetool6", "--type", "Plasma/Wallpaper", action, str(PACKAGE))
+    applet_installed = Path.home() / ".local/share/plasma/plasmoids/org.asciiwallpaper.profile-switch"
+    applet_action = "--upgrade" if applet_installed.exists() else "--install"
+    run("kpackagetool6", "--type", "Plasma/Applet", applet_action, str(APPLET))
 
     UNIT.parent.mkdir(parents=True, exist_ok=True)
     UNIT.write_text("\n".join([
@@ -42,7 +46,7 @@ def main() -> None:
     run("systemctl", "--user", "enable", "--now", "ascii-wallpaper-renderer.service")
     run("systemctl", "--user", "restart", "ascii-wallpaper-renderer.service")
     run("kbuildsycoca6", "--noincremental")
-    print("Installed. Reopen wallpaper settings to load the updated controls.")
+    print("Installed. Reopen wallpaper settings, then add ASCII Wallpaper Profile to your panel or dock.")
 
 
 if __name__ == "__main__":

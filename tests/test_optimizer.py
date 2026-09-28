@@ -8,12 +8,14 @@ import numpy as np
 import torch
 from PIL import Image
 
-from ascii_optimizer.assets import blue_noise, cell_for_display, linear_to_srgb, srgb_to_linear
+from ascii_optimizer.assets import blue_noise, cell_for_display, glyph_masks, linear_to_srgb, resolve_font, srgb_to_linear
 from ascii_optimizer.cli import build, solve_style
 from ascii_optimizer.optimizer import Grid, _loss, render_grid, solve
 from ascii_optimizer.service import _validated_request
 from ascii_optimizer.structure import STRUCTURE_CHARS
 from ascii_optimizer.tone import display_tone, encode_headroom
+from ascii_optimizer.transition import ease, glyph_paths, local_progress, path_glyphs, phase_offsets
+from ascii_optimizer import service
 
 
 def test_render_uses_mask_once_and_preserves_linear_color():
@@ -74,6 +76,48 @@ def test_blue_noise_is_seeded_and_low_frequency_suppressed():
     assert spectrum[0:3, 0:3].mean() < spectrum[16:24, 16:24].mean()
 
 
+def test_transition_paths_walk_neighbor_glyphs_without_skipping():
+    masks = np.zeros((4, 2, 2), dtype=np.float32)
+    masks[1, 0, 0] = 1
+    masks[2, 0] = 1
+    masks[3, :2, :2] = 1
+    paths = glyph_paths(masks, neighbors=1)
+    start = np.array([[0]], dtype=np.uint8)
+    end = np.array([[3]], dtype=np.uint8)
+    path = paths[0][3]
+    assert len(path) > 2
+    previous = start
+    seen = [0]
+    for frame in range(1, len(path)):
+        progress = np.array([[frame / (len(path) - 1)]], dtype=np.float32)
+        current = path_glyphs(start, end, progress, paths, previous, len(path) - 1 - frame)
+        seen.append(int(current[0, 0]))
+        previous = current
+    assert seen == path
+
+
+def test_transition_offsets_and_pacing_are_deterministic():
+    offsets = phase_offsets((16, 16), "blue-noise", 4)
+    np.testing.assert_array_equal(offsets, phase_offsets((16, 16), "blue-noise", 4))
+    source = np.zeros((32, 32, 3), dtype=np.float32)
+    source[:, 16:] = 1
+    for field in ("ripple", "spiral", "directional", "edge", "salience"):
+        phases = phase_offsets((16, 16), field, 4, source)
+        assert phases.shape == offsets.shape and 0 <= phases.min() <= phases.max() <= 1
+    local = local_progress(0.5, offsets, 0.65)
+    assert local.min() < 0.1 and local.max() > 0.9
+    assert ease(0.25, "ease-in") < 0.25 < ease(0.25, "ease-out")
+    assert np.array_equal(local_progress(0, offsets, 0.65), np.zeros_like(offsets))
+    assert np.array_equal(local_progress(1, offsets, 0.65), np.ones_like(offsets))
+
+
+def test_profile_override_persists(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(service, "OVERRIDE_PATH", tmp_path / "override.json")
+    assert service.get_override() == "auto"
+    assert service.set_override("B") == "B"
+    assert service.get_override() == "B"
+
+
 def test_solve_deterministic_and_keeps_grid_shape():
     source = np.zeros((9, 9, 3), dtype=np.float32)
     source[:, :5] = 0.8
@@ -123,6 +167,13 @@ def test_batch_transition_endpoints_equal_stills(tmp_path: Path, capsys):
     for kind in ("glyph", "color", "background"):
         assert (pair / "0000" / f"{kind}.png").read_bytes() == (output / "stills" / "0000" / f"{kind}.png").read_bytes()
         assert (pair / "0002" / f"{kind}.png").read_bytes() == (output / "stills" / "0001" / f"{kind}.png").read_bytes()
+    font_paths = glyph_paths(glyph_masks(resolve_font(args.font), list(args.chars), args.cell))
+    frames = [np.asarray(Image.open(pair / f"{frame:04d}" / "glyph.png"))[:, :, 0]
+              for frame in range(args.frames)]
+    for row, col in np.ndindex(frames[0].shape):
+        path = font_paths[int(frames[0][row, col])][int(frames[-1][row, col])]
+        steps = [path.index(int(frame[row, col])) for frame in frames]
+        assert all(next_step - step in (0, 1) for step, next_step in zip(steps, steps[1:]))
     assert json.loads((output / "manifest.json").read_text())["frame_count"] == 3
     assert Image.open(output / "stills" / "0000" / "preview.png").size == (13, 9)
     assert Image.open(output / "stills" / "0000" / "background.png").size == (1, 1)
