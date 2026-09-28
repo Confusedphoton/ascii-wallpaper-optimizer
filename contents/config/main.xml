@@ -26,12 +26,12 @@
   </group>
 
   <group name="Options">
-    <!-- Target columns on a 2560-pixel-wide display: 0=180, 1=120, 2=80.
+    <!-- Target columns on a 2560-pixel-wide display: 0=180, 1=120, 2=80, 3=240, 4=320.
          Cell size scales with the display resolution. -->
     <entry name="Detail" type="Int">
         <default>1</default>
         <min>0</min>
-        <max>2</max>
+        <max>4</max>
     </entry>
     <entry name="AsciiChars" type="StringList">
       <default>\s,.,´,:,r,s,z,u,n,v,c,x,L,O,G,D,Q,0,K,N,M,W,&amp;,@</default>

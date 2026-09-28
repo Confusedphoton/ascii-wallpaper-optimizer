@@ -85,7 +85,7 @@ def _validated_request(raw: dict) -> dict:
     transition_spread = float(raw.get("transition_spread", 0.65))
     invert_ink = raw.get("invert_ink", False)
     background = str(raw.get("background", "auto"))
-    if detail not in (0, 1, 2) or not 2 <= frames <= 120 or not 0 <= dither <= 0.05:
+    if detail not in (0, 1, 2, 3, 4) or not 2 <= frames <= 120 or not 0 <= dither <= 0.05:
         raise ValueError("Detail, frame count, or dithering strength is out of range.")
     if style not in ("headroom", "structure") or not isinstance(invert_ink, bool) or not 0 <= structure_dither <= 0.12:
         raise ValueError("Render style, ink polarity, or structure dithering is invalid.")

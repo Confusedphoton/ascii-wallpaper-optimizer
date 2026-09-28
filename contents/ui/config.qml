@@ -64,7 +64,8 @@ Item {
             cfg_AsciiChars = Array.from(standardChars)
     }
 
-    property alias cfg_Detail: detailSlider.value
+    property int cfg_Detail: 1
+    readonly property var detailValues: [4, 3, 0, 1, 2]
     property alias cfg_Grayscale: grayscaleCheck.checked
     property alias cfg_SlideInterval: intervalSlider.value
     property alias cfg_Dither: ditherSlider.value
@@ -980,30 +981,29 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Detail Level:"
-                
-                Controls.Slider {
-                    id: detailSlider
+
+                Controls.ComboBox {
+                    id: detailPreset
                     Layout.fillWidth: true
-
-                    snapMode: Controls.Slider.SnapOnRelease
-                    stepSize: 1
-
-                    from: 2
-                    to: 0
+                    model: ["Ultra high (~320 columns)", "Very high (~240 columns)",
+                        "High (~180 columns)", "Mid (~120 columns)", "Low (~80 columns)"]
+                    currentIndex: root.detailValues.indexOf(root.cfg_Detail)
+                    onActivated: index => {
+                        root.cfg_Detail = root.detailValues[index]
+                        if (root.configDialog) root.configDialog.changed = true
+                    }
                 }
-                
+
                 Controls.Label {
                     Layout.preferredWidth: Kirigami.Units.gridUnit * 10
-                    
                     text: {
-                        const columns = [180, 120, 80][detailSlider.value];
+                        const columns = [180, 120, 80, 240, 320][root.cfg_Detail];
                         const physicalWidth = Math.round(Screen.width * Screen.devicePixelRatio);
                         const physicalHeight = Math.round(Screen.height * Screen.devicePixelRatio);
                         const cellWidth = Math.min(127, Math.max(2, Math.round(physicalWidth / columns)));
                         const rows = Math.ceil(physicalHeight / (cellWidth * 2));
                         const actualColumns = Math.ceil(physicalWidth / cellWidth);
-                        let labels = [" (High Detail)", " (Mid Detail)", " (Low Detail)"];
-                        return actualColumns + "×" + rows + labels[detailSlider.value];
+                        return actualColumns + "×" + rows;
                     }
                     font.weight: Font.Bold
                 }

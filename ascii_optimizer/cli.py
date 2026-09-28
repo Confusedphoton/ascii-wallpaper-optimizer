@@ -267,7 +267,7 @@ def main() -> None:
     parser.add_argument("--size", type=_size, required=True, help="Wallpaper size, WIDTHxHEIGHT")
     parser.add_argument("--font", default="Monospace", help="Font family or font file")
     parser.add_argument("--chars", default=DEFAULT_CHARS, help="Distinct characters, including a space")
-    parser.add_argument("--detail", type=int, choices=(0, 1, 2), default=1)
+    parser.add_argument("--detail", type=int, choices=(0, 1, 2, 3, 4), default=1)
     parser.add_argument("--cell", type=_size, help="Override cell dimensions")
     parser.add_argument("--crop", choices=("fill", "fit"), default="fill")
     parser.add_argument("--grayscale", action="store_true")

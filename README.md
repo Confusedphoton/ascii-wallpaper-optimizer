@@ -37,7 +37,7 @@ The rendered directory contains `atlas.png`, `metadata.png`, still grids, transi
 
 ## Quality controls
 
-- `--detail 0`, `1`, `2` targets about 180, 120, or 80 columns on a 2560-pixel-wide display. Cell dimensions scale with the monitor's physical resolution, keeping character density similar across displays. `--cell WIDTHxHEIGHT` overrides this; the prepared asset's metadata controls playback cell size.
+- `--detail 0` through `4` map to about 180, 120, 80, 240, and 320 columns on a 2560-pixel-wide display, respectively. The settings menu presents them from ultra high down to low detail. Cell dimensions scale with the monitor's physical resolution, keeping character density similar across displays. The two denser presets increase render time and memory use. `--cell WIDTHxHEIGHT` overrides this; the prepared asset's metadata controls playback cell size.
 - `--chars ' ...'` sets the exact glyph set. Include a literal leading space if desired. Characters must be unique, and the Plasma character list must match the rendered assets.
 - `--style headroom` (default) uses the full-frame glyph and color solver with a local, chroma-preserving luminance boost. `--style structure` selects glyphs from coverage and within-cell texture with a stronger tone curve and blue-noise dither. Its default characters add `-_/|+[]{}`. The settings switch to this set automatically when the current list is still the standard default; custom lists stay intact.
 - `--invert-ink` selects glyphs for dark ink on a light canvas. Inversion participates in solving and is recorded in the rendered assets, so exported previews and Plasma playback use the same polarity. It can be combined with either style.

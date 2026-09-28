@@ -9,7 +9,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 
-DETAIL_COLUMNS = (180, 120, 80)
+# Keep levels 0–2 stable for saved configs; levels 3–4 add denser grids.
+DETAIL_COLUMNS = (180, 120, 80, 240, 320)
 
 
 def cell_for_display(size: tuple[int, int], detail: int) -> tuple[int, int]:
