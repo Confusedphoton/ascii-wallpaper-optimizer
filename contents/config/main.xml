@@ -50,5 +50,10 @@
         <min>2</min>
         <max>120</max>
     </entry>
+    <entry name="Dither" type="Double">
+        <default>0.005</default>
+        <min>0</min>
+        <max>0.05</max>
+    </entry>
   </group>
 </kcfg>

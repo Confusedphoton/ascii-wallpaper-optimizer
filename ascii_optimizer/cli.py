@@ -60,6 +60,18 @@ def _load_grid(directory: Path) -> Grid:
 
 
 def build(args: argparse.Namespace) -> None:
+    report_progress = getattr(args, "progress_json", False)
+    total_units = len(args.images) + (len(args.images) * (args.frames - 2) if len(args.images) > 1 else 0)
+    completed_units = 0
+
+    def report(fraction: float, stage: str) -> None:
+        if report_progress:
+            print("ASCII_PROGRESS " + json.dumps({
+                "progress": min(1.0, (completed_units + fraction) / max(1, total_units)),
+                "stage": stage,
+            }), flush=True)
+
+    report(0.0, "Preparing input images")
     font = resolve_font(args.font)
     chars = list(args.chars)
     if not chars or len(chars) > 256 or len(set(chars)) != len(chars):
@@ -95,6 +107,7 @@ def build(args: argparse.Namespace) -> None:
                     and (output / "metadata.png").exists()
                     and all(p.exists() for p in expected_stills + expected_pairs)):
                 print(f"Already rendered: {output}")
+                report(1.0, "Ready")
                 return
         except (OSError, ValueError):
             pass
@@ -114,12 +127,18 @@ def build(args: argparse.Namespace) -> None:
                 and all((still_dir / f"{kind}.png").exists() for kind in ("glyph", "color", "preview"))):
             print(f"Reusing still {index + 1}/{len(images)}", flush=True)
             stills.append(_load_grid(still_dir))
+            completed_units += 1
+            report(0.0, f"Reused image {index + 1}/{len(images)}")
             continue
         print(f"Optimizing still {index + 1}/{len(images)}: {images[index]}", flush=True)
         grid = solve(target, masks, seed=args.seed + index, steps=args.steps,
-                     candidates=args.candidates, dither=args.dither, device=args.device)
+                     candidates=args.candidates, dither=args.dither, device=args.device,
+                     on_progress=lambda fraction, stage, index=index: report(
+                         fraction, f"Image {index + 1}/{len(images)}: {stage}"))
         stills.append(grid)
         _save_grid(grid, still_dir, True, masks, args.size)
+        completed_units += 1
+        report(0.0, f"Finished image {index + 1}/{len(images)}")
     if len(images) > 1:
         for index in range(len(images)):
             following = (index + 1) % len(images)
@@ -130,6 +149,8 @@ def build(args: argparse.Namespace) -> None:
                     and all((base / f"{frame:04d}" / f"{kind}.png").exists()
                             for frame in range(args.frames) for kind in ("glyph", "color"))):
                 print(f"Reusing transition {index + 1}/{len(images)}", flush=True)
+                completed_units += args.frames - 2
+                report(0.0, f"Reused transition {index + 1}/{len(images)}")
                 continue
             print(f"Optimizing transition {index + 1}/{len(images)}", flush=True)
             previous = stills[index]
@@ -145,12 +166,18 @@ def build(args: argparse.Namespace) -> None:
                     grid = solve(target, masks, seed=args.seed + index * 10007,
                                  steps=args.transition_steps, candidates=args.candidates,
                                  dither=args.dither, device=args.device, previous=previous,
-                                 destination=stills[following], progress=progress)
+                                 destination=stills[following], progress=progress,
+                                 on_progress=lambda fraction, stage, index=index, frame=frame: report(
+                                     fraction, f"Transition {index + 1}/{len(images)}, frame {frame + 1}/{args.frames}: {stage}"))
                 _save_grid(grid, base / f"{frame:04d}", False, masks, args.size)
                 previous = grid
+                if frame not in (0, args.frames - 1):
+                    completed_units += 1
+                    report(0.0, f"Finished transition frame {frame + 1}/{args.frames}")
     manifest.write_text(json.dumps({"signature": signature, "image_count": len(images),
                                     "frame_count": args.frames, "grid": [stills[0].glyph.shape[1], stills[0].glyph.shape[0]]}, indent=2) + "\n")
     print(f"Rendered assets: {output}")
+    report(1.0, "Ready")
 
 
 def main() -> None:
@@ -172,6 +199,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--progress-json", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.frames < 2 or args.steps < 1 or args.transition_steps < 1 or args.candidates < 1:
         parser.error("frames must be >= 2 and optimization counts must be positive")

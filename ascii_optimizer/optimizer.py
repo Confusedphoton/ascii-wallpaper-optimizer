@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 import torch
@@ -78,7 +79,8 @@ def render_grid(grid: Grid, masks: np.ndarray, device: str = "cpu") -> np.ndarra
 def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
           steps: int = 36, candidates: int = 6, dither: float = 0.005,
           device: str = "cpu", previous: Grid | None = None,
-          destination: Grid | None = None, progress: float | None = None) -> Grid:
+          destination: Grid | None = None, progress: float | None = None,
+          on_progress: Callable[[float, str], None] | None = None) -> Grid:
     """Optimize one complete grid; temporal frames also depend on their neighbors."""
     if masks_np.shape[0] > 256:
         raise ValueError("The glyph map supports at most 256 characters")
@@ -133,6 +135,8 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
             torch.as_tensor(previous.glyph.astype(np.int64), device=device).flatten())
         scheduled_masks = bank[scheduled]
 
+    polish_steps = max(4, steps // 4)
+    total_work = steps + 4 + polish_steps
     for step in range(steps):
         optimizer.zero_grad(set_to_none=True)
         temperature = max(0.3, 1.0 - 0.7 * step / max(1, steps - 1))
@@ -149,6 +153,8 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
             loss = loss + 0.008 * (mask - scheduled_masks).square().mean()
         loss.backward()
         optimizer.step()
+        if on_progress is not None:
+            on_progress((step + 1) / total_work, "Optimizing glyphs and colors")
 
     with torch.no_grad():
         selected = logits.argmax(1)
@@ -187,20 +193,21 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
             best = gain.argmin(1)
             group = (row_ids % 2) * 2 + col_ids % 2 == parity
             changes = group & (gain.gather(1, best[:, None]).squeeze(1) < -1e-10)
-            if not bool(changes.any()):
-                continue
-            trial_glyph = glyph.clone()
-            trial_color = hard_color.clone()
-            trial_glyph[changes] = indices[changes, best[changes]]
-            trial_color[changes] = candidate_colors[changes, best[changes]]
-            trial_masks = bank[trial_glyph]
-            if hard_score(trial_masks, trial_color) < hard_score(hard_masks, hard_color):
-                glyph, hard_color, hard_masks = trial_glyph, trial_color, trial_masks
+            if bool(changes.any()):
+                trial_glyph = glyph.clone()
+                trial_color = hard_color.clone()
+                trial_glyph[changes] = indices[changes, best[changes]]
+                trial_color[changes] = candidate_colors[changes, best[changes]]
+                trial_masks = bank[trial_glyph]
+                if hard_score(trial_masks, trial_color) < hard_score(hard_masks, hard_color):
+                    glyph, hard_color, hard_masks = trial_glyph, trial_color, trial_masks
+        if on_progress is not None:
+            on_progress((steps + parity + 1) / total_work, "Refining character boundaries")
 
     # Final colors are optimized against the actual discrete glyphs.
     color_parameter = torch.nn.Parameter(torch.logit(hard_color.clamp(0.001, 0.999)))
     color_optimizer = torch.optim.Adam((color_parameter,), lr=0.04)
-    for _ in range(max(4, steps // 4)):
+    for polish_step in range(polish_steps):
         color_optimizer.zero_grad(set_to_none=True)
         color = torch.sigmoid(color_parameter)
         loss = _loss(_render(hard_masks, color, rows, cols, cell_height, cell_width), target)
@@ -208,6 +215,8 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
             loss = loss + 0.010 * (color - prev_colors).square().mean()
         loss.backward()
         color_optimizer.step()
+        if on_progress is not None:
+            on_progress((steps + 4 + polish_step + 1) / total_work, "Polishing colors")
 
     return Grid(glyph.detach().cpu().numpy().reshape(rows, cols).astype(np.uint8),
                 torch.sigmoid(color_parameter).detach().cpu().numpy().reshape(rows, cols, 3))

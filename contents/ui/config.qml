@@ -26,11 +26,17 @@ Item {
     property int cfg_TransitionFrames: 16
     property list<string> cfg_AsciiChars: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@"]
     property list<string> cfg_Images: []
-    property var monoFonts: []
+    property var monoFonts: [cfg_FontFamily]
+    property var fontFamiliesToCheck: []
+    property var foundMonoFonts: []
+    property int fontScanIndex: 0
+    property bool fontScanStarted: false
+    property int renderRevision: 0
 
     property alias cfg_Detail: detailSlider.value
     property alias cfg_Grayscale: grayscaleCheck.checked
     property alias cfg_SlideInterval: intervalSlider.value
+    property alias cfg_Dither: ditherSlider.value
 
     property string cfg_Image: ""
 
@@ -40,6 +46,11 @@ Item {
 
     onCfg_ImagesChanged: {
         loadFromConfig();
+    }
+    onCfg_FontFamilyChanged: {
+        if (!monoFonts.includes(cfg_FontFamily))
+            monoFonts = [cfg_FontFamily].concat(monoFonts)
+        fontCombo.editText = cfg_FontFamily
     }
 
     function loadFromConfig() {
@@ -65,6 +76,11 @@ Item {
         }
 
         let currentChars = Array.from(root.cfg_AsciiChars || []);
+        if (currentChars.length && currentChars[0] === "\\s") {
+            currentChars[0] = " ";
+            migrated = true;
+            root.cfg_AsciiChars = currentChars;
+        }
         if (currentChars.length === 23 && currentChars[0] !== " ") {
             currentChars.unshift(" ");
 
@@ -154,21 +170,58 @@ Item {
     }
 
     Component.onCompleted: {
-        loadFromConfig();
+        loadFromConfig()
+        fontCombo.editText = cfg_FontFamily
+    }
 
-        var all = Qt.fontFamilies()
-        var mono = []
-        for (var i = 0; i < all.length; i++) {
-            fontProbe.font = Qt.font({ family: all[i], pointSize: 12 })
+    function startFontScan() {
+        if (fontScanStarted) return
+        fontScanStarted = true
+        fontFamiliesToCheck = Qt.fontFamilies()
+        foundMonoFonts = []
+        fontScanIndex = 0
+        fontScanTimer.start()
+    }
 
-            var widthI = fontProbe.advanceWidth("i")
-            var widthW   = fontProbe.advanceWidth("W")
-            
-            if (widthI > 0 && widthI === widthW) {
-                mono.push(all[i])
+    Timer {
+        id: fontScanTimer
+        interval: 0
+        repeat: true
+        onTriggered: {
+            let end = Math.min(root.fontScanIndex + 8, root.fontFamiliesToCheck.length)
+            for (let i = root.fontScanIndex; i < end; ++i) {
+                let family = root.fontFamiliesToCheck[i]
+                fontProbe.font = Qt.font({ family: family, pointSize: 12 })
+                let widthI = fontProbe.advanceWidth("i")
+                if (widthI > 0 && Math.abs(widthI - fontProbe.advanceWidth("W")) < 0.01)
+                    root.foundMonoFonts.push(family)
+            }
+            root.fontScanIndex = end
+            if (end >= root.fontFamiliesToCheck.length) {
+                stop()
+                root.monoFonts = Array.from(new Set([root.cfg_FontFamily].concat(root.foundMonoFonts))).sort()
             }
         }
-        monoFonts = mono.sort()
+    }
+
+    RenderClient {
+        id: renderer
+        images: root.cfg_Mode === "Slideshow" ? Array.from(root.cfg_Images) : Array.from(root.cfg_Images).slice(0, 1)
+        fontFamily: root.cfg_FontFamily
+        characters: Array.from(root.cfg_AsciiChars).join("")
+        detail: root.cfg_Detail
+        grayscale: root.cfg_Grayscale
+        frames: root.cfg_TransitionFrames
+        dither: root.cfg_Dither
+        onRenderStateChanged: {
+            if (renderState === "ready") {
+                root.renderRevision++
+                if (root.cfg_RenderDirectory !== directory) {
+                    root.cfg_RenderDirectory = directory
+                    if (root.configDialog) root.configDialog.changed = true
+                }
+            }
+        }
     }
 
     FontMetrics {
@@ -309,6 +362,15 @@ Item {
                     return root.toFileUrl(path);
                 }
 
+                Image {
+                    anchors.fill: parent
+                    source: previewContainer.getPreviewPath(previewContainer.currentIdx)
+                    sourceSize: Qt.size(854, 480)
+                    fillMode: Image.PreserveAspectCrop
+                    asynchronous: true
+                    visible: renderer.renderState !== "ready" || !previewShader.ready
+                }
+
                 Timer {
                     id: previewTimer
                     
@@ -352,11 +414,12 @@ Item {
                         id: previewShader
                         anchors.fill: parent
 
-                        renderDirectory: root.cfg_RenderDirectory
+                        renderDirectory: renderer.renderState === "ready" ? renderer.directory : ""
                         currentIndex: previewContainer.currentIdx
                         nextIndex: previewContainer.nextIdx
                         transitionFrames: root.cfg_TransitionFrames
                         detail: root.cfg_Detail
+                        revision: root.renderRevision
                     }
                 }
 
@@ -393,13 +456,14 @@ Item {
                     source: previewImage
                     maskEnabled: true
                     maskSource: maskRect
+                    visible: renderer.renderState === "ready" && previewShader.ready
                 }
 
                 Controls.Label {
                     anchors.centerIn: parent
-                    text: "Select images and a rendered asset directory"
+                    text: "Select an image to render"
                     opacity: 0.5
-                    visible: root.cfg_RenderDirectory === "" || previewContainer.getPreviewPath(previewContainer.currentIdx) === ""
+                    visible: previewContainer.getPreviewPath(previewContainer.currentIdx) === ""
                 }
 
                 Rectangle {
@@ -420,6 +484,38 @@ Item {
                         color: "white"
                         font.weight: Font.Bold
                     }
+                }
+            }
+        }
+
+        ColumnLayout {
+            Layout.alignment: Qt.AlignHCenter
+            Layout.fillWidth: true
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 25
+            spacing: Kirigami.Units.smallSpacing
+
+            Controls.ProgressBar {
+                Layout.fillWidth: true
+                from: 0
+                to: 1
+                value: renderer.progress
+                indeterminate: renderer.renderState === "connecting" || (renderer.renderState === "running" && renderer.progress === 0)
+                visible: renderer.renderState !== "idle"
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Controls.Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    text: renderer.renderState === "error" ? renderer.error
+                        : renderer.renderState === "ready" ? "Render complete"
+                        : renderer.stage
+                }
+                Controls.Button {
+                    text: renderer.renderState === "error" ? "Retry" : "Render now"
+                    onClicked: renderer.start(renderer.renderState === "ready")
+                    enabled: root.cfg_Images.length > 0
                 }
             }
         }
@@ -616,10 +712,11 @@ Item {
             }
 
             Controls.TextField {
-                Kirigami.FormData.label: "Rendered Assets:"
+                Kirigami.FormData.label: "Render Cache:"
                 Layout.fillWidth: true
                 text: root.cfg_RenderDirectory
-                placeholderText: "Directory produced by ascii-wallpaper-render"
+                placeholderText: "Generated automatically after rendering"
+                readOnly: true
                 onEditingFinished: {
                     root.cfg_RenderDirectory = text.trim()
                     if (root.configDialog) root.configDialog.changed = true
@@ -629,7 +726,7 @@ Item {
             Controls.Label {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                text: "Font, characters, detail, grayscale, and image order take effect after offline rendering. See the README for the render command."
+                text: "Changes render in the background. The source image remains visible until ASCII assets are ready."
             }
 
             Controls.SpinBox {
@@ -650,8 +747,9 @@ Item {
 
                 Kirigami.FormData.label: "Font Family:"
 
-                model: root.monoFonts
+                model: Array.from(new Set([root.cfg_FontFamily].concat(root.monoFonts)))
                 currentIndex: find(root.cfg_FontFamily)
+                onDownChanged: if (down) root.startFontScan()
 
                 onActivated: {
                     root.cfg_FontFamily = currentText
@@ -740,6 +838,23 @@ Item {
                         return w + "x" + h + labels[detailSlider.value];
                     }
                     font.weight: Font.Bold
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Dithering Strength:"
+
+                Controls.Slider {
+                    id: ditherSlider
+                    Layout.fillWidth: true
+                    from: 0
+                    to: 0.05
+                    stepSize: 0.001
+                    onMoved: if (root.configDialog) root.configDialog.changed = true
+                }
+                Controls.Label {
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 7
+                    text: ditherSlider.value.toFixed(3)
                 }
             }
 

@@ -14,6 +14,11 @@ Item {
     property real transitionProgress: 0.0
     property int transitionFrames: 16
     property int detail: 1
+    property int revision: 0
+
+    readonly property bool ready: glyphMap.status === Image.Ready
+        && colorMap.status === Image.Ready && atlasImage.status === Image.Ready
+        && metadataImage.status === Image.Ready
 
     readonly property bool transitioning: currentIndex !== nextIndex
     readonly property int frameIndex: Math.min(transitionFrames - 1,
@@ -22,7 +27,8 @@ Item {
     function fileUrl(relative) {
         const directory = String(renderDirectory || "").trim().replace(/\/$/, "");
         if (!directory) return "";
-        return "file://" + (directory + "/" + relative).split("/").map(encodeURIComponent).join("/");
+        return "file://" + (directory + "/" + relative).split("/").map(encodeURIComponent).join("/")
+            + "?v=" + revision;
     }
 
     function mapPath(kind) {
@@ -41,6 +47,7 @@ Item {
         smooth: false
         cache: true
         layer.enabled: true
+        asynchronous: true
     }
 
     Image {
@@ -50,6 +57,7 @@ Item {
         smooth: false
         cache: true
         layer.enabled: true
+        asynchronous: true
     }
 
     Image {
@@ -59,6 +67,7 @@ Item {
         smooth: false
         cache: true
         layer.enabled: true
+        asynchronous: true
     }
 
     Image {
@@ -68,10 +77,12 @@ Item {
         smooth: false
         cache: true
         layer.enabled: true
+        asynchronous: true
     }
 
     ShaderEffect {
         anchors.fill: parent
+        visible: asciiRoot.ready
         blending: false
         property variant glyphs: glyphMap
         property variant colors: colorMap

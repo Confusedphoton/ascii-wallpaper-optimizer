@@ -11,6 +11,7 @@ from PIL import Image
 from ascii_optimizer.assets import blue_noise
 from ascii_optimizer.cli import build
 from ascii_optimizer.optimizer import Grid, _loss, render_grid, solve
+from ascii_optimizer.service import _validated_request
 
 
 def test_render_uses_mask_once_and_preserves_linear_color():
@@ -49,6 +50,21 @@ def test_solve_deterministic_and_keeps_grid_shape():
     assert first.glyph.shape == (3, 3)
     np.testing.assert_array_equal(first.glyph, second.glyph)
     np.testing.assert_allclose(first.color, second.color)
+
+
+def test_progress_reports_completed_solve_and_space_glyph(tmp_path: Path):
+    image = tmp_path / "input.png"
+    Image.new("RGB", (9, 9), (160, 80, 40)).save(image)
+    request = _validated_request({"images": [str(image)], "font": "Monospace",
+        "chars": "\\s.#", "detail": 1, "grayscale": False, "frames": 2,
+        "dither": 0.005, "size": [9, 9], "screen": "nonexistent"})
+    assert request["chars"] == " .#"
+    updates = []
+    masks = np.stack((np.zeros((4, 3)), np.ones((4, 3))), axis=0).astype(np.float32)
+    solve(np.zeros((9, 9, 3), dtype=np.float32), masks, steps=2,
+          on_progress=lambda fraction, stage: updates.append((fraction, stage)))
+    assert updates[-1][0] == 1.0
+    assert all(left[0] <= right[0] for left, right in zip(updates, updates[1:]))
 
 
 def test_batch_transition_endpoints_equal_stills(tmp_path: Path, capsys):
