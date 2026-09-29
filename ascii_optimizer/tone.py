@@ -12,6 +12,7 @@ HEADROOM_GAIN = 2.0
 
 
 def rgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
+    """Convert linear RGB to OKLab (used only at color-space boundaries)."""
     rgb = np.asarray(rgb, dtype=np.float32)
     lms = rgb @ np.array([[0.4122214708, 0.5363325363, 0.0514459929],
                           [0.2119034982, 0.6806995451, 0.1073969566],
@@ -23,6 +24,7 @@ def rgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
 
 
 def oklab_to_rgb(lab: np.ndarray) -> np.ndarray:
+    """Convert OKLab to linear RGB (used only at color-space boundaries)."""
     lms = lab @ np.array([[1.0, 0.3963377774, 0.2158037573],
                           [1.0, -0.1055613458, -0.0638541728],
                           [1.0, -0.0894841775, -1.2914855480]], dtype=np.float32).T
@@ -33,7 +35,7 @@ def oklab_to_rgb(lab: np.ndarray) -> np.ndarray:
 
 
 def gamut_map(lab: np.ndarray) -> np.ndarray:
-    """Keep requested lightness and hue, reducing chroma only at gamut edges."""
+    """Encode OKLab as in-gamut linear RGB, reducing chroma at gamut edges."""
     lab = lab.copy()
     lab[..., 0] = np.clip(lab[..., 0], 0, 1)
     rgb = oklab_to_rgb(lab)
@@ -55,6 +57,16 @@ def gamut_map(lab: np.ndarray) -> np.ndarray:
     return np.clip(rgb, 0, 1)
 
 
+def srgb_to_oklab(srgb: np.ndarray) -> np.ndarray:
+    """Decode an sRGB image and convert it to the solver's OKLab space."""
+    return rgb_to_oklab(srgb_to_linear(torch.as_tensor(srgb, dtype=torch.float32)).numpy())
+
+
+def oklab_to_srgb(lab: np.ndarray) -> np.ndarray:
+    """Gamut-map OKLab and encode sRGB for files and the playback shader."""
+    return linear_to_srgb(torch.from_numpy(gamut_map(np.asarray(lab, dtype=np.float32)))).numpy()
+
+
 def headroom_curve(lightness: np.ndarray, gain: float = HEADROOM_GAIN) -> np.ndarray:
     return lightness + gain * lightness * (1 - lightness) ** 2
 
@@ -70,39 +82,45 @@ def inverse_headroom_curve(lightness: np.ndarray, gain: float = HEADROOM_GAIN) -
     return (low + high) * 0.5
 
 
-def encode_headroom(source_srgb: np.ndarray, *, invert_ink: bool = False) -> np.ndarray:
-    """Encode a visible target for the selected output lightness transform."""
-    lab = rgb_to_oklab(srgb_to_linear(torch.as_tensor(source_srgb)).numpy())
+def encode_headroom_lab(source_lab: np.ndarray, *, invert_ink: bool = False) -> np.ndarray:
+    """Precompensate an OKLab target for the output headroom curve."""
+    lab = np.asarray(source_lab, dtype=np.float32).copy()
     target = 1 - lab[..., 0] if invert_ink else lab[..., 0].copy()
     encoded = inverse_headroom_curve(target)
     lab[..., 1:] *= (encoded / np.maximum(target, 1e-6))[..., None]
     lab[..., 0] = encoded
-    return linear_to_srgb(torch.from_numpy(gamut_map(lab))).numpy()
+    return lab
+
+
+def encode_headroom(source_srgb: np.ndarray, *, invert_ink: bool = False) -> np.ndarray:
+    """sRGB boundary wrapper for headroom encoding."""
+    return oklab_to_srgb(encode_headroom_lab(srgb_to_oklab(source_srgb), invert_ink=invert_ink))
 
 
 def invert_source(source_srgb: np.ndarray) -> np.ndarray:
     """Prepare a dark-ink target for the structure-first glyph selector."""
-    lab = rgb_to_oklab(srgb_to_linear(torch.as_tensor(source_srgb)).numpy())
+    lab = srgb_to_oklab(source_srgb)
     lab[..., 0] = 1 - lab[..., 0]
-    return linear_to_srgb(torch.from_numpy(gamut_map(lab))).numpy()
+    return oklab_to_srgb(lab)
 
 
-def display_tone(linear: np.ndarray, *, invert_ink: bool = False) -> np.ndarray:
-    """Apply the headroom curve, then optionally swap light and dark ink."""
-    lab = rgb_to_oklab(linear)
+def display_tone_lab(lab: np.ndarray, *, invert_ink: bool = False) -> np.ndarray:
+    """Apply the display lightness curve directly in OKLab."""
+    lab = np.asarray(lab, dtype=np.float32).copy()
     original = lab[..., 0].copy()
     boosted = headroom_curve(original)
     lab[..., 1:] *= (boosted / np.maximum(original, 1e-6))[..., None]
     lab[..., 0] = boosted
-    displayed = gamut_map(lab)
     if invert_ink:
-        inverted = rgb_to_oklab(displayed)
-        inverted[..., 0] = 1 - inverted[..., 0]
-        displayed = gamut_map(inverted)
-    return displayed
+        lab[..., 0] = 1 - lab[..., 0]
+    return lab
 
 
-def encoded_background(background_linear: np.ndarray) -> np.ndarray:
-    srgb = linear_to_srgb(torch.from_numpy(background_linear.reshape(1, 1, 3))).numpy()
-    encoded = encode_headroom(srgb)
-    return srgb_to_linear(torch.from_numpy(encoded)).numpy().reshape(3)
+def display_tone(linear_rgb: np.ndarray, *, invert_ink: bool = False) -> np.ndarray:
+    """Color-boundary adapter returning linear RGB for older callers."""
+    return gamut_map(display_tone_lab(rgb_to_oklab(linear_rgb), invert_ink=invert_ink))
+
+
+def encoded_background(background_lab: np.ndarray) -> np.ndarray:
+    """Encode an OKLab background for the headroom display curve."""
+    return encode_headroom_lab(np.asarray(background_lab, dtype=np.float32).reshape(1, 1, 3))[0, 0]

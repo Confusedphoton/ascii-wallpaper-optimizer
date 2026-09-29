@@ -70,19 +70,15 @@ vec3 gamutMap(vec3 lab) {
     return clamp(rgb, 0.0, 1.0);
 }
 
-vec3 displayTone(vec3 rgb, bool invertInk) {
-    vec3 lab = rgbToOklab(rgb);
+vec3 displayTone(vec3 lab, bool invertInk) {
     float original = lab.x;
     float boosted = original + 2.0 * original * (1.0 - original) * (1.0 - original);
     lab.yz *= boosted / max(original, 0.000001);
     lab.x = boosted;
-    vec3 displayed = gamutMap(lab);
     if (invertInk) {
-        lab = rgbToOklab(displayed);
         lab.x = 1.0 - lab.x;
-        displayed = gamutMap(lab);
     }
-    return displayed;
+    return lab;
 }
 
 void main() {
@@ -104,9 +100,11 @@ void main() {
     vec2 within = fract(position);
     vec2 mapUV = (cell + 0.5) / gridSize;
     int glyph = clamp(int(floor(texture(glyphs, mapUV).r * 255.0 + 0.5)), 0, atlasCount - 1);
-    vec3 foreground = toLinear(texture(colors, mapUV).rgb);
-    vec3 background = toLinear(texture(backgrounds, vec2(0.5)).rgb);
+    vec3 foreground = rgbToOklab(toLinear(texture(colors, mapUV).rgb));
+    vec3 background = rgbToOklab(toLinear(texture(backgrounds, vec2(0.5)).rgb));
     vec2 atlasUV = vec2((float(glyph) + within.x) / float(atlasCount), within.y);
     float mask = texture(atlas, atlasUV).a;
-    fragColor = vec4(toSrgb(displayTone(mix(background, foreground, mask), invertInk)), 1.0) * qt_Opacity;
+    vec3 composedLab = mix(background, foreground, mask);
+    vec3 displayed = gamutMap(displayTone(composedLab, invertInk));
+    fragColor = vec4(toSrgb(displayed), 1.0) * qt_Opacity;
 }

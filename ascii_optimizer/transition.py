@@ -49,11 +49,13 @@ def phase_offsets(shape: tuple[int, int], field: str, seed: int,
     else:
         if source is None:
             raise ValueError("Salience needs a source image")
-        luma = source[..., :3] @ np.array([0.2126, 0.7152, 0.0722])
-        gy = np.zeros_like(luma)
-        gx = np.zeros_like(luma)
-        gy[1:] = luma[1:] - luma[:-1]
-        gx[:, 1:] = luma[:, 1:] - luma[:, :-1]
+        from .tone import srgb_to_oklab
+
+        lightness = srgb_to_oklab(source[..., :3])[..., 0]
+        gy = np.zeros_like(lightness)
+        gx = np.zeros_like(lightness)
+        gy[1:] = lightness[1:] - lightness[:-1]
+        gx[:, 1:] = lightness[:, 1:] - lightness[:, :-1]
         salience = np.sqrt(gx * gx + gy * gy)
         sy = np.minimum((y * source.shape[0]).astype(int), source.shape[0] - 1)
         sx = np.minimum((x * source.shape[1]).astype(int), source.shape[1] - 1)
@@ -130,19 +132,20 @@ def path_glyphs(start: np.ndarray, end: np.ndarray, progress: np.ndarray,
 
 def recolor(target: np.ndarray, masks: np.ndarray, glyphs: np.ndarray,
             background: np.ndarray) -> np.ndarray:
-    """Fit ink colors to fixed geodesic glyphs in linear light."""
-    import torch
-
-    from .assets import srgb_to_linear
-
+    """Fit fixed transition glyphs and ink colors directly in OKLab."""
     rows, cols = glyphs.shape
     height, width = masks.shape[1:]
     padded = np.pad(target, ((0, rows * height - target.shape[0]),
                              (0, cols * width - target.shape[1]), (0, 0)), mode="edge")
-    cells = srgb_to_linear(torch.from_numpy(padded)).numpy().reshape(
+    cells = padded.reshape(
         rows, height, cols, width, 3).transpose(0, 2, 1, 3, 4)
     ink = masks[glyphs][..., None]
     under = background.reshape(1, 1, 1, 1, 3)
     numerator = (ink * (cells - (1 - ink) * under)).sum((2, 3))
     denominator = (ink * ink).sum((2, 3))
-    return np.clip(numerator / np.maximum(denominator, 1e-8), 0, 1).astype(np.float32)
+    colors = numerator / np.maximum(denominator, 1e-8)
+    # Match the optimizer's bounded OKLab parameter range without converting
+    # the fit back through RGB.
+    colors[..., 0] = np.clip(colors[..., 0], 0, 1)
+    colors[..., 1:] = np.clip(colors[..., 1:], -0.4, 0.4)
+    return colors.astype(np.float32)

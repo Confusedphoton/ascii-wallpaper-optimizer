@@ -51,11 +51,12 @@ Item {
     property int cfg_BackgroundModeB: 0
     property string cfg_BackgroundColorB: "#202028"
     property string cfg_RenderStyleB: "headroom"
-    readonly property string standardChars: " .´:rszunvcxLOGDQ0KNMW&@\\=^"
-    readonly property string legacyStandardChars: " .´:rszunvcxLOGDQ0KNMW&@"
+    readonly property string standardChars: " .´:rszunvcxLOGDQ0KNMW&@\\/=^|[]{}"
+    readonly property string legacyStandardChars: " .´:rszunvcxLOGDQ0KNMW&@\\=^|[]{}"
+    readonly property string legacyOlderStandardChars: " .´:rszunvcxLOGDQ0KNMW&@"
     readonly property string structureChars: " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&@[]{}"
     readonly property string legacyStructureChars: " .´:-_/|+rszunvcxLOGDQ0KNMW&@[]{}"
-    property list<string> cfg_AsciiChars: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@", "\\", "=", "^"]
+    property list<string> cfg_AsciiChars: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@", "\\", "/", "=", "^", "|", "[", "]", "{", "}"]
     property list<string> cfg_Images: []
     property var monoFonts: [cfg_FontFamily]
     property var fontFamiliesToCheck: []
@@ -74,9 +75,9 @@ Item {
     function applyStyleCharacters(style) {
         const current = Array.from(activeSettings.AsciiChars || []).join("")
         if (style === "structure" && (current === standardChars || current === legacyStandardChars
-                || current === legacyStructureChars))
+                || current === legacyOlderStandardChars || current === legacyStructureChars))
             setProfileSetting("AsciiChars", Array.from(structureChars))
-        else if (style === "headroom" && (current === legacyStandardChars
+        else if (style === "headroom" && (current === legacyStandardChars || current === legacyOlderStandardChars
                 || current === structureChars || current === legacyStructureChars))
             setProfileSetting("AsciiChars", Array.from(standardChars))
     }
@@ -91,7 +92,7 @@ Item {
     property real cfg_GlyphLuminanceBonus: 0.12
     property real cfg_StructureDither: 0.06
     property bool cfg_InvertInk: false
-    property list<string> cfg_AsciiCharsB: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@", "\\", "=", "^"]
+    property list<string> cfg_AsciiCharsB: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@", "\\", "/", "=", "^", "|", "[", "]", "{", "}"]
     property bool cfg_GrayscaleB: false
     property int cfg_SlideIntervalB: 10
     property real cfg_DitherB: 0.005

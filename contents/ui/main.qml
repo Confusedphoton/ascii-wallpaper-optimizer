@@ -40,7 +40,7 @@ WallpaperItem {
         const b = activeProfile === "B"
         const useBSettings = b && !!config.ProfileSettingsInitialized
         const setting = name => config[name + (useBSettings ? "B" : "")]
-        const chars = setting("AsciiChars") || [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@", "\\", "=", "^"]
+        const chars = setting("AsciiChars") || [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@", "\\", "/", "=", "^", "|", "[", "]", "{", "}"]
         return {
             fontFamily: setting("FontFamily") || "Monospace",
             characters: Array.from(chars).map((glyph, index) => index === 0 && glyph === "\\s" ? " " : glyph).join(""),

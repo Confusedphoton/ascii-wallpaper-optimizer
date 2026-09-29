@@ -15,11 +15,12 @@ import torch
 from PIL import Image
 
 from . import __version__
-from .assets import cell_for_display, glyph_masks, linear_to_srgb, load_target, resolve_font, save_atlas, save_metadata, srgb_to_linear
+from .assets import cell_for_display, glyph_masks, load_target, resolve_font, save_atlas, save_metadata
 from .defaults import DEFAULT_CHARS, DEFAULT_GLYPH_LUMINANCE_BONUS, DEFAULT_GRADIENT_LOSS_STRENGTH
 from .optimizer import Grid, _choose_background, render_grid, solve
 from .structure import STRUCTURE_CHARS, STRUCTURE_DITHER, solve_structure
-from .tone import display_tone, encode_headroom, encoded_background, invert_source
+from .tone import (display_tone_lab, encode_headroom_lab,
+                   invert_source, oklab_to_srgb, srgb_to_oklab)
 from .transition import FIELDS, PACES, ease, glyph_paths, local_progress, path_glyphs, phase_offsets, recolor
 
 
@@ -47,30 +48,30 @@ def _save_grid(grid: Grid, directory: Path, preview: bool, masks: np.ndarray,
     indices = np.zeros((*grid.glyph.shape, 3), dtype=np.uint8)
     indices[:, :, 0] = grid.glyph
     Image.fromarray(indices, "RGB").save(directory / "glyph.png")
-    color = linear_to_srgb(torch.as_tensor(grid.color)).numpy()
+    color = oklab_to_srgb(grid.color)
     Image.fromarray(np.rint(color * 255).astype(np.uint8), "RGB").save(directory / "color.png")
     background = np.zeros(3, dtype=np.float32) if grid.background is None else grid.background
-    background_color = linear_to_srgb(torch.as_tensor(background)).numpy().reshape(1, 1, 3)
+    background_color = oklab_to_srgb(background).reshape(1, 1, 3)
     Image.fromarray(np.rint(background_color * 255).astype(np.uint8), "RGB").save(directory / "background.png")
     if preview:
-        pixels = display_tone(render_grid(grid, masks)[:size[1], :size[0]], invert_ink=invert_ink)
-        color = linear_to_srgb(torch.as_tensor(pixels)).numpy()
+        pixels = display_tone_lab(render_grid(grid, masks)[:size[1], :size[0]], invert_ink=invert_ink)
+        color = oklab_to_srgb(pixels)
         Image.fromarray(np.rint(color * 255).astype(np.uint8), "RGB").save(directory / "preview.png")
 
 
 def _load_grid(directory: Path) -> Grid:
     glyph = np.asarray(Image.open(directory / "glyph.png").convert("RGB"))[:, :, 0].copy()
     encoded = np.asarray(Image.open(directory / "color.png").convert("RGB"), dtype=np.float32) / 255
-    from .assets import srgb_to_linear
-    color = srgb_to_linear(torch.as_tensor(encoded)).numpy()
+    color = srgb_to_oklab(encoded)
     encoded_background = np.asarray(Image.open(directory / "background.png").convert("RGB"), dtype=np.float32) / 255
-    background = srgb_to_linear(torch.as_tensor(encoded_background)).numpy().reshape(3)
+    background = srgb_to_oklab(encoded_background).reshape(3)
     return Grid(glyph, color, background)
 
 
 def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                 invert_ink: bool, background: str, seed: int, steps: int,
                 candidates: int, dither: float, structure_dither: float,
+                logit_noise_distribution: str = "uniform",
                 device: str, previous: Grid | None = None,
                 destination: Grid | None = None, progress: float | None = None,
                 on_progress: Callable[[float, str], None] | None = None,
@@ -82,8 +83,8 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
     """Prepare a grid whose displayed pixels follow the chosen ink polarity."""
     if style not in ("headroom", "structure"):
         raise ValueError(f"Unknown render style: {style}")
-    if objective_space not in ("linear_rgb", "oklab"):
-        raise ValueError(f"Unknown objective space: {objective_space}")
+    if objective_space != "oklab":
+        raise ValueError("The renderer operates only in OKLab.")
     if gradient_loss_strength is None:
         gradient_loss_strength = DEFAULT_GRADIENT_LOSS_STRENGTH if style == "headroom" else 0.0
     if style == "structure" and glyph_luminance_bonus:
@@ -94,28 +95,31 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
         raise ValueError("gradient_loss_strength is only available for the headroom objective")
     if style == "structure" and detail_loss != "default":
         raise ValueError("Feature/detail losses are not implemented for structure-first glyph selection")
-    source_linear = srgb_to_linear(torch.from_numpy(target)).permute(2, 0, 1)
-    original_background = _choose_background(source_linear, background).numpy()
+    source_lab = srgb_to_oklab(target)
+    source_lab_tensor = torch.from_numpy(source_lab).permute(2, 0, 1)
+    original_background = _choose_background(source_lab_tensor, background).numpy()
     if invert_ink:
         solve_background = (np.zeros(3, dtype=np.float32) if background == "auto"
                             else original_background)
     else:
-        solve_background = encoded_background(original_background)
+        solve_background = encode_headroom_lab(original_background.reshape(1, 1, 3))[0, 0]
 
     if style == "headroom":
-        encoded_target = encode_headroom(target, invert_ink=invert_ink)
+        encoded_target = encode_headroom_lab(source_lab, invert_ink=invert_ink)
         return solve(encoded_target, masks, seed=seed, steps=steps,
                      candidates=candidates, dither=dither,
-                     background_linear=solve_background, device=device,
+                     logit_noise_distribution=logit_noise_distribution,
+                     background_oklab=solve_background, device=device,
+                     input_oklab=True,
                      previous=previous, destination=destination,
                      progress=progress, on_progress=on_progress,
                      detail_loss=detail_loss,
                      objective_space=objective_space,
                      glyph_luminance_bonus=glyph_luminance_bonus,
                      saturation_loss_strength=saturation_loss_strength,
-                     saturation_target_srgb=target,
+                     saturation_target_oklab=source_lab,
                      gradient_loss_strength=gradient_loss_strength,
-                     gradient_target_srgb=target,
+                     gradient_target_oklab=source_lab,
                      invert_ink=invert_ink)
 
     selection_target = invert_source(target) if invert_ink else target
@@ -288,7 +292,7 @@ def build(args: argparse.Namespace) -> None:
                     grid.glyph = path_glyphs(stills[index].glyph, stills[following].glyph, local, paths,
                                              previous.glyph, args.frames - 1 - frame)
                     if style == "headroom":
-                        grid.color = recolor(encode_headroom(target, invert_ink=invert_ink),
+                        grid.color = recolor(encode_headroom_lab(srgb_to_oklab(target), invert_ink=invert_ink),
                                              masks, grid.glyph, grid.background)
                 _save_grid(grid, base / f"{frame:04d}", False, masks, args.size)
                 previous = grid
@@ -319,7 +323,8 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=36, help="Still optimization steps")
     parser.add_argument("--transition-steps", type=int, default=16)
     parser.add_argument("--candidates", type=int, default=6)
-    parser.add_argument("--dither", type=float, default=0.005)
+    parser.add_argument("--dither", type=float, default=0.005,
+                        help="Post-optimization glyph-logit noise (default: blue-noise uniform; Gumbel scale is dither × 100)")
     parser.add_argument("--gradient-loss-strength", type=float, default=None,
                         help="Weight for displayed OKLab Sobel gradients (default: 1.5 for headroom)")
     parser.add_argument("--glyph-luminance-bonus", type=float, default=None,
