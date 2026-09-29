@@ -48,8 +48,7 @@ def _choose_background(image: torch.Tensor, choice: str) -> torch.Tensor:
     return background * (0.18 / background_luma.clamp_min(1e-8)).clamp(max=1)
 
 
-DETAIL_LOSSES = ("default", "local_color", "chroma_contrast", "color_tail",
-                 "feature_chroma", "feature_contrast")
+DETAIL_LOSSES = ("default", "local_color", "chroma_contrast", "color_tail")
 
 
 def _oklab(image: torch.Tensor) -> torch.Tensor:
@@ -68,53 +67,54 @@ def _oklab(image: torch.Tensor) -> torch.Tensor:
     return torch.einsum("ij,bjhw->bihw", lms_to_lab, lms)
 
 
-def _feature_chroma_mask(target_lab: torch.Tensor, cell: tuple[int, int]) -> torch.Tensor:
-    """Select minority chroma within each cell, irrespective of the cell's mean color."""
-    height, width = cell
-    rows, cols = target_lab.shape[-2] // height, target_lab.shape[-1] // width
-    cells = _cells(target_lab.squeeze(0), rows, cols, height, width)
-    chroma = cells[..., 1:]
-    dominant = chroma.median(dim=1, keepdim=True).values
-    difference = (chroma - dominant).square().sum(2).sqrt()
-    threshold = torch.quantile(difference, 0.85, dim=1, keepdim=True).clamp_min(0.015)
-    selected = (difference >= threshold) & (difference >= 0.015)
-    return (selected.reshape(rows, cols, height, width).permute(0, 2, 1, 3)
-            .reshape(1, 1, rows * height, cols * width).float())
+def _ink_lightness(color: torch.Tensor) -> torch.Tensor:
+    """Return OKLab lightness for one or more linear RGB ink colors."""
+    leading_shape = color.shape[:-1]
+    lightness = _oklab(color.reshape(-1, 3, 1, 1))[:, 0, 0, 0]
+    return lightness.reshape(leading_shape)
 
 
-def _feature_contrast_loss(rendered_lab: torch.Tensor, target_lab: torch.Tensor,
-                           feature_mask: torch.Tensor, cell: tuple[int, int]) -> torch.Tensor:
-    height, width = cell
-    rows, cols = rendered_lab.shape[-2] // height, rendered_lab.shape[-1] // width
-    selected = (feature_mask.squeeze(0).squeeze(0).reshape(rows, height, cols, width)
-                .permute(0, 2, 1, 3).reshape(-1, height * width))
-    count = selected.sum(1, keepdim=True)
-    valid = (count[:, 0] > 0) & (count[:, 0] < height * width)
-    if not bool(valid.any()):
-        return rendered_lab.new_zeros(())
-
-    def contrast(lab: torch.Tensor) -> torch.Tensor:
-        chroma = _cells(lab.squeeze(0), rows, cols, height, width)[..., 1:]
-        feature_color = (chroma * selected[..., None]).sum(1) / count.clamp_min(1)
-        surround_color = (chroma * (1 - selected[..., None])).sum(1) / (height * width - count).clamp_min(1)
-        return feature_color - surround_color
-
-    return (contrast(rendered_lab)[valid] - contrast(target_lab)[valid]).square().sum(1).mean()
+def _oklab_to_linear_rgb(lab: torch.Tensor) -> torch.Tensor:
+    """Convert OKLab to linear RGB while retaining gradients."""
+    lab_to_lms = lab.new_tensor([
+        [1.0, 0.3963377774, 0.2158037573],
+        [1.0, -0.1055613458, -0.0638541728],
+        [1.0, -0.0894841775, -1.2914855480],
+    ])
+    lms_to_rgb = lab.new_tensor([
+        [4.0767416621, -3.3077115913, 0.2309699292],
+        [-1.2684380046, 2.6097574011, -0.3413193965],
+        [-0.0041960863, -0.7034186147, 1.7076147010],
+    ])
+    lms = torch.einsum("ij,bjhw->bihw", lab_to_lms, lab).pow(3)
+    return torch.einsum("ij,bjhw->bihw", lms_to_rgb, lms)
 
 
-def _feature_pixel_loss(chroma_error: torch.Tensor, feature_mask: torch.Tensor,
-                        cell: tuple[int, int]) -> torch.Tensor:
-    height, width = cell
-    rows, cols = chroma_error.shape[-2] // height, chroma_error.shape[-1] // width
-    selected = (feature_mask.squeeze().reshape(rows, height, cols, width)
-                .permute(0, 2, 1, 3).reshape(-1, height * width))
-    errors = (chroma_error.squeeze().reshape(rows, height, cols, width)
-              .permute(0, 2, 1, 3).reshape(-1, height * width))
-    count = selected.sum(1)
-    valid = count > 0
-    if not bool(valid.any()):
-        return chroma_error.new_zeros(())
-    return ((errors * selected).sum(1) / count.clamp_min(1))[valid].mean()
+def _saturation_loss(rendered: torch.Tensor, target_lab: torch.Tensor,
+                    chroma_scale: torch.Tensor | None = None) -> torch.Tensor:
+    """Penalize displayed chroma loss and out-of-gamut headroom boosts per image."""
+    lab = _oklab(rendered)
+    lightness = lab[:, :1]
+    displayed_lightness = lightness + 2.0 * lightness * (1 - lightness).square()
+    chroma_scale = displayed_lightness / lightness.clamp_min(1e-6)
+    displayed_lab = torch.cat((displayed_lightness, lab[:, 1:] * chroma_scale), dim=1)
+    displayed_rgb = _oklab_to_linear_rgb(displayed_lab)
+
+    # The final display transform gamut maps these excursions by lowering
+    # chroma. Keep both an output chroma floor and a direct clipping gradient.
+    mapped_rgb = displayed_rgb.clamp(0, 1)
+    mapped_lab = _oklab(mapped_rgb)
+    source_chroma = (target_lab[:, 1:].square().sum(1, keepdim=True) + 1e-8).sqrt()
+    output_chroma = (mapped_lab[:, 1:].square().sum(1, keepdim=True) + 1e-8).sqrt()
+    scale = (torch.quantile(source_chroma.detach().flatten(), 0.95).clamp_min(0.02)
+             if chroma_scale is None else chroma_scale)
+    weight = 1 + 4 * (source_chroma / scale).clamp(max=1).square()
+    chroma_deficit = torch.relu(source_chroma - output_chroma)
+    chroma_loss = (weight * chroma_deficit.square()).mean((1, 2, 3))
+
+    gamut_excess = torch.relu(displayed_rgb - 1).square() + torch.relu(-displayed_rgb).square()
+    gamut_loss = 0.25 * gamut_excess.sum(1).mean((1, 2))
+    return chroma_loss + gamut_loss
 
 
 def _chroma(image: torch.Tensor) -> torch.Tensor:
@@ -134,9 +134,7 @@ def _local_color_weight(target: torch.Tensor) -> torch.Tensor:
 def _loss(rendered: torch.Tensor, target: torch.Tensor, *,
           detail_loss: str = "default", local_weight: torch.Tensor | None = None,
           cell: tuple[int, int] | None = None,
-          feature_mask: torch.Tensor | None = None,
           target_lab: torch.Tensor | None = None,
-          feature_strength: float = 1.0,
           objective_space: str = "linear_rgb") -> torch.Tensor:
     if objective_space == "oklab":
         if target_lab is None:
@@ -178,13 +176,6 @@ def _loss(rendered: torch.Tensor, target: torch.Tensor, *,
         rows, cols = chroma_error.shape[0] // height, chroma_error.shape[1] // width
         patches = chroma_error.reshape(rows, height, cols, width).permute(0, 2, 1, 3).reshape(-1, height * width)
         loss = loss + 0.75 * patches.topk(max(1, height * width // 10), dim=1).values.mean()
-    elif detail_loss in ("feature_chroma", "feature_contrast"):
-        rendered_lab = _oklab(rendered)
-        chroma_error = (rendered_lab[:, 1:] - target_lab[:, 1:]).square().sum(1, keepdim=True)
-        loss = loss + feature_strength * _feature_pixel_loss(chroma_error, feature_mask, cell)
-        if detail_loss == "feature_contrast":
-            loss = loss + feature_strength * _feature_contrast_loss(
-                rendered_lab, target_lab, feature_mask, cell)
     return loss
 
 
@@ -193,7 +184,8 @@ def _candidate_fit(cells: torch.Tensor, masks: torch.Tensor, count: int,
                    background_cells: torch.Tensor,
                    pixel_weight: torch.Tensor | None = None,
                    objective_space: str = "linear_rgb",
-                   cell_shape: tuple[int, int] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+                   cell_shape: tuple[int, int] | None = None,
+                   glyph_luminance_bonus: float = 0.0) -> tuple[torch.Tensor, torch.Tensor]:
     mask_flat = masks.flatten(1)
     denominator = mask_flat.square().sum(1).clamp_min(1e-8)
     mask_square = mask_flat.square()
@@ -241,6 +233,8 @@ def _candidate_fit(cells: torch.Tensor, masks: torch.Tensor, count: int,
         else:
             error = target_energy - 2 * (numerator * color).sum(2) + (color.square().sum(2) * fitted_denominator)
             error = error / (cell.shape[1] * 3)
+        if glyph_luminance_bonus:
+            error = error - glyph_luminance_bonus * _ink_lightness(color)
         error = error + dither * (noise[start:start + len(cell), None] - 0.5) * (coverage[None, :] - coverage.mean())
         indices = error.topk(min(count, masks.shape[0]), largest=False).indices
         all_indices.append(indices)
@@ -267,15 +261,28 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
           device: str = "cpu", previous: Grid | None = None,
           destination: Grid | None = None, progress: float | None = None,
           on_progress: Callable[[float, str], None] | None = None,
-          detail_loss: str = "default", feature_strength: float = 1.0,
-          objective_space: str = "oklab") -> Grid:
-    """Optimize one complete grid; temporal frames also depend on their neighbors."""
+          detail_loss: str = "default",
+          objective_space: str = "oklab",
+          glyph_luminance_bonus: float = 0.0,
+          saturation_loss_strength: float | None = None,
+          saturation_target_srgb: np.ndarray | None = None) -> Grid:
+    """Optimize one complete grid; temporal frames also depend on their neighbors.
+
+    A nonzero lightness bonus defaults to a competing saturation loss. Pass an
+    explicit zero saturation strength to measure the unprotected bonus alone.
+    """
     if masks_np.shape[0] > 256:
         raise ValueError("The glyph map supports at most 256 characters")
     if detail_loss not in DETAIL_LOSSES:
         raise ValueError(f"Unknown detail loss: {detail_loss}")
     if objective_space not in ("linear_rgb", "oklab"):
         raise ValueError(f"Unknown objective space: {objective_space}")
+    if glyph_luminance_bonus < 0:
+        raise ValueError("glyph_luminance_bonus must be nonnegative")
+    if saturation_loss_strength is None:
+        saturation_loss_strength = 20.0 if glyph_luminance_bonus > 0 else 0.0
+    if saturation_loss_strength < 0:
+        raise ValueError("saturation_loss_strength must be nonnegative")
     cell_height, cell_width = masks_np.shape[1:]
     original_height, original_width = image_srgb.shape[:2]
     rows = (original_height + cell_height - 1) // cell_height
@@ -285,6 +292,20 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
     image = torch.as_tensor(image_srgb, dtype=torch.float32, device=device).permute(2, 0, 1)
     image = srgb_to_linear(F.pad(image.unsqueeze(0), (0, pad_width, 0, pad_height), mode="replicate").squeeze(0))
     target = image.unsqueeze(0)
+    saturation_target_lab = None
+    saturation_target_cells = None
+    saturation_chroma_scale = None
+    if saturation_loss_strength:
+        source = image_srgb if saturation_target_srgb is None else saturation_target_srgb
+        display_target = torch.as_tensor(source, dtype=torch.float32, device=device).permute(2, 0, 1)
+        display_target = srgb_to_linear(F.pad(
+            display_target.unsqueeze(0), (0, pad_width, 0, pad_height), mode="replicate").squeeze(0))
+        saturation_target_lab = _oklab(display_target.unsqueeze(0)).detach()
+        saturation_chroma = (saturation_target_lab[:, 1:].square().sum(1, keepdim=True)
+                             + 1e-8).sqrt()
+        saturation_chroma_scale = torch.quantile(saturation_chroma.flatten(), 0.95).clamp_min(0.02)
+        saturation_target_cells = _cells(saturation_target_lab.squeeze(0), rows, cols,
+                                         cell_height, cell_width)
     cells = _cells(image, rows, cols, cell_height, cell_width)
     background_color = (_choose_background(image, background) if background_linear is None
                         else torch.as_tensor(background_linear, dtype=torch.float32, device=device).reshape(3))
@@ -293,22 +314,9 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
     bank = masks.flatten(1)
     noise = torch.as_tensor(blue_noise((rows, cols), seed).flatten(), device=device)
     local_weight = _local_color_weight(target) if detail_loss in ("local_color", "chroma_contrast", "color_tail") else None
-    target_lab = (_oklab(target).detach() if objective_space == "oklab"
-                  or detail_loss in ("feature_chroma", "feature_contrast")
-                  else None)
+    target_lab = _oklab(target).detach() if objective_space == "oklab" else None
     target_lab_cells = (_cells(target_lab.squeeze(0), rows, cols, cell_height, cell_width)
                         if objective_space == "oklab" else None)
-    feature_mask = (_feature_chroma_mask(target_lab, (cell_height, cell_width))
-                    if target_lab is not None else None)
-    if feature_mask is not None and not bool(feature_mask.any()):
-        detail_loss, feature_mask, target_lab = "default", None, None
-    if feature_mask is not None:
-        selected = (feature_mask.squeeze().reshape(rows, cell_height, cols, cell_width)
-                    .permute(0, 2, 1, 3).reshape(-1, cell_height * cell_width))
-        count = selected.sum(1, keepdim=True).clamp_min(1)
-        weighted = 1 + selected * (4 * feature_strength * cell_height * cell_width / count).clamp(max=200)
-        local_weight = (weighted.reshape(rows, cols, cell_height, cell_width)
-                        .permute(0, 2, 1, 3).reshape(1, 1, rows * cell_height, cols * cell_width))
     pixel_weight = None
     if local_weight is not None:
         pixel_weight = (local_weight.squeeze(0).squeeze(0).reshape(rows, cell_height, cols, cell_width)
@@ -317,16 +325,19 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         weighted_count = candidates - regular_count
         regular_indices, regular_colors = _candidate_fit(
             cells, masks, regular_count, noise, dither, background_cells,
-            objective_space=objective_space, cell_shape=(cell_height, cell_width))
+            objective_space=objective_space, cell_shape=(cell_height, cell_width),
+            glyph_luminance_bonus=glyph_luminance_bonus)
         weighted_indices, weighted_colors = _candidate_fit(
             cells, masks, weighted_count, noise, dither, background_cells, pixel_weight,
-            objective_space=objective_space, cell_shape=(cell_height, cell_width))
+            objective_space=objective_space, cell_shape=(cell_height, cell_width),
+            glyph_luminance_bonus=glyph_luminance_bonus)
         indices = torch.cat((regular_indices, weighted_indices), dim=1)
         fitted = torch.cat((regular_colors, weighted_colors), dim=1)
     else:
         indices, fitted = _candidate_fit(cells, masks, candidates, noise, dither,
                                          background_cells, objective_space=objective_space,
-                                         cell_shape=(cell_height, cell_width))
+                                         cell_shape=(cell_height, cell_width),
+                                         glyph_luminance_bonus=glyph_luminance_bonus)
 
     if previous is not None and destination is not None:
         if previous.glyph.shape != (rows, cols) or destination.glyph.shape != (rows, cols):
@@ -340,7 +351,7 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         fitted = torch.cat((fitted, *extra), dim=1)
 
     sample_masks = bank[indices]
-    fitting_weight = pixel_weight if detail_loss in ("local_color", "feature_chroma", "feature_contrast") else None
+    fitting_weight = pixel_weight if detail_loss == "local_color" else None
     mask_den = (sample_masks.square().sum(2).clamp_min(1e-8) if fitting_weight is None
                 else torch.einsum("np,nkp->nk", fitting_weight, sample_masks.square()).clamp_min(1e-8))
     fitting_cells = cells - background_cells
@@ -350,8 +361,6 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
     background_fit = background_cells if fitting_weight is None else background_cells * fitting_weight[..., None]
     numerator = numerator + torch.einsum("npc,nkp->nkc", background_fit, sample_masks.square())
     candidate_colors = (numerator / mask_den[..., None]).clamp(0, 1)
-    if feature_mask is not None:
-        fitted = candidate_colors
     candidate_render = (sample_masks[..., None] * candidate_colors[:, :, None, :]
                         + (1 - sample_masks[..., None]) * background_cells[:, None, :, :])
     if objective_space == "oklab":
@@ -367,6 +376,18 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         initial_residual = (candidate_render - cells[:, None]).square()
         initial_errors = (initial_residual.mean((2, 3)) if fitting_weight is None else
                           (initial_residual * fitting_weight[:, None, :, None]).mean((2, 3)))
+    if glyph_luminance_bonus:
+        initial_errors = initial_errors - glyph_luminance_bonus * _ink_lightness(candidate_colors)
+    if saturation_loss_strength:
+        batch, count = candidate_render.shape[:2]
+        candidate_images = candidate_render.reshape(-1, cell_height, cell_width, 3).permute(0, 3, 1, 2)
+        candidate_targets = (saturation_target_cells[:, None]
+                             .expand(-1, count, -1, -1)
+                             .reshape(-1, cell_height, cell_width, 3)
+                             .permute(0, 3, 1, 2))
+        saturation_errors = _saturation_loss(
+            candidate_images, candidate_targets, saturation_chroma_scale).reshape(batch, count)
+        initial_errors = initial_errors + saturation_loss_strength * saturation_errors
     if previous is not None and destination is not None:
         chosen = torch.where(noise < float(progress),
                              torch.as_tensor(destination.glyph.astype(np.int64), device=device).flatten(),
@@ -389,10 +410,13 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
     polish_steps = max(4, steps // 4)
     total_work = steps + 4 + polish_steps
     def frame_loss(rendered: torch.Tensor) -> torch.Tensor:
-        return _loss(rendered, target, detail_loss=detail_loss, local_weight=local_weight,
-                     cell=(cell_height, cell_width), feature_mask=feature_mask,
-                     target_lab=target_lab, feature_strength=feature_strength,
+        loss = _loss(rendered, target, detail_loss=detail_loss, local_weight=local_weight,
+                     cell=(cell_height, cell_width), target_lab=target_lab,
                      objective_space=objective_space)
+        if saturation_loss_strength:
+            loss = loss + saturation_loss_strength * _saturation_loss(
+                rendered, saturation_target_lab, saturation_chroma_scale).mean()
+        return loss
 
     for step in range(steps):
         optimizer.zero_grad(set_to_none=True)
@@ -402,6 +426,8 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         color = torch.sigmoid(color_parameter)
         rendered = _render(mask, color, rows, cols, cell_height, cell_width, background_color)
         loss = frame_loss(rendered)
+        if glyph_luminance_bonus:
+            loss = loss - glyph_luminance_bonus * _ink_lightness(color).mean()
         loss = loss + 0.006 * (-(weights * weights.clamp_min(1e-9).log()).sum(1)).mean()
         loss = loss + dither * ((noise - 0.5) * mask.mean(1)).mean()
         if prev_masks is not None:
@@ -421,6 +447,8 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
 
     def hard_score(chosen_masks: torch.Tensor, chosen_color: torch.Tensor) -> torch.Tensor:
         score = frame_loss(_render(chosen_masks, chosen_color, rows, cols, cell_height, cell_width, background_color))
+        if glyph_luminance_bonus:
+            score = score - glyph_luminance_bonus * _ink_lightness(chosen_color).mean()
         score = score + dither * ((noise - 0.5) * chosen_masks.mean(1)).mean()
         if prev_masks is not None:
             score = score + 0.025 * (chosen_masks - prev_masks).square().mean()
@@ -443,6 +471,10 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
             gain = (gradient_cells[:, None] * delta).sum((2, 3))
             gain = gain + delta.square().sum((2, 3)) / (len(glyph) * cell_height * cell_width * 3)
             gain = gain + dither * (noise[:, None] - 0.5) * (sample_masks.mean(2) - hard_masks.mean(1)[:, None]) / len(glyph)
+            if glyph_luminance_bonus:
+                gain = gain - glyph_luminance_bonus * (
+                    _ink_lightness(candidate_colors) - _ink_lightness(hard_color)[:, None]
+                ) / len(glyph)
             if prev_masks is not None:
                 gain = gain + 0.025 * ((sample_masks - prev_masks[:, None]).square().mean(2)
                                        - (hard_masks - prev_masks).square().mean(1)[:, None]) / len(glyph)
@@ -469,6 +501,8 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         color_optimizer.zero_grad(set_to_none=True)
         color = torch.sigmoid(color_parameter)
         loss = frame_loss(_render(hard_masks, color, rows, cols, cell_height, cell_width, background_color))
+        if glyph_luminance_bonus:
+            loss = loss - glyph_luminance_bonus * _ink_lightness(color).mean()
         if prev_colors is not None:
             loss = loss + 0.010 * (color - prev_colors).square().mean()
         loss.backward()

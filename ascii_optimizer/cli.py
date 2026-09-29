@@ -75,13 +75,19 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                 device: str, previous: Grid | None = None,
                 destination: Grid | None = None, progress: float | None = None,
                 on_progress: Callable[[float, str], None] | None = None,
-                detail_loss: str = "default", feature_strength: float = 1.0,
-                objective_space: str = "oklab") -> Grid:
+                detail_loss: str = "default",
+                objective_space: str = "oklab",
+                glyph_luminance_bonus: float = 0.0,
+                saturation_loss_strength: float | None = None) -> Grid:
     """Prepare a grid whose displayed pixels follow the chosen ink polarity."""
     if style not in ("headroom", "structure"):
         raise ValueError(f"Unknown render style: {style}")
     if objective_space not in ("linear_rgb", "oklab"):
         raise ValueError(f"Unknown objective space: {objective_space}")
+    if style == "structure" and glyph_luminance_bonus:
+        raise ValueError("glyph_luminance_bonus is only available for the headroom objective")
+    if style == "structure" and saturation_loss_strength:
+        raise ValueError("saturation_loss_strength is only available for the headroom objective")
     if style == "structure" and detail_loss != "default":
         raise ValueError("Feature/detail losses are not implemented for structure-first glyph selection")
     source_linear = srgb_to_linear(torch.from_numpy(target)).permute(2, 0, 1)
@@ -99,8 +105,11 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                      background_linear=solve_background, device=device,
                      previous=previous, destination=destination,
                      progress=progress, on_progress=on_progress,
-                     detail_loss=detail_loss, feature_strength=feature_strength,
-                     objective_space=objective_space)
+                     detail_loss=detail_loss,
+                     objective_space=objective_space,
+                     glyph_luminance_bonus=glyph_luminance_bonus,
+                     saturation_loss_strength=saturation_loss_strength,
+                     saturation_target_srgb=target)
 
     selection_target = invert_source(target) if invert_ink else target
     selection_background = solve_background if invert_ink else original_background

@@ -11,7 +11,7 @@ from PIL import Image
 
 from ascii_optimizer.assets import blue_noise, cell_for_display, glyph_masks, linear_to_srgb, resolve_font, srgb_to_linear
 from ascii_optimizer.cli import build, solve_style
-from ascii_optimizer.optimizer import Grid, _feature_pixel_loss, _loss, render_grid, solve
+from ascii_optimizer.optimizer import Grid, _loss, render_grid, solve
 from ascii_optimizer.service import _validated_request
 from ascii_optimizer.structure import STRUCTURE_CHARS
 from ascii_optimizer.tone import display_tone, encode_headroom
@@ -80,16 +80,6 @@ def test_detail_losses_can_preserve_a_single_colored_pixel_over_a_larger_gray_pa
     assert solve(source, masks, detail_loss="default", **settings).glyph[0, 0] == 1
     assert solve(source, masks, detail_loss="local_color", **settings).glyph[0, 0] == 2
     assert solve(source, masks, detail_loss="color_tail", **settings).glyph[0, 0] == 2
-    assert solve(source, masks, detail_loss="feature_chroma", feature_strength=0.5, **settings).glyph[0, 0] == 2
-
-
-def test_feature_loss_gives_sparse_and_dense_feature_cells_equal_weight():
-    error = torch.zeros((1, 1, 2, 4))
-    selected = torch.zeros_like(error)
-    error[0, 0, 0, 0] = 1
-    selected[0, 0, 0, 0] = 1
-    selected[0, 0, :, 2:] = 1
-    assert _feature_pixel_loss(error, selected, (2, 2)).item() == 0.5
 
 
 def test_blue_noise_is_seeded_and_low_frequency_suppressed():
@@ -243,7 +233,7 @@ def test_inverting_structure_changes_selected_glyphs():
     assert not np.array_equal(normal.glyph, inverted.glyph)
     assert "|" in STRUCTURE_CHARS and all(char in STRUCTURE_CHARS for char in "[]{}")
     with pytest.raises(ValueError, match="not implemented for structure-first"):
-        solve_style(source, masks, invert_ink=False, detail_loss="feature_chroma", **settings)
+        solve_style(source, masks, invert_ink=False, detail_loss="local_color", **settings)
 
 
 def test_inverting_headroom_changes_solved_ink():
