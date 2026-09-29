@@ -295,6 +295,7 @@ Item {
         loadFromConfig()
         applyStyleCharacters(activeSettings.RenderStyle)
         fontCombo.editText = activeSettings.FontFamily
+        startFontScan()
         Qt.callLater(function() { root.controlsReady = true })
     }
 
@@ -897,24 +898,7 @@ Item {
 
             Kirigami.Separator {
                 Kirigami.FormData.isSection: true
-                Kirigami.FormData.label: "Appearance"
-            }
-
-            Controls.TextField {
-                Kirigami.FormData.label: "Render Cache:"
-                Layout.fillWidth: true
-                text: root.activeSettings.RenderDirectory
-                placeholderText: "Generated automatically after rendering"
-                readOnly: true
-                onEditingFinished: {
-                    root.setProfileSetting("RenderDirectory", text.trim())
-                }
-            }
-
-            Controls.Label {
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                text: "Changes render in the background. The last saved ASCII render stays visible until replacement assets are ready."
+                Kirigami.FormData.label: "Style"
             }
 
             Controls.ComboBox {
@@ -937,61 +921,33 @@ Item {
                 onToggled: if (root.controlsReady) root.setProfileSetting("InvertInk", checked)
             }
 
-            Controls.SpinBox {
-                Kirigami.FormData.label: "Transition Frames:"
-                from: 2
-                to: 120
-                value: root.activeSettings.TransitionFrames
-                onValueModified: {
-                    root.setProfileSetting("TransitionFrames", value)
-                }
+            Controls.CheckBox {
+                id: grayscaleCheck
+                Kirigami.FormData.label: "Grayscale:"
+                checked: root.activeSettings.Grayscale
+                onToggled: if (root.controlsReady) root.setProfileSetting("Grayscale", checked)
             }
 
-            Controls.SpinBox {
-                Kirigami.FormData.label: "Transition Time (ms):"
-                from: 100
-                to: 30000
-                stepSize: 100
-                value: root.activeSettings.TransitionDuration
-                onValueModified: {
-                    root.setProfileSetting("TransitionDuration", value)
-                }
+            Kirigami.Separator {
+                Kirigami.FormData.isSection: true
+                Kirigami.FormData.label: "Appearance"
             }
 
-            Controls.ComboBox {
-                Kirigami.FormData.label: "Transition Pacing:"
+            Controls.TextField {
+                Kirigami.FormData.label: "Render Cache:"
                 Layout.fillWidth: true
-                model: ["Linear", "Ease in", "Ease out", "Ease in and out"]
-                currentIndex: ["linear", "ease-in", "ease-out", "ease-in-out"].indexOf(root.activeSettings.TransitionPace)
-                onActivated: index => {
-                    root.setProfileSetting("TransitionPace", ["linear", "ease-in", "ease-out", "ease-in-out"][index])
+                text: root.activeSettings.RenderDirectory
+                placeholderText: "Generated automatically after rendering"
+                readOnly: true
+                onEditingFinished: {
+                    root.setProfileSetting("RenderDirectory", text.trim())
                 }
             }
 
-            Controls.ComboBox {
-                Kirigami.FormData.label: "Morph Pattern:"
+            Controls.Label {
                 Layout.fillWidth: true
-                model: ["Blue noise dissolve", "Ripple", "Spiral", "Directional flow", "From edges", "Image salience"]
-                currentIndex: ["blue-noise", "ripple", "spiral", "directional", "edge", "salience"].indexOf(root.activeSettings.TransitionField)
-                onActivated: index => {
-                    root.setProfileSetting("TransitionField", ["blue-noise", "ripple", "spiral", "directional", "edge", "salience"][index])
-                }
-            }
-
-            RowLayout {
-                Kirigami.FormData.label: "Spatial Stagger:"
-                Controls.Slider {
-                    id: staggerSlider
-                    Layout.fillWidth: true
-                    from: 0
-                    to: 0.9
-                    stepSize: 0.05
-                    value: root.activeSettings.TransitionSpread
-                    onMoved: {
-                        root.setProfileSetting("TransitionSpread", value)
-                    }
-                }
-                Controls.Label { text: staggerSlider.value.toFixed(2) }
+                wrapMode: Text.WordWrap
+                text: "Changes render in the background. The last saved ASCII render stays visible until replacement assets are ready."
             }
 
             Controls.ComboBox {
@@ -1193,40 +1149,84 @@ Item {
                 }
             }
 
+            Kirigami.Separator {
+                Kirigami.FormData.isSection: true
+                Kirigami.FormData.label: "Transition"
+                visible: root.editMode === "Slideshow"
+            }
+
+            Controls.SpinBox {
+                Kirigami.FormData.label: "Transition Frames:"
+                visible: root.editMode === "Slideshow"
+                from: 2
+                to: 120
+                value: root.activeSettings.TransitionFrames
+                onValueModified: root.setProfileSetting("TransitionFrames", value)
+            }
+
+            Controls.SpinBox {
+                Kirigami.FormData.label: "Transition Time (ms):"
+                visible: root.editMode === "Slideshow"
+                from: 100
+                to: 30000
+                stepSize: 100
+                value: root.activeSettings.TransitionDuration
+                onValueModified: root.setProfileSetting("TransitionDuration", value)
+            }
+
+            Controls.ComboBox {
+                Kirigami.FormData.label: "Transition Pacing:"
+                visible: root.editMode === "Slideshow"
+                Layout.fillWidth: true
+                model: ["Linear", "Ease in", "Ease out", "Ease in and out"]
+                currentIndex: ["linear", "ease-in", "ease-out", "ease-in-out"].indexOf(root.activeSettings.TransitionPace)
+                onActivated: index => root.setProfileSetting("TransitionPace", ["linear", "ease-in", "ease-out", "ease-in-out"][index])
+            }
+
+            Controls.ComboBox {
+                Kirigami.FormData.label: "Morph Pattern:"
+                visible: root.editMode === "Slideshow"
+                Layout.fillWidth: true
+                model: ["Blue noise dissolve", "Ripple", "Spiral", "Directional flow", "From edges", "Image salience"]
+                currentIndex: ["blue-noise", "ripple", "spiral", "directional", "edge", "salience"].indexOf(root.activeSettings.TransitionField)
+                onActivated: index => root.setProfileSetting("TransitionField", ["blue-noise", "ripple", "spiral", "directional", "edge", "salience"][index])
+            }
+
             RowLayout {
-                Kirigami.FormData.label: "Interval:"
+                Kirigami.FormData.label: "Spatial Stagger:"
+                visible: root.editMode === "Slideshow"
+                Controls.Slider {
+                    id: staggerSlider
+                    Layout.fillWidth: true
+                    from: 0
+                    to: 0.9
+                    stepSize: 0.05
+                    value: root.activeSettings.TransitionSpread
+                    onMoved: root.setProfileSetting("TransitionSpread", value)
+                }
+                Controls.Label { text: staggerSlider.value.toFixed(2) }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Slide Interval:"
                 visible: root.editMode === "Slideshow"
 
                 Controls.Slider {
                     id: intervalSlider
                     Layout.fillWidth: true
-
                     snapMode: Controls.Slider.SnapOnRelease
                     stepSize: 2.5
-
                     from: 5
                     to: 30
                     value: root.activeSettings.SlideInterval
-
-                    onValueChanged: {
-                        previewContainer.resetPreview()
-                    }
+                    onValueChanged: previewContainer.resetPreview()
                     onMoved: root.setProfileSetting("SlideInterval", value)
                 }
-                
                 Controls.Label {
                     Layout.preferredWidth: Kirigami.Units.gridUnit * 7
-
                     text: intervalSlider.value + " seconds"
                     font.weight: Font.Bold
                 }
-            }
-
-            Controls.CheckBox {
-                id: grayscaleCheck
-                Kirigami.FormData.label: "Grayscaled:"
-                checked: root.activeSettings.Grayscale
-                onToggled: if (root.controlsReady) root.setProfileSetting("Grayscale", checked)
             }
         }
     }
