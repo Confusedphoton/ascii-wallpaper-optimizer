@@ -20,6 +20,7 @@ Item {
     property string displayDirectory: cachedDirectory
     property string jobId: ""
     property int requestSerial: 0
+    property bool currentRequestForced: false
 
     readonly property string settingsKey: JSON.stringify(Object.assign({}, requestSettings, {
         screen: screenName, size: [physicalWidth, physicalHeight]
@@ -27,6 +28,7 @@ Item {
 
     onSettingsKeyChanged: {
         requestSerial++
+        currentRequestForced = false
         jobId = ""
         directory = ""
         displayDirectory = cachedDirectory
@@ -70,6 +72,7 @@ Item {
         schedule.stop()
         const request = JSON.parse(settingsKey)
         request.images = request.images.map(path => String(path).trim()).filter(path => path.length)
+        currentRequestForced = !!force
         if (!request.images.length) {
             renderState = "idle"
             stage = "Select an image"
@@ -78,7 +81,7 @@ Item {
             jobId = ""
             return
         }
-        request.force = !!force
+        request.force = currentRequestForced
         const serial = ++requestSerial
         renderState = "connecting"
         stage = "Connecting to renderer"

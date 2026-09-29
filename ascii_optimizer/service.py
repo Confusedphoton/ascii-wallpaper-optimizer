@@ -26,6 +26,9 @@ from .defaults import DEFAULT_GLYPH_LUMINANCE_BONUS, DEFAULT_GRADIENT_LOSS_STREN
 PORT = 48741
 ADDRESS = "127.0.0.1"
 MAX_BODY = 65536
+TRANSITION_ONLY_SETTINGS = frozenset({
+    "frames", "transition_pace", "transition_field", "transition_spread",
+})
 OVERRIDE_PATH = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "ascii-wallpaper-optimizer" / "override.json"
 override_lock = threading.Lock()
 
@@ -145,6 +148,10 @@ class RenderQueue:
     def submit(self, raw: dict) -> dict:
         settings = _validated_request(raw)
         key = hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:24]
+        still_settings = {name: value for name, value in settings.items()
+                          if name not in TRANSITION_ONLY_SETTINGS}
+        directory_key = hashlib.sha256(
+            json.dumps(still_settings, sort_keys=True).encode()).hexdigest()[:24]
         with self.lock:
             old = self.jobs.get(key)
             if old and old["state"] in ("queued", "running"):
@@ -153,7 +160,9 @@ class RenderQueue:
                 return self._public(old)
             job = {"id": key, "state": "queued", "progress": 0.0,
                    "stage": "Waiting for renderer", "error": "", "settings": settings,
-                   "directory": str(self.cache / key), "force": bool(raw.get("force"))}
+                   # The CLI manifest in this directory lets transition-only edits
+                   # reuse the already optimized stills.
+                   "directory": str(self.cache / directory_key), "force": bool(raw.get("force"))}
             self.jobs[key] = job
             self.pending.put(key)
             return self._public(job)

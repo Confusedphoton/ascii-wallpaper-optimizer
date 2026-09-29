@@ -64,6 +64,7 @@ WallpaperItem {
         }
     }
     property int renderRevision: 0
+    property int transitionRevision: 0
 
     property int currentIdx: 0
     property int nextIdx: 0
@@ -90,7 +91,12 @@ WallpaperItem {
             background: root.activeSettings.backgroundMode === 1 ? root.activeSettings.backgroundColor : "auto"
         })
         cachedDirectory: root.activeSettings.renderDirectory
-        onRenderStateChanged: if (renderState === "ready") root.renderRevision++
+        onRenderStateChanged: {
+            if (renderState === "ready") {
+                root.transitionRevision++
+                if (currentRequestForced) root.renderRevision++
+            }
+        }
     }
 
     Timer {
@@ -171,6 +177,7 @@ WallpaperItem {
         transitionFrames: root.activeSettings.transitionFrames
         detail: root.activeSettings.detail
         revision: root.renderRevision
+        transitionRevision: root.transitionRevision
     }
 
     Rectangle {

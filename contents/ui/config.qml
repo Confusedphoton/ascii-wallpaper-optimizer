@@ -63,6 +63,7 @@ Item {
     property int fontScanIndex: 0
     property bool fontScanStarted: false
     property int renderRevision: 0
+    property int transitionRevision: 0
     property bool controlsReady: false
 
     function colorHex(color) {
@@ -352,7 +353,8 @@ Item {
         cachedDirectory: root.activeSettings.RenderDirectory
         onRenderStateChanged: {
             if (renderState === "ready") {
-                root.renderRevision++
+                root.transitionRevision++
+                if (currentRequestForced) root.renderRevision++
                 if (root.activeSettings.RenderDirectory !== directory) {
                     root.setProfileSetting("RenderDirectory", directory)
                 }
@@ -548,6 +550,7 @@ Item {
                         transitionFrames: root.activeSettings.TransitionFrames
                         detail: root.activeSettings.Detail
                         revision: root.renderRevision
+                        transitionRevision: root.transitionRevision
                     }
                 }
 

@@ -15,6 +15,7 @@ Item {
     property int transitionFrames: 16
     property int detail: 1
     property int revision: 0
+    property int transitionRevision: 0
 
     readonly property bool ready: glyphMap.status === Image.Ready
         && colorMap.status === Image.Ready && atlasImage.status === Image.Ready
@@ -27,8 +28,9 @@ Item {
     function fileUrl(relative) {
         const directory = String(renderDirectory || "").trim().replace(/\/$/, "");
         if (!directory) return "";
+        const version = relative.startsWith("transitions/") ? transitionRevision : revision;
         return "file://" + (directory + "/" + relative).split("/").map(encodeURIComponent).join("/")
-            + "?v=" + revision;
+            + "?v=" + version;
     }
 
     function mapPath(kind) {
