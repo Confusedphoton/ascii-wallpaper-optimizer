@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import queue
 import re
@@ -20,7 +21,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import __version__
-from .defaults import DEFAULT_GRADIENT_LOSS_STRENGTH
+from .defaults import DEFAULT_GLYPH_LUMINANCE_BONUS, DEFAULT_GRADIENT_LOSS_STRENGTH
 
 PORT = 48741
 ADDRESS = "127.0.0.1"
@@ -81,6 +82,9 @@ def _validated_request(raw: dict) -> dict:
     dither = float(raw["dither"])
     structure_dither = float(raw.get("structure_dither", 0.06))
     style = str(raw.get("style", "headroom"))
+    glyph_luminance_bonus = float(raw.get(
+        "glyph_luminance_bonus",
+        DEFAULT_GLYPH_LUMINANCE_BONUS if style == "headroom" else 0.0))
     transition_pace = str(raw.get("transition_pace", "ease-in-out"))
     transition_field = str(raw.get("transition_field", "blue-noise"))
     transition_spread = float(raw.get("transition_spread", 0.65))
@@ -95,6 +99,9 @@ def _validated_request(raw: dict) -> dict:
         raise ValueError("Render style, ink polarity, or structure dithering is invalid.")
     if gradient_loss_strength < 0 or (style == "structure" and gradient_loss_strength != 0):
         raise ValueError("Gradient loss must be nonnegative and is only available for headroom rendering.")
+    if (not math.isfinite(glyph_luminance_bonus) or not 0 <= glyph_luminance_bonus <= DEFAULT_GLYPH_LUMINANCE_BONUS
+            or (style == "structure" and glyph_luminance_bonus != 0)):
+        raise ValueError("Glyph luminance bonus must be between 0 and 0.12 and is only available for headroom rendering.")
     if transition_pace not in ("linear", "ease-in", "ease-out", "ease-in-out") or transition_field not in (
             "blue-noise", "ripple", "spiral", "directional", "edge", "salience") or not 0 <= transition_spread <= 0.9:
         raise ValueError("Transition pace, field, or spread is invalid.")
@@ -120,6 +127,7 @@ def _validated_request(raw: dict) -> dict:
         "frames": frames, "dither": dither, "structure_dither": structure_dither,
         "transition_pace": transition_pace, "transition_field": transition_field,
         "transition_spread": transition_spread, "gradient_loss_strength": gradient_loss_strength,
+        "glyph_luminance_bonus": glyph_luminance_bonus,
         "style": style, "invert_ink": invert_ink,
         "background": background, "size": list(size),
     }
@@ -176,6 +184,7 @@ class RenderQueue:
                        "--transition-spread", str(settings["transition_spread"]),
                        "--dither", str(settings["dither"]),
                        "--gradient-loss-strength", str(settings["gradient_loss_strength"]),
+                       "--glyph-luminance-bonus", str(settings["glyph_luminance_bonus"]),
                        "--style", settings["style"],
                        "--structure-dither", str(settings["structure_dither"]),
                        "--background", settings["background"], "--progress-json"]

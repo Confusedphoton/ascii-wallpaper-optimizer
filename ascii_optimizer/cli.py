@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 from typing import Callable
@@ -15,7 +16,7 @@ from PIL import Image
 
 from . import __version__
 from .assets import cell_for_display, glyph_masks, linear_to_srgb, load_target, resolve_font, save_atlas, save_metadata, srgb_to_linear
-from .defaults import DEFAULT_CHARS, DEFAULT_GRADIENT_LOSS_STRENGTH
+from .defaults import DEFAULT_CHARS, DEFAULT_GLYPH_LUMINANCE_BONUS, DEFAULT_GRADIENT_LOSS_STRENGTH
 from .optimizer import Grid, _choose_background, render_grid, solve
 from .structure import STRUCTURE_CHARS, STRUCTURE_DITHER, solve_structure
 from .tone import display_tone, encode_headroom, encoded_background, invert_source
@@ -130,6 +131,14 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
 def build(args: argparse.Namespace) -> None:
     style = getattr(args, "style", "headroom")
     invert_ink = bool(getattr(args, "invert_ink", False))
+    glyph_luminance_bonus = getattr(args, "glyph_luminance_bonus", None)
+    if glyph_luminance_bonus is None:
+        glyph_luminance_bonus = DEFAULT_GLYPH_LUMINANCE_BONUS if style == "headroom" else 0.0
+    glyph_luminance_bonus = float(glyph_luminance_bonus)
+    if (not math.isfinite(glyph_luminance_bonus)
+            or not 0 <= glyph_luminance_bonus <= DEFAULT_GLYPH_LUMINANCE_BONUS
+            or (style == "structure" and glyph_luminance_bonus != 0)):
+        raise ValueError("Glyph luminance bonus must be between 0 and 0.12 and is only available for headroom rendering.")
     gradient_loss_strength = getattr(args, "gradient_loss_strength", None)
     if gradient_loss_strength is None:
         gradient_loss_strength = DEFAULT_GRADIENT_LOSS_STRENGTH if style == "headroom" else 0.0
@@ -167,6 +176,7 @@ def build(args: argparse.Namespace) -> None:
         "size": list(args.size), "cell": list(cell), "chars": effective_chars,
         "style": style, "invert_ink": invert_ink, "structure_dither": structure_dither,
         "gradient_loss_strength": float(gradient_loss_strength),
+        "glyph_luminance_bonus": glyph_luminance_bonus,
         "crop": args.crop, "grayscale": args.grayscale,
         "frames": args.frames, "steps": args.steps,
         "transition_steps": args.transition_steps,
@@ -221,6 +231,7 @@ def build(args: argparse.Namespace) -> None:
                      seed=args.seed + index, steps=args.steps,
                      candidates=args.candidates, dither=args.dither, structure_dither=structure_dither,
                      background=args.background, device=args.device,
+                     glyph_luminance_bonus=glyph_luminance_bonus,
                      gradient_loss_strength=float(gradient_loss_strength),
                      on_progress=lambda fraction, stage, index=index: report(
                          fraction, f"Image {index + 1}/{len(images)}: {stage}"))
@@ -270,6 +281,7 @@ def build(args: argparse.Namespace) -> None:
                                  dither=args.dither, structure_dither=structure_dither,
                                  background=args.background, device=args.device, previous=previous,
                                  destination=stills[following], progress=float(local.mean()),
+                                 glyph_luminance_bonus=glyph_luminance_bonus,
                                  gradient_loss_strength=float(gradient_loss_strength),
                                  on_progress=lambda fraction, stage, index=index, frame=frame: report(
                                      fraction, f"Transition {index + 1}/{len(images)}, frame {frame + 1}/{args.frames}: {stage}"))
@@ -310,6 +322,8 @@ def main() -> None:
     parser.add_argument("--dither", type=float, default=0.005)
     parser.add_argument("--gradient-loss-strength", type=float, default=None,
                         help="Weight for displayed OKLab Sobel gradients (default: 1.5 for headroom)")
+    parser.add_argument("--glyph-luminance-bonus", type=float, default=None,
+                        help="Bonus for lighter glyph ink with automatic chrominance correction (default: 0.12 for headroom)")
     parser.add_argument("--style", choices=("headroom", "structure"), default="headroom")
     parser.add_argument("--invert-ink", action="store_true", help="Dark ink on a light canvas")
     parser.add_argument("--structure-dither", type=float, default=STRUCTURE_DITHER,
@@ -330,6 +344,10 @@ def main() -> None:
         parser.error("transition-spread must be 0..0.9")
     if args.gradient_loss_strength is not None and args.gradient_loss_strength < 0:
         parser.error("gradient-loss-strength must be nonnegative")
+    if args.glyph_luminance_bonus is not None and not 0 <= args.glyph_luminance_bonus <= DEFAULT_GLYPH_LUMINANCE_BONUS:
+        parser.error("glyph-luminance-bonus must be 0..0.12")
+    if args.style == "structure" and args.glyph_luminance_bonus not in (None, 0):
+        parser.error("glyph-luminance-bonus is only available for headroom rendering")
     build(args)
 
 

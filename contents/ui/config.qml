@@ -87,6 +87,7 @@ Item {
     property int cfg_SlideInterval: 10
     property real cfg_Dither: 0.005
     property real cfg_GradientLossStrength: 1.5
+    property real cfg_GlyphLuminanceBonus: 0.12
     property real cfg_StructureDither: 0.06
     property bool cfg_InvertInk: false
     property list<string> cfg_AsciiCharsB: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@", "\\", "=", "^"]
@@ -94,6 +95,7 @@ Item {
     property int cfg_SlideIntervalB: 10
     property real cfg_DitherB: 0.005
     property real cfg_GradientLossStrengthB: 1.5
+    property real cfg_GlyphLuminanceBonusB: 0.12
     property real cfg_StructureDitherB: 0.06
     property bool cfg_InvertInkB: false
     property var activeSettings: ({})
@@ -123,6 +125,7 @@ Item {
             SlideInterval: root["cfg_SlideInterval" + suffix],
             Dither: root["cfg_Dither" + suffix],
             GradientLossStrength: root["cfg_GradientLossStrength" + suffix],
+            GlyphLuminanceBonus: root["cfg_GlyphLuminanceBonus" + suffix],
             StructureDither: root["cfg_StructureDither" + suffix],
             InvertInk: root["cfg_InvertInk" + suffix]
         }
@@ -142,7 +145,7 @@ Item {
         const names = ["FontFamily", "TransitionFrames", "TransitionDuration", "TransitionPace",
             "TransitionField", "TransitionSpread", "BackgroundMode", "BackgroundColor", "RenderStyle",
             "AsciiChars", "Detail", "Grayscale", "SlideInterval", "Dither",
-            "GradientLossStrength", "StructureDither", "InvertInk"]
+            "GradientLossStrength", "GlyphLuminanceBonus", "StructureDither", "InvertInk"]
         for (const name of names)
             root["cfg_" + name + "B"] = root["cfg_" + name]
         cfg_ProfileSettingsInitialized = true
@@ -338,6 +341,7 @@ Item {
             transition_field: root.activeSettings.TransitionField,
             transition_spread: root.activeSettings.TransitionSpread,
             dither: root.activeSettings.Dither,
+            glyph_luminance_bonus: root.activeSettings.RenderStyle === "headroom" ? root.activeSettings.GlyphLuminanceBonus : 0,
             gradient_loss_strength: root.activeSettings.RenderStyle === "headroom" ? root.activeSettings.GradientLossStrength : 0,
             structure_dither: root.activeSettings.StructureDither,
             style: root.activeSettings.RenderStyle,
@@ -1122,6 +1126,25 @@ Item {
                 Controls.Label {
                     Layout.preferredWidth: Kirigami.Units.gridUnit * 10
                     text: gradientLossSlider.value.toFixed(1)
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Glyph Luminosity Bonus:"
+                visible: root.activeSettings.RenderStyle === "headroom"
+
+                Controls.Slider {
+                    id: glyphLuminanceBonusSlider
+                    Layout.fillWidth: true
+                    from: 0
+                    to: 0.12
+                    stepSize: 0.0025
+                    value: root.activeSettings.GlyphLuminanceBonus
+                    onMoved: root.setProfileSetting("GlyphLuminanceBonus", value)
+                }
+                Controls.Label {
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 10
+                    text: glyphLuminanceBonusSlider.value.toFixed(4)
                 }
             }
 
