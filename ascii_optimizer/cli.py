@@ -21,7 +21,7 @@ from .tone import display_tone, encode_headroom, encoded_background, invert_sour
 from .transition import FIELDS, PACES, ease, glyph_paths, local_progress, path_glyphs, phase_offsets, recolor
 
 
-DEFAULT_CHARS = " .´:rszunvcxLOGDQ0KNMW&@"
+DEFAULT_CHARS = " .´:rszunvcxLOGDQ0KNMW&@\\=^"
 
 
 def _size(value: str) -> tuple[int, int]:
@@ -78,16 +78,21 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                 detail_loss: str = "default",
                 objective_space: str = "oklab",
                 glyph_luminance_bonus: float = 0.0,
-                saturation_loss_strength: float | None = None) -> Grid:
+                saturation_loss_strength: float | None = None,
+                gradient_loss_strength: float | None = None) -> Grid:
     """Prepare a grid whose displayed pixels follow the chosen ink polarity."""
     if style not in ("headroom", "structure"):
         raise ValueError(f"Unknown render style: {style}")
     if objective_space not in ("linear_rgb", "oklab"):
         raise ValueError(f"Unknown objective space: {objective_space}")
+    if gradient_loss_strength is None:
+        gradient_loss_strength = 1.5 if style == "headroom" else 0.0
     if style == "structure" and glyph_luminance_bonus:
         raise ValueError("glyph_luminance_bonus is only available for the headroom objective")
     if style == "structure" and saturation_loss_strength:
         raise ValueError("saturation_loss_strength is only available for the headroom objective")
+    if style == "structure" and gradient_loss_strength:
+        raise ValueError("gradient_loss_strength is only available for the headroom objective")
     if style == "structure" and detail_loss != "default":
         raise ValueError("Feature/detail losses are not implemented for structure-first glyph selection")
     source_linear = srgb_to_linear(torch.from_numpy(target)).permute(2, 0, 1)
@@ -109,7 +114,10 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                      objective_space=objective_space,
                      glyph_luminance_bonus=glyph_luminance_bonus,
                      saturation_loss_strength=saturation_loss_strength,
-                     saturation_target_srgb=target)
+                     saturation_target_srgb=target,
+                     gradient_loss_strength=gradient_loss_strength,
+                     gradient_target_srgb=target,
+                     invert_ink=invert_ink)
 
     selection_target = invert_source(target) if invert_ink else target
     selection_background = solve_background if invert_ink else original_background
@@ -124,6 +132,9 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
 def build(args: argparse.Namespace) -> None:
     style = getattr(args, "style", "headroom")
     invert_ink = bool(getattr(args, "invert_ink", False))
+    gradient_loss_strength = getattr(args, "gradient_loss_strength", None)
+    if gradient_loss_strength is None:
+        gradient_loss_strength = 1.5 if style == "headroom" else 0.0
     structure_dither = float(getattr(args, "structure_dither", STRUCTURE_DITHER))
     transition_pace = getattr(args, "transition_pace", "ease-in-out")
     transition_field = getattr(args, "transition_field", "blue-noise")
@@ -157,6 +168,7 @@ def build(args: argparse.Namespace) -> None:
         "font": str(font), "font_hash": _file_hash(font),
         "size": list(args.size), "cell": list(cell), "chars": effective_chars,
         "style": style, "invert_ink": invert_ink, "structure_dither": structure_dither,
+        "gradient_loss_strength": float(gradient_loss_strength),
         "crop": args.crop, "grayscale": args.grayscale,
         "frames": args.frames, "steps": args.steps,
         "transition_steps": args.transition_steps,
@@ -211,6 +223,7 @@ def build(args: argparse.Namespace) -> None:
                      seed=args.seed + index, steps=args.steps,
                      candidates=args.candidates, dither=args.dither, structure_dither=structure_dither,
                      background=args.background, device=args.device,
+                     gradient_loss_strength=float(gradient_loss_strength),
                      on_progress=lambda fraction, stage, index=index: report(
                          fraction, f"Image {index + 1}/{len(images)}: {stage}"))
         stills.append(grid)
@@ -259,6 +272,7 @@ def build(args: argparse.Namespace) -> None:
                                  dither=args.dither, structure_dither=structure_dither,
                                  background=args.background, device=args.device, previous=previous,
                                  destination=stills[following], progress=float(local.mean()),
+                                 gradient_loss_strength=float(gradient_loss_strength),
                                  on_progress=lambda fraction, stage, index=index, frame=frame: report(
                                      fraction, f"Transition {index + 1}/{len(images)}, frame {frame + 1}/{args.frames}: {stage}"))
                     grid.glyph = path_glyphs(stills[index].glyph, stills[following].glyph, local, paths,
@@ -296,6 +310,8 @@ def main() -> None:
     parser.add_argument("--transition-steps", type=int, default=16)
     parser.add_argument("--candidates", type=int, default=6)
     parser.add_argument("--dither", type=float, default=0.005)
+    parser.add_argument("--gradient-loss-strength", type=float, default=None,
+                        help="Weight for displayed OKLab Sobel gradients (default: 1.5 for headroom)")
     parser.add_argument("--style", choices=("headroom", "structure"), default="headroom")
     parser.add_argument("--invert-ink", action="store_true", help="Dark ink on a light canvas")
     parser.add_argument("--structure-dither", type=float, default=STRUCTURE_DITHER,
@@ -314,6 +330,8 @@ def main() -> None:
         parser.error("dither must be 0..0.05 and structure-dither must be 0..0.12")
     if not 0 <= args.transition_spread <= 0.9:
         parser.error("transition-spread must be 0..0.9")
+    if args.gradient_loss_strength is not None and args.gradient_loss_strength < 0:
+        parser.error("gradient-loss-strength must be nonnegative")
     build(args)
 
 

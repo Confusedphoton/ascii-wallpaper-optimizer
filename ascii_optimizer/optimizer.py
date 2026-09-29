@@ -117,6 +117,39 @@ def _saturation_loss(rendered: torch.Tensor, target_lab: torch.Tensor,
     return chroma_loss + gamut_loss
 
 
+def _display_headroom_lab(linear_rgb: torch.Tensor, *, invert_ink: bool = False) -> torch.Tensor:
+    """Approximate the displayed OKLab image after the headroom tone curve."""
+    lab = _oklab(linear_rgb)
+    lightness = lab[:, :1]
+    displayed_lightness = lightness + 2.0 * lightness * (1 - lightness).square()
+    chroma_scale = displayed_lightness / lightness.clamp_min(1e-6)
+    if invert_ink:
+        displayed_lightness = 1 - displayed_lightness
+    displayed_lab = torch.cat((displayed_lightness, lab[:, 1:] * chroma_scale), dim=1)
+    displayed_rgb = _oklab_to_linear_rgb(displayed_lab).clamp(0, 1)
+    return _oklab(displayed_rgb)
+
+
+def _sobel_gradients(image_lab: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    horizontal = image_lab.new_tensor([
+        [-1, 0, 1], [-2, 0, 2], [-1, 0, 1],
+    ]).reshape(1, 1, 3, 3) / 8
+    vertical = horizontal.transpose(-1, -2)
+    horizontal = horizontal.expand(image_lab.shape[1], 1, 3, 3)
+    vertical = vertical.expand(image_lab.shape[1], 1, 3, 3)
+    padded = F.pad(image_lab, (1, 1, 1, 1), mode="replicate")
+    gx = F.conv2d(padded, horizontal, groups=image_lab.shape[1])
+    gy = F.conv2d(padded, vertical, groups=image_lab.shape[1])
+    return gx, gy
+
+
+def _gradient_loss(rendered_lab: torch.Tensor, target_lab: torch.Tensor) -> torch.Tensor:
+    """Match oriented Sobel edges in displayed OKLab, including chroma edges."""
+    rendered_x, rendered_y = _sobel_gradients(rendered_lab)
+    target_x, target_y = _sobel_gradients(target_lab)
+    return ((rendered_x - target_x).square() + (rendered_y - target_y).square()).sum(1).mean()
+
+
 def _chroma(image: torch.Tensor) -> torch.Tensor:
     luma = (image * image.new_tensor([0.2126, 0.7152, 0.0722])[None, :, None, None]).sum(1, keepdim=True)
     return image - luma
@@ -135,7 +168,10 @@ def _loss(rendered: torch.Tensor, target: torch.Tensor, *,
           detail_loss: str = "default", local_weight: torch.Tensor | None = None,
           cell: tuple[int, int] | None = None,
           target_lab: torch.Tensor | None = None,
-          objective_space: str = "linear_rgb") -> torch.Tensor:
+          objective_space: str = "linear_rgb",
+          gradient_target_lab: torch.Tensor | None = None,
+          gradient_loss_strength: float = 0.0,
+          invert_ink: bool = False) -> torch.Tensor:
     if objective_space == "oklab":
         if target_lab is None:
             target_lab = _oklab(target)
@@ -176,6 +212,11 @@ def _loss(rendered: torch.Tensor, target: torch.Tensor, *,
         rows, cols = chroma_error.shape[0] // height, chroma_error.shape[1] // width
         patches = chroma_error.reshape(rows, height, cols, width).permute(0, 2, 1, 3).reshape(-1, height * width)
         loss = loss + 0.75 * patches.topk(max(1, height * width // 10), dim=1).values.mean()
+    if gradient_loss_strength:
+        if gradient_target_lab is None:
+            gradient_target_lab = _oklab(target)
+        displayed_lab = _display_headroom_lab(rendered, invert_ink=invert_ink)
+        loss = loss + gradient_loss_strength * _gradient_loss(displayed_lab, gradient_target_lab)
     return loss
 
 
@@ -265,7 +306,10 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
           objective_space: str = "oklab",
           glyph_luminance_bonus: float = 0.0,
           saturation_loss_strength: float | None = None,
-          saturation_target_srgb: np.ndarray | None = None) -> Grid:
+          saturation_target_srgb: np.ndarray | None = None,
+          gradient_loss_strength: float = 1.5,
+          gradient_target_srgb: np.ndarray | None = None,
+          invert_ink: bool = False) -> Grid:
     """Optimize one complete grid; temporal frames also depend on their neighbors.
 
     A nonzero lightness bonus defaults to a competing saturation loss. Pass an
@@ -283,6 +327,8 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         saturation_loss_strength = 20.0 if glyph_luminance_bonus > 0 else 0.0
     if saturation_loss_strength < 0:
         raise ValueError("saturation_loss_strength must be nonnegative")
+    if gradient_loss_strength < 0:
+        raise ValueError("gradient_loss_strength must be nonnegative")
     cell_height, cell_width = masks_np.shape[1:]
     original_height, original_width = image_srgb.shape[:2]
     rows = (original_height + cell_height - 1) // cell_height
@@ -295,6 +341,13 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
     saturation_target_lab = None
     saturation_target_cells = None
     saturation_chroma_scale = None
+    gradient_target_lab = None
+    if gradient_loss_strength:
+        source = image_srgb if gradient_target_srgb is None else gradient_target_srgb
+        display_target = torch.as_tensor(source, dtype=torch.float32, device=device).permute(2, 0, 1)
+        display_target = srgb_to_linear(F.pad(
+            display_target.unsqueeze(0), (0, pad_width, 0, pad_height), mode="replicate").squeeze(0))
+        gradient_target_lab = _oklab(display_target.unsqueeze(0)).detach()
     if saturation_loss_strength:
         source = image_srgb if saturation_target_srgb is None else saturation_target_srgb
         display_target = torch.as_tensor(source, dtype=torch.float32, device=device).permute(2, 0, 1)
@@ -412,7 +465,10 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
     def frame_loss(rendered: torch.Tensor) -> torch.Tensor:
         loss = _loss(rendered, target, detail_loss=detail_loss, local_weight=local_weight,
                      cell=(cell_height, cell_width), target_lab=target_lab,
-                     objective_space=objective_space)
+                     objective_space=objective_space,
+                     gradient_target_lab=gradient_target_lab,
+                     gradient_loss_strength=gradient_loss_strength,
+                     invert_ink=invert_ink)
         if saturation_loss_strength:
             loss = loss + saturation_loss_strength * _saturation_loss(
                 rendered, saturation_target_lab, saturation_chroma_scale).mean()

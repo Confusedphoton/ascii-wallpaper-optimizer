@@ -12,7 +12,7 @@ from .optimizer import Grid
 from .tone import gamut_map, rgb_to_oklab
 
 
-STRUCTURE_CHARS = " .´:-_/|+rszunvcxLOGDQ0KNMW&@[]{}"
+STRUCTURE_CHARS = " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&@[]{}"
 STRUCTURE_DITHER = 0.06
 
 
