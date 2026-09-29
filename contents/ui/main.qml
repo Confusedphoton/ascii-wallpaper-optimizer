@@ -4,9 +4,9 @@
  */
 
 import QtQuick
+import "RenderSettings.js" as RenderSettings
 import QtQuick.Controls as Controls
 import org.kde.plasma.plasmoid
-import org.kde.plasma.wallpapers.image
 
 WallpaperItem {
     id: root
@@ -63,77 +63,32 @@ WallpaperItem {
             renderDirectory: b && !useBSettings ? "" : (setting("RenderDirectory") || "")
         }
     }
-    property int renderRevision: 0
-    property int transitionRevision: 0
-
-    property int currentIdx: 0
-    property int nextIdx: 0
+    property var overrideRequest: null
 
     RenderClient {
         id: renderer
-        requestSettings: ({
-            images: root.mode === "Slideshow" ? Array.from(root.configImages)
-                : Array.from(root.configImages).slice(0, 1),
-            font: root.activeSettings.fontFamily,
-            chars: root.activeSettings.characters,
-            detail: root.activeSettings.detail,
-            grayscale: root.activeSettings.grayscale,
-            frames: root.activeSettings.transitionFrames,
-            transition_pace: root.activeSettings.transitionPace,
-            transition_field: root.activeSettings.transitionField,
-            transition_spread: root.activeSettings.transitionSpread,
-            dither: root.activeSettings.dither,
-            glyph_luminance_bonus: root.activeSettings.renderStyle === "headroom" ? root.activeSettings.glyphLuminanceBonus : 0,
-            gradient_loss_strength: root.activeSettings.renderStyle === "headroom" ? root.activeSettings.gradientLossStrength : 0,
-            structure_dither: root.activeSettings.structureDither,
-            style: root.activeSettings.renderStyle,
-            invert_ink: root.activeSettings.invertInk,
-            background: root.activeSettings.backgroundMode === 1 ? root.activeSettings.backgroundColor : "auto"
-        })
+        requestSettings: RenderSettings.request(
+            root.mode === "Slideshow" ? Array.from(root.configImages) : Array.from(root.configImages).slice(0, 1), root.activeSettings)
         cachedDirectory: root.activeSettings.renderDirectory
-        onRenderStateChanged: {
-            if (renderState === "ready") {
-                root.transitionRevision++
-                if (currentRequestForced) root.renderRevision++
-            }
+        playbackSettings: ({mode: root.mode, slideInterval: root.activeSettings.slideInterval,
+            transitionDuration: root.activeSettings.transitionDuration})
+        onAssetsReady: {
+            const name = root.activeProfile === "B" ? "RenderDirectoryB" : "RenderDirectory"
+            if (wallpaper.configuration[name] !== displayDirectory)
+                wallpaper.configuration[name] = displayDirectory
         }
     }
 
-    Timer {
-        id: intervalTimer
-
-        running: root.mode === "Slideshow" && root.configImages.length > 1
-            && root.currentIdx === root.nextIdx && shaderContainer.ready
-        interval: root.activeSettings.slideInterval * 1000
-        repeat: true
-
-        onTriggered: {
-            root.nextIdx = (root.currentIdx + 1) % root.configImages.length;
-            crossfadeAnimation.start();
-        }
+    SlideshowPlayer {
+        id: slideshow
+        ready: shaderContainer.ready
+        loading: shaderContainer.loading
+        enabled: renderer.displayPlaybackSettings.mode === "Slideshow"
+        imageCount: renderer.displayImageCount
+        generation: renderer.displayGeneration
+        slideInterval: (renderer.displayPlaybackSettings.slideInterval || 10) * 1000
+        transitionDuration: renderer.displayPlaybackSettings.transitionDuration || 1500
     }
-
-    NumberAnimation {
-        id: crossfadeAnimation
-
-        property: "transitionProgress"
-        target: shaderContainer
-
-        from: 0.0
-        to: 1.0
-
-        duration: root.activeSettings.transitionDuration
-        easing.type: Easing.Linear
-
-        onFinished: {
-            root.currentIdx = root.nextIdx;
-            shaderContainer.transitionProgress = 0.0;
-        }
-    }
-
-    onConfigImagesChanged: resetSlideshow()
-    onModeChanged: resetSlideshow()
-    onActiveProfileChanged: resetSlideshow()
 
     Timer {
         interval: 2000
@@ -145,26 +100,34 @@ WallpaperItem {
         }
     }
 
+    Timer {
+        id: overrideTimeout
+        interval: 5000
+        onTriggered: {
+            const previous = root.overrideRequest
+            root.overrideRequest = null
+            if (previous) previous.abort()
+        }
+    }
+
     function fetchOverride() {
+        if (overrideRequest) return
         const xhr = new XMLHttpRequest()
+        overrideRequest = xhr
         xhr.open("GET", "http://127.0.0.1:48741/v1/override", true)
         xhr.onreadystatechange = function() {
-            if (xhr.readyState === XMLHttpRequest.DONE && xhr.status === 200) {
+            if (xhr.readyState !== XMLHttpRequest.DONE || root.overrideRequest !== xhr) return
+            root.overrideRequest = null
+            overrideTimeout.stop()
+            if (xhr.status === 200) {
                 try {
                     const value = JSON.parse(xhr.responseText).profile
                     if (["auto", "A", "B"].includes(value)) root.overrideProfile = value
                 } catch (failure) { /* keep the last known override */ }
             }
         }
+        overrideTimeout.restart()
         xhr.send()
-    }
-
-    function resetSlideshow() {
-        crossfadeAnimation.stop();
-        shaderContainer.transitionProgress = 0.0;
-        
-        root.currentIdx = 0;
-        root.nextIdx = 0;
     }
 
     AsciiShader {
@@ -172,12 +135,13 @@ WallpaperItem {
         anchors.fill: parent
         
         renderDirectory: renderer.displayDirectory
-        currentIndex: root.currentIdx
-        nextIndex: root.nextIdx
-        transitionFrames: root.activeSettings.transitionFrames
-        detail: root.activeSettings.detail
-        revision: root.renderRevision
-        transitionRevision: root.transitionRevision
+        generation: renderer.displayGeneration
+        manifest: renderer.displayManifest
+        imageCount: renderer.displayImageCount
+        currentIndex: slideshow.currentIndex
+        nextIndex: slideshow.nextIndex
+        transitionProgress: slideshow.transitionProgress
+        transitionFrames: renderer.displayFrameCount
     }
 
     Rectangle {
@@ -212,6 +176,12 @@ WallpaperItem {
                 indeterminate: renderer.renderState === "connecting" || (renderer.renderState === "running" && renderer.progress === 0)
             }
         }
+    }
+
+    Component.onDestruction: {
+        const previous = overrideRequest
+        overrideRequest = null
+        if (previous) previous.abort()
     }
 
     Component.onCompleted: {

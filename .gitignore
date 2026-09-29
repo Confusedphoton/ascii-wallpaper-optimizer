@@ -7,3 +7,4 @@ __pycache__/
 rendered/
 screenshots/test_image.png
 dist/
+contents/ui/shaders/*.qsb

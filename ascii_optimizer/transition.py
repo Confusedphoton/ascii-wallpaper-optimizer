@@ -57,9 +57,17 @@ def phase_offsets(shape: tuple[int, int], field: str, seed: int,
         gy[1:] = lightness[1:] - lightness[:-1]
         gx[:, 1:] = lightness[:, 1:] - lightness[:, :-1]
         salience = np.sqrt(gx * gx + gy * gy)
-        sy = np.minimum((y * source.shape[0]).astype(int), source.shape[0] - 1)
-        sx = np.minimum((x * source.shape[1]).astype(int), source.shape[1] - 1)
-        sampled = salience[sy, sx]
+        # Pool the complete area of each cell. Sampling its center misses thin
+        # edges between centers, making those images transition like flat ones.
+        y_edges = np.linspace(0, source.shape[0], rows + 1).astype(int)
+        x_edges = np.linspace(0, source.shape[1], cols + 1).astype(int)
+        integral = np.pad(salience.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+        top, bottom = y_edges[:-1, None], y_edges[1:, None]
+        left, right = x_edges[None, :-1], x_edges[None, 1:]
+        area = (bottom - top) * (right - left)
+        sampled = ((integral[bottom, right] - integral[top, right]
+                    - integral[bottom, left] + integral[top, left])
+                   / np.maximum(area, 1))
         scale = np.quantile(sampled, 0.95)
         base = 1 - np.clip(sampled / max(scale, 1e-8), 0, 1)
     return np.clip(0.82 * base + 0.18 * noise, 0, 1).astype(np.float32)
@@ -144,8 +152,6 @@ def recolor(target: np.ndarray, masks: np.ndarray, glyphs: np.ndarray,
     numerator = (ink * (cells - (1 - ink) * under)).sum((2, 3))
     denominator = (ink * ink).sum((2, 3))
     colors = numerator / np.maximum(denominator, 1e-8)
-    # Match the optimizer's bounded OKLab parameter range without converting
-    # the fit back through RGB.
-    colors[..., 0] = np.clip(colors[..., 0], 0, 1)
-    colors[..., 1:] = np.clip(colors[..., 1:], -0.4, 0.4)
-    return colors.astype(np.float32)
+    from .tone import quantize_playback_lab
+
+    return quantize_playback_lab(colors)

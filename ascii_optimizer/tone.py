@@ -67,6 +67,20 @@ def oklab_to_srgb(lab: np.ndarray) -> np.ndarray:
     return linear_to_srgb(torch.from_numpy(gamut_map(np.asarray(lab, dtype=np.float32)))).numpy()
 
 
+def playback_rgb8(lab: np.ndarray) -> np.ndarray:
+    """Encode precisely the RGB bytes stored in a playback color texture."""
+    return np.rint(oklab_to_srgb(lab) * 255).astype(np.uint8)
+
+
+def quantize_playback_lab(lab: np.ndarray) -> np.ndarray:
+    """Project colors onto the RGB8 palette that the playback shader decodes.
+
+    Use this at solver boundaries so previews, cached grids, and live playback
+    all compose the same foreground and background colors.
+    """
+    return srgb_to_oklab(playback_rgb8(lab).astype(np.float32) / 255)
+
+
 def headroom_curve(lightness: np.ndarray, gain: float = HEADROOM_GAIN) -> np.ndarray:
     return lightness + gain * lightness * (1 - lightness) ** 2
 
@@ -121,6 +135,8 @@ def display_tone(linear_rgb: np.ndarray, *, invert_ink: bool = False) -> np.ndar
     return gamut_map(display_tone_lab(rgb_to_oklab(linear_rgb), invert_ink=invert_ink))
 
 
-def encoded_background(background_lab: np.ndarray) -> np.ndarray:
+def encoded_background(background_lab: np.ndarray, *, invert_ink: bool = False) -> np.ndarray:
     """Encode an OKLab background for the headroom display curve."""
-    return encode_headroom_lab(np.asarray(background_lab, dtype=np.float32).reshape(1, 1, 3))[0, 0]
+    return quantize_playback_lab(encode_headroom_lab(
+        np.asarray(background_lab, dtype=np.float32).reshape(1, 1, 3),
+        invert_ink=invert_ink))[0, 0]

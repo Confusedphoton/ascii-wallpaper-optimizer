@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import re
 from typing import Callable
 
@@ -11,7 +12,8 @@ import torch
 import torch.nn.functional as F
 
 from .assets import blue_noise
-from .tone import srgb_to_oklab
+from .settings import finite_float
+from .tone import quantize_playback_lab, srgb_to_oklab
 
 
 @dataclass
@@ -58,20 +60,99 @@ def _ink_lightness(color: torch.Tensor) -> torch.Tensor:
     return color[..., 0]
 
 
-def _project_oklab_colors(color: torch.Tensor) -> torch.Tensor:
-    """Keep optimizer parameters in a conservative, bounded OKLab range."""
-    return torch.cat((color[..., :1].clamp(0, 1), color[..., 1:].clamp(-0.4, 0.4)), dim=-1)
+@lru_cache(maxsize=16)
+def _color_matrices(device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, ...]:
+    return tuple(torch.tensor(matrix, device=device, dtype=dtype).T for matrix in (
+        ((1.0, 0.3963377774, 0.2158037573),
+         (1.0, -0.1055613458, -0.0638541728),
+         (1.0, -0.0894841775, -1.2914855480)),
+        ((4.0767416621, -3.3077115913, 0.2309699292),
+         (-1.2684380046, 2.6097574011, -0.3413193965),
+         (-0.0041960863, -0.7034186147, 1.7076147010)),
+        ((0.4122214708, 0.5363325363, 0.0514459929),
+         (0.2119034982, 0.6806995451, 0.1073969566),
+         (0.0883024619, 0.2817188376, 0.6299787005)),
+        ((0.2104542553, 0.7936177850, -0.0040720468),
+         (1.9779984951, -2.4285922050, 0.4505937099),
+         (0.0259040371, 0.7827717662, -0.8086757660)),
+    ))
+
+
+def _oklab_to_rgb(color: torch.Tensor) -> torch.Tensor:
+    lab_lms, lms_rgb, _, _ = _color_matrices(color.device, color.dtype)
+    return (color @ lab_lms).pow(3) @ lms_rgb
+
+
+def _rgb_to_oklab(color: torch.Tensor) -> torch.Tensor:
+    _, _, rgb_lms, lms_lab = _color_matrices(color.device, color.dtype)
+    return (color @ rgb_lms).clamp_min(0).pow(1 / 3) @ lms_lab
+
+
+def _gamut_projection(color: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Match the shader's twelve-step, lightness-preserving gamut mapping."""
+    lab = color.clone()
+    lab[..., 0].clamp_(0, 1)
+    rgb = _oklab_to_rgb(lab)
+    bad = ((rgb < -1e-5) | (rgb > 1 + 1e-5)).any(-1)
+    if bool(bad.any()):
+        trial = lab[bad].clone()
+        chroma = trial[..., 1:].clone()
+        low = torch.zeros_like(trial[..., 0])
+        high = torch.ones_like(low)
+        for _ in range(12):
+            mid = (low + high) * 0.5
+            trial[..., 1:] = chroma * mid[..., None]
+            candidate = _oklab_to_rgb(trial)
+            valid = ((candidate >= -1e-5) & (candidate <= 1 + 1e-5)).all(-1)
+            low = torch.where(valid, mid, low)
+            high = torch.where(valid, high, mid)
+        trial[..., 1:] = chroma * low[..., None]
+        lab[bad] = trial
+        rgb[bad] = _oklab_to_rgb(trial)
+    return lab, rgb
+
+
+def _project_oklab_colors(color: torch.Tensor, *, quantize: bool = True) -> torch.Tensor:
+    """Compose using RGB8 ink while retaining a useful straight-through gradient.
+
+    Parameters stay continuous between updates. Quantization is applied to the
+    rendered colors, matching the files and shader without zeroing gradients at
+    every RGB byte boundary.
+    """
+    with torch.no_grad():
+        projected, rgb = _gamut_projection(color.detach())
+        if quantize:
+            rgb = rgb.clamp(0, 1)
+            srgb = torch.where(rgb <= 0.0031308, rgb * 12.92,
+                               1.055 * rgb.pow(1 / 2.4) - 0.055)
+            srgb = (srgb * 255).round() / 255
+            rgb = torch.where(srgb <= 0.04045, srgb / 12.92,
+                              ((srgb + 0.055) / 1.055).pow(2.4))
+            projected = _rgb_to_oklab(rgb)
+        else:
+            # Most displayed pixels are already in gamut. Their OKLab values
+            # need no RGB roundtrip; only the shader's tiny boundary clamps do.
+            clipped = ((rgb < 0) | (rgb > 1)).any(-1)
+            if bool(clipped.any()):
+                projected[clipped] = _rgb_to_oklab(rgb[clipped].clamp(0, 1))
+    return color + (projected - color).detach()
 
 
 def _saturation_loss(rendered: torch.Tensor, target_lab: torch.Tensor,
-                    chroma_scale: torch.Tensor | None = None) -> torch.Tensor:
+                    chroma_scale: torch.Tensor | None = None, *,
+                    invert_ink: bool = False, displayed_lab: torch.Tensor | None = None,
+                    source_chroma: torch.Tensor | None = None,
+                    source_weight: torch.Tensor | None = None) -> torch.Tensor:
     """Penalize loss of source chroma after the OKLab display tone transform."""
-    displayed_lab = _display_headroom_lab(rendered)
-    source_chroma = (target_lab[:, 1:].square().sum(1, keepdim=True) + 1e-8).sqrt()
+    if displayed_lab is None:
+        displayed_lab = _display_headroom_lab(rendered, invert_ink=invert_ink)
+    if source_chroma is None:
+        source_chroma = (target_lab[:, 1:].square().sum(1, keepdim=True) + 1e-8).sqrt()
     output_chroma = (displayed_lab[:, 1:].square().sum(1, keepdim=True) + 1e-8).sqrt()
     scale = (torch.quantile(source_chroma.detach().flatten(), 0.95).clamp_min(0.02)
              if chroma_scale is None else chroma_scale)
-    weight = 1 + 4 * (source_chroma / scale).clamp(max=1).square()
+    weight = (1 + 4 * (source_chroma / scale).clamp(max=1).square()
+              if source_weight is None else source_weight)
     chroma_deficit = torch.relu(source_chroma - output_chroma)
     return (weight * chroma_deficit.square()).mean((1, 2, 3))
 
@@ -84,7 +165,10 @@ def _display_headroom_lab(lab: torch.Tensor, *, invert_ink: bool = False) -> tor
     if invert_ink:
         displayed_lightness = 1 - displayed_lightness
     displayed_lab = torch.cat((displayed_lightness, lab[:, 1:] * chroma_scale), dim=1)
-    return displayed_lab
+    # Playback gamut-maps the displayed result after composing coverage. Match
+    # those visible colors, retaining the tone transform's analytical gradient.
+    return _project_oklab_colors(displayed_lab.permute(0, 2, 3, 1),
+                                 quantize=False).permute(0, 3, 1, 2)
 
 
 def _sobel_gradients(image_lab: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -100,10 +184,12 @@ def _sobel_gradients(image_lab: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
     return gx, gy
 
 
-def _gradient_loss(rendered_lab: torch.Tensor, target_lab: torch.Tensor) -> torch.Tensor:
+def _gradient_loss(rendered_lab: torch.Tensor, target_lab: torch.Tensor,
+                   target_gradients: tuple[torch.Tensor, torch.Tensor] | None = None) -> torch.Tensor:
     """Match oriented Sobel edges in displayed OKLab, including chroma edges."""
     rendered_x, rendered_y = _sobel_gradients(rendered_lab)
-    target_x, target_y = _sobel_gradients(target_lab)
+    target_x, target_y = (_sobel_gradients(target_lab) if target_gradients is None
+                          else target_gradients)
     return ((rendered_x - target_x).square() + (rendered_y - target_y).square()).sum(1).mean()
 
 
@@ -147,9 +233,11 @@ def _loss(rendered: torch.Tensor, target: torch.Tensor, *,
           detail_loss: str = "default", local_weight: torch.Tensor | None = None,
           cell: tuple[int, int] | None = None,
           target_lab: torch.Tensor | None = None,
+          target_pyramid: tuple[tuple[int, float, torch.Tensor], ...] | None = None,
           gradient_target_lab: torch.Tensor | None = None,
+          gradient_target_gradients: tuple[torch.Tensor, torch.Tensor] | None = None,
           gradient_loss_strength: float = 0.0,
-          invert_ink: bool = False) -> torch.Tensor:
+          invert_ink: bool = False, displayed_lab: torch.Tensor | None = None) -> torch.Tensor:
     if target_lab is None:
         target_lab = target
     residual = rendered - target_lab
@@ -157,14 +245,18 @@ def _loss(rendered: torch.Tensor, target: torch.Tensor, *,
     # Pixel color, low-frequency color, and edge/structure differences.
     loss = ((local_weight * pixel_error).mean() if detail_loss == "local_color"
             else pixel_error.mean())
-    for factor, weight in ((2, 1.0), (4, 1.5), (8, 2.0)):
-        if min(rendered.shape[-2:]) >= factor:
-            pooled = F.avg_pool2d(residual, factor).square()
-            scale_error = pooled.sum(1, keepdim=True)
-            loss = loss + weight * scale_error.mean()
+    if target_pyramid is None:
+        target_pyramid = tuple((factor, weight, F.avg_pool2d(target_lab, factor))
+                               for factor, weight in ((2, 1.0), (4, 1.5), (8, 2.0))
+                               if min(rendered.shape[-2:]) >= factor)
+    for factor, weight, pooled_target in target_pyramid:
+        pooled = (F.avg_pool2d(rendered, factor) - pooled_target).square()
+        loss = loss + weight * pooled.sum(1, keepdim=True).mean()
     difference = residual[:, :1]
-    loss = loss + 0.35 * (difference[..., 1:] - difference[..., :-1]).square().mean()
-    loss = loss + 0.35 * (difference[..., 1:, :] - difference[..., :-1, :]).square().mean()
+    if difference.shape[-1] > 1:
+        loss = loss + 0.35 * (difference[..., 1:] - difference[..., :-1]).square().mean()
+    if difference.shape[-2] > 1:
+        loss = loss + 0.35 * (difference[..., 1:, :] - difference[..., :-1, :]).square().mean()
     if detail_loss == "chroma_contrast":
         chroma_difference = residual[:, 1:]
         local_mean = F.avg_pool2d(F.pad(chroma_difference, (4, 4, 4, 4), mode="replicate"), 9, stride=1)
@@ -181,9 +273,60 @@ def _loss(rendered: torch.Tensor, target: torch.Tensor, *,
     if gradient_loss_strength:
         if gradient_target_lab is None:
             gradient_target_lab = target_lab
-        displayed_lab = _display_headroom_lab(rendered, invert_ink=invert_ink)
-        loss = loss + gradient_loss_strength * _gradient_loss(displayed_lab, gradient_target_lab)
+        if displayed_lab is None:
+            displayed_lab = _display_headroom_lab(rendered, invert_ink=invert_ink)
+        loss = loss + gradient_loss_strength * _gradient_loss(
+            displayed_lab, gradient_target_lab, gradient_target_gradients)
     return loss
+
+
+@dataclass
+class _FrameObjective:
+    """Constant image-derived inputs shared by every optimization step."""
+    target: torch.Tensor
+    detail_loss: str
+    cell: tuple[int, int]
+    invert_ink: bool
+    gradient_strength: float
+    saturation_strength: float
+    gradient_target: torch.Tensor | None = None
+    saturation_target: torch.Tensor | None = None
+
+    def __post_init__(self) -> None:
+        self.local_weight = (_local_color_weight(self.target)
+                             if self.detail_loss in ("local_color", "chroma_contrast", "color_tail")
+                             else None)
+        self.target_pyramid = tuple(
+            (factor, weight, F.avg_pool2d(self.target, factor).detach())
+            for factor, weight in ((2, 1.0), (4, 1.5), (8, 2.0))
+            if min(self.target.shape[-2:]) >= factor)
+        self.gradient_target_gradients = (_sobel_gradients(self.gradient_target)
+                                          if self.gradient_strength else None)
+        self.saturation_scale = None
+        self.saturation_chroma = self.saturation_weight = None
+        if self.saturation_strength:
+            self.saturation_chroma = (self.saturation_target[:, 1:].square().sum(1, keepdim=True) + 1e-8).sqrt()
+            self.saturation_scale = torch.quantile(self.saturation_chroma.flatten(), 0.95).clamp_min(0.02)
+            self.saturation_weight = 1 + 4 * (
+                self.saturation_chroma / self.saturation_scale).clamp(max=1).square()
+
+    def __call__(self, rendered: torch.Tensor) -> torch.Tensor:
+        displayed = (_display_headroom_lab(rendered, invert_ink=self.invert_ink)
+                     if self.gradient_strength or self.saturation_strength else None)
+        loss = _loss(rendered, self.target, detail_loss=self.detail_loss,
+                     local_weight=self.local_weight, cell=self.cell,
+                     target_pyramid=self.target_pyramid,
+                     gradient_target_lab=self.gradient_target,
+                     gradient_target_gradients=self.gradient_target_gradients,
+                     gradient_loss_strength=self.gradient_strength,
+                     invert_ink=self.invert_ink, displayed_lab=displayed)
+        if self.saturation_strength:
+            loss = loss + self.saturation_strength * _saturation_loss(
+                rendered, self.saturation_target, self.saturation_scale,
+                invert_ink=self.invert_ink, displayed_lab=displayed,
+                source_chroma=self.saturation_chroma,
+                source_weight=self.saturation_weight).mean()
+        return loss
 
 
 def _candidate_fit(cells: torch.Tensor, masks: torch.Tensor, count: int,
@@ -191,6 +334,7 @@ def _candidate_fit(cells: torch.Tensor, masks: torch.Tensor, count: int,
                    pixel_weight: torch.Tensor | None = None,
                    glyph_luminance_bonus: float = 0.0,
                    gradient_target_cells: torch.Tensor | None = None,
+                   gradient_target_gradients: tuple[torch.Tensor, torch.Tensor] | None = None,
                    gradient_shortlist_strength: float = 0.0,
                    invert_ink: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
     mask_flat = masks.flatten(1)
@@ -199,7 +343,12 @@ def _candidate_fit(cells: torch.Tensor, masks: torch.Tensor, count: int,
     all_indices = []
     all_colors = []
     cell_height, cell_width = masks.shape[1:]
-    chunk_size = 128 if gradient_target_cells is not None and gradient_shortlist_strength else 2048
+    # Bound the pixel workload as well as the cell count: physical cells grow
+    # at high display resolutions, so 128 cells can otherwise allocate several
+    # hundred MB for each shortlist/Sobel/gamut intermediate.
+    cell_limit = 128 if gradient_target_cells is not None and gradient_shortlist_strength else 2048
+    chunk_size = max(1, min(cell_limit, 2_000_000 //
+                            (masks.shape[0] * cell_height * cell_width)))
     for start in range(0, cells.shape[0], chunk_size):
         cell = cells[start:start + chunk_size]
         underpaint = background_cells[start:start + len(cell)]
@@ -232,10 +381,14 @@ def _candidate_fit(cells: torch.Tensor, masks: torch.Tensor, count: int,
             ).permute(0, 3, 1, 2)
             candidate_display = _display_headroom_lab(candidate_lab, invert_ink=invert_ink)
             candidate_x, candidate_y = _sobel_gradients(candidate_display)
-            source_cell = gradient_target_cells[start:start + len(cell)].reshape(
-                len(cell), cell_height, cell_width, 3
-            ).permute(0, 3, 1, 2)
-            source_x, source_y = _sobel_gradients(source_cell)
+            if gradient_target_gradients is None:
+                source_cell = gradient_target_cells[start:start + len(cell)].reshape(
+                    len(cell), cell_height, cell_width, 3
+                ).permute(0, 3, 1, 2)
+                source_x, source_y = _sobel_gradients(source_cell)
+            else:
+                source_x, source_y = (component[start:start + len(cell)]
+                                      for component in gradient_target_gradients)
             candidate_count = masks.shape[0]
             source_x = source_x[:, None].expand(-1, candidate_count, -1, -1, -1).reshape_as(candidate_x)
             source_y = source_y[:, None].expand(-1, candidate_count, -1, -1, -1).reshape_as(candidate_y)
@@ -261,6 +414,127 @@ def render_grid(grid: Grid, masks: np.ndarray, device: str = "cpu") -> np.ndarra
                       if grid.background is not None else None)
         image = _render(bank[glyph], color, rows, cols, height, width, background)
     return image.squeeze(0).permute(1, 2, 0).cpu().numpy()
+
+
+def fit_fixed_glyphs(image_srgb: np.ndarray, masks_np: np.ndarray, glyphs: np.ndarray, *,
+                     background_oklab: np.ndarray, steps: int = 24, device: str = "cpu",
+                     previous: Grid | None = None, destination: Grid | None = None,
+                     progress: float | None = None,
+                     on_progress: Callable[[float, str], None] | None = None,
+                     detail_loss: str = "default", glyph_luminance_bonus: float = 0.0,
+                     saturation_loss_strength: float | None = None,
+                     saturation_target_srgb: np.ndarray | None = None,
+                     saturation_target_oklab: np.ndarray | None = None,
+                     gradient_loss_strength: float = 1.5,
+                     gradient_target_srgb: np.ndarray | None = None,
+                     gradient_target_oklab: np.ndarray | None = None,
+                     invert_ink: bool = False, input_oklab: bool = False) -> Grid:
+    """Fit playback ink colors for already selected glyphs without a glyph solve."""
+    if detail_loss not in DETAIL_LOSSES:
+        raise ValueError(f"Unknown detail loss: {detail_loss}")
+    if isinstance(steps, bool) or not isinstance(steps, (int, np.integer)) or steps < 0:
+        raise ValueError("steps must be a nonnegative integer")
+    glyph_luminance_bonus = finite_float(glyph_luminance_bonus, "glyph_luminance_bonus", minimum=0)
+    if saturation_loss_strength is None:
+        saturation_loss_strength = 20.0 if glyph_luminance_bonus > 0 else 0.0
+    saturation_loss_strength = finite_float(saturation_loss_strength, "saturation_loss_strength", minimum=0)
+    gradient_loss_strength = finite_float(gradient_loss_strength, "gradient_loss_strength", minimum=0)
+    if len(masks_np) > 256:
+        raise ValueError("The glyph map supports at most 256 characters")
+    height, width = masks_np.shape[1:]
+    rows, cols = glyphs.shape
+    if glyphs.size == 0 or glyphs.min() < 0 or glyphs.max() >= len(masks_np):
+        raise ValueError("Fixed glyphs must refer to the provided mask bank")
+    image_height, image_width = image_srgb.shape[:2]
+    if (rows, cols) != ((image_height + height - 1) // height,
+                       (image_width + width - 1) // width):
+        raise ValueError("Fixed glyphs must use the target image grid")
+    for endpoint in (previous, destination):
+        if endpoint is not None and endpoint.glyph.shape != glyphs.shape:
+            raise ValueError("Transition endpoints must use the same grid")
+    pad = (0, cols * width - image_width, 0, rows * height - image_height)
+    source_lab = (np.asarray(image_srgb, dtype=np.float32) if input_oklab
+                  else srgb_to_oklab(image_srgb))
+
+    def target_tensor(lab: np.ndarray) -> torch.Tensor:
+        if lab.shape != source_lab.shape:
+            raise ValueError("Color objective targets must match the source image shape")
+        tensor = torch.as_tensor(lab, dtype=torch.float32, device=device).permute(2, 0, 1)
+        return F.pad(tensor.unsqueeze(0), pad, mode="replicate").detach()
+
+    target = target_tensor(source_lab)
+    gradient_target = saturation_target = None
+    if gradient_loss_strength:
+        gradient_source = (gradient_target_oklab if gradient_target_oklab is not None
+                           else srgb_to_oklab(gradient_target_srgb)
+                           if gradient_target_srgb is not None else source_lab)
+        gradient_target = target_tensor(gradient_source)
+    if saturation_loss_strength:
+        saturation_source = (saturation_target_oklab if saturation_target_oklab is not None
+                             else srgb_to_oklab(saturation_target_srgb)
+                             if saturation_target_srgb is not None else source_lab)
+        saturation_target = target_tensor(saturation_source)
+    objective = _FrameObjective(target, detail_loss, (height, width), invert_ink,
+                                gradient_loss_strength, saturation_loss_strength,
+                                gradient_target, saturation_target)
+    background = _project_oklab_colors(torch.as_tensor(
+        background_oklab, dtype=torch.float32, device=device).reshape(3))
+    bank = torch.as_tensor(masks_np, dtype=torch.float32, device=device).flatten(1)
+    mask = bank[torch.as_tensor(glyphs.astype(np.int64), device=device).flatten()]
+    cells = _cells(target.squeeze(0), rows, cols, height, width)
+    weights = torch.ones_like(mask)
+    if detail_loss == "local_color":
+        weights = objective.local_weight.reshape(rows, height, cols, width).permute(
+            0, 2, 1, 3).reshape_as(mask)
+    numerator = (weights[..., None] * mask[..., None]
+                 * (cells - (1 - mask[..., None]) * background)).sum(1)
+    denominator = (weights * mask.square()).sum(1).clamp_min(1e-8)
+    color_parameter = torch.nn.Parameter(_project_oklab_colors(
+        numerator / denominator[..., None], quantize=False))
+    previous_colors = (torch.as_tensor(previous.color, dtype=torch.float32,
+                                      device=device).reshape(-1, 3)
+                       if previous is not None else None)
+    scheduled_colors = None
+    if previous is not None and destination is not None and progress is not None:
+        scheduled_colors = ((1 - float(progress)) * previous_colors
+                            + float(progress) * torch.as_tensor(destination.color,
+                                dtype=torch.float32, device=device).reshape(-1, 3))
+
+    def color_loss(color: torch.Tensor) -> torch.Tensor:
+        loss = objective(_render(mask, color, rows, cols, height, width, background))
+        if glyph_luminance_bonus:
+            loss = loss - glyph_luminance_bonus * _ink_lightness(color).mean()
+        if previous_colors is not None:
+            loss = loss + 0.010 * (color - previous_colors).square().mean()
+        if scheduled_colors is not None:
+            loss = loss + 0.004 * (color - scheduled_colors).square().mean()
+        return loss
+
+    # Preserve the best representable fit. Color objectives may disagree at a
+    # gamut boundary, and the final Adam step need not be the best one.
+    best_color = _project_oklab_colors(color_parameter.detach())
+    best_loss = color_loss(best_color).detach()
+    optimizer = torch.optim.Adam((color_parameter,), lr=0.04)
+    for step in range(steps):
+        optimizer.zero_grad(set_to_none=True)
+        color = _project_oklab_colors(color_parameter)
+        loss = color_loss(color)
+        best_color = torch.where(loss.detach() < best_loss, color.detach(), best_color)
+        best_loss = torch.minimum(loss.detach(), best_loss)
+        loss.backward()
+        optimizer.step()
+        with torch.no_grad():
+            color_parameter.copy_(_project_oklab_colors(color_parameter, quantize=False))
+        if on_progress is not None:
+            on_progress((step + 1) / max(steps, 1), "Fitting path glyph colors")
+    with torch.no_grad():
+        color = _project_oklab_colors(color_parameter)
+        best_color = torch.where(color_loss(color) < best_loss, color, best_color)
+    if on_progress is not None and steps == 0:
+        on_progress(1.0, "Fitting path glyph colors")
+    return Grid(glyphs.astype(np.uint8).copy(),
+                quantize_playback_lab(best_color.cpu().numpy().reshape(rows, cols, 3)),
+                quantize_playback_lab(background.cpu().numpy()))
 
 
 def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
@@ -289,20 +563,15 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         raise ValueError(f"Unknown detail loss: {detail_loss}")
     if objective_space != "oklab":
         raise ValueError("The optimizer operates only in OKLab.")
-    if glyph_luminance_bonus < 0:
-        raise ValueError("glyph_luminance_bonus must be nonnegative")
+    glyph_luminance_bonus = finite_float(glyph_luminance_bonus, "glyph_luminance_bonus", minimum=0)
     if saturation_loss_strength is None:
         saturation_loss_strength = 20.0 if glyph_luminance_bonus > 0 else 0.0
-    if saturation_loss_strength < 0:
-        raise ValueError("saturation_loss_strength must be nonnegative")
-    if gradient_loss_strength < 0:
-        raise ValueError("gradient_loss_strength must be nonnegative")
+    saturation_loss_strength = finite_float(saturation_loss_strength, "saturation_loss_strength", minimum=0)
+    gradient_loss_strength = finite_float(gradient_loss_strength, "gradient_loss_strength", minimum=0)
     if gradient_shortlist_strength is None:
         gradient_shortlist_strength = gradient_loss_strength
-    if gradient_shortlist_strength < 0:
-        raise ValueError("gradient_shortlist_strength must be nonnegative")
-    if not np.isfinite(dither) or dither < 0:
-        raise ValueError("dither must be finite and nonnegative")
+    gradient_shortlist_strength = finite_float(gradient_shortlist_strength, "gradient_shortlist_strength", minimum=0)
+    dither = finite_float(dither, "dither", minimum=0)
     if logit_noise_distribution not in ("uniform", "gumbel"):
         raise ValueError("logit_noise_distribution must be 'uniform' or 'gumbel'")
     # Preserve existing UI/CLI values while expressing perturbation in logit
@@ -352,14 +621,22 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         _cells(gradient_target_lab.squeeze(0), rows, cols, cell_height, cell_width)
         if gradient_target_lab is not None else None
     )
+    gradient_cell_gradients = (_sobel_gradients(gradient_target_cells.reshape(
+        rows * cols, cell_height, cell_width, 3).permute(0, 3, 1, 2))
+        if gradient_shortlist_strength and gradient_target_cells is not None else None)
     cells = _cells(image, rows, cols, cell_height, cell_width)
     background_color = (_choose_background(image, background) if background_oklab is None
                         else torch.as_tensor(background_oklab, dtype=torch.float32, device=device).reshape(3))
+    background_color = _project_oklab_colors(background_color)
     background_cells = background_color.reshape(1, 1, 3).expand(len(cells), cell_height * cell_width, 3)
     masks = torch.as_tensor(masks_np, dtype=torch.float32, device=device)
     bank = masks.flatten(1)
     noise = torch.as_tensor(blue_noise((rows, cols), seed).flatten(), device=device)
-    local_weight = _local_color_weight(target) if detail_loss in ("local_color", "chroma_contrast", "color_tail") else None
+    frame_objective = _FrameObjective(target.detach(), detail_loss,
+                                     (cell_height, cell_width), invert_ink,
+                                     gradient_loss_strength, saturation_loss_strength,
+                                     gradient_target_lab, saturation_target_lab)
+    local_weight = frame_objective.local_weight
     target_lab = target.detach()
     target_lab_cells = _cells(target_lab.squeeze(0), rows, cols, cell_height, cell_width)
     pixel_weight = None
@@ -372,12 +649,14 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
             cells, masks, regular_count, background_cells,
             glyph_luminance_bonus=glyph_luminance_bonus,
             gradient_target_cells=gradient_target_cells,
+            gradient_target_gradients=gradient_cell_gradients,
             gradient_shortlist_strength=gradient_shortlist_strength,
             invert_ink=invert_ink)
         weighted_indices, weighted_colors = _candidate_fit(
             cells, masks, weighted_count, background_cells, pixel_weight,
             glyph_luminance_bonus=glyph_luminance_bonus,
             gradient_target_cells=gradient_target_cells,
+            gradient_target_gradients=gradient_cell_gradients,
             gradient_shortlist_strength=gradient_shortlist_strength,
             invert_ink=invert_ink)
         indices = torch.cat((regular_indices, weighted_indices), dim=1)
@@ -387,6 +666,7 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
                                          background_cells,
                                          glyph_luminance_bonus=glyph_luminance_bonus,
                                          gradient_target_cells=gradient_target_cells,
+                                         gradient_target_gradients=gradient_cell_gradients,
                                          gradient_shortlist_strength=gradient_shortlist_strength,
                                          invert_ink=invert_ink)
 
@@ -430,7 +710,8 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
                              .reshape(-1, cell_height, cell_width, 3)
                              .permute(0, 3, 1, 2))
         saturation_errors = _saturation_loss(
-            candidate_images, candidate_targets, saturation_chroma_scale).reshape(batch, count)
+            candidate_images, candidate_targets, saturation_chroma_scale,
+            invert_ink=invert_ink).reshape(batch, count)
         initial_errors = initial_errors + saturation_loss_strength * saturation_errors
     if previous is not None and destination is not None:
         chosen = torch.where(noise < float(progress),
@@ -454,22 +735,14 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
     polish_steps = max(4, steps // 4)
     total_work = steps + 4 + polish_steps
     def frame_loss(rendered: torch.Tensor) -> torch.Tensor:
-        loss = _loss(rendered, target, detail_loss=detail_loss, local_weight=local_weight,
-                     cell=(cell_height, cell_width), target_lab=target_lab,
-                     gradient_target_lab=gradient_target_lab,
-                     gradient_loss_strength=gradient_loss_strength,
-                     invert_ink=invert_ink)
-        if saturation_loss_strength:
-            loss = loss + saturation_loss_strength * _saturation_loss(
-                rendered, saturation_target_lab, saturation_chroma_scale).mean()
-        return loss
+        return frame_objective(rendered)
 
     for step in range(steps):
         optimizer.zero_grad(set_to_none=True)
         temperature = max(0.3, 1.0 - 0.7 * step / max(1, steps - 1))
         weights = torch.softmax(logits / temperature, dim=1)
         mask = (weights[..., None] * sample_masks).sum(1)
-        color = color_parameter
+        color = _project_oklab_colors(color_parameter)
         rendered = _render(mask, color, rows, cols, cell_height, cell_width, background_color)
         loss = frame_loss(rendered)
         if glyph_luminance_bonus:
@@ -482,7 +755,7 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         loss.backward()
         optimizer.step()
         with torch.no_grad():
-            color_parameter.copy_(_project_oklab_colors(color_parameter))
+            color_parameter.copy_(_project_oklab_colors(color_parameter, quantize=False))
         if on_progress is not None:
             on_progress((step + 1) / total_work, "Optimizing glyphs and colors")
 
@@ -497,7 +770,7 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         selected = selection_logits.argmax(1)
         glyph = indices.gather(1, selected[:, None]).squeeze(1)
         hard_masks = bank[glyph]
-        hard_color = color_parameter.detach()
+        hard_color = _project_oklab_colors(color_parameter.detach())
 
     def hard_score(chosen_masks: torch.Tensor, chosen_color: torch.Tensor) -> torch.Tensor:
         score = frame_loss(_render(chosen_masks, chosen_color, rows, cols, cell_height, cell_width, background_color))
@@ -551,7 +824,7 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
     color_optimizer = torch.optim.Adam((color_parameter,), lr=0.04)
     for polish_step in range(polish_steps):
         color_optimizer.zero_grad(set_to_none=True)
-        color = color_parameter
+        color = _project_oklab_colors(color_parameter)
         loss = frame_loss(_render(hard_masks, color, rows, cols, cell_height, cell_width, background_color))
         if glyph_luminance_bonus:
             loss = loss - glyph_luminance_bonus * _ink_lightness(color).mean()
@@ -560,10 +833,10 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         loss.backward()
         color_optimizer.step()
         with torch.no_grad():
-            color_parameter.copy_(_project_oklab_colors(color_parameter))
+            color_parameter.copy_(_project_oklab_colors(color_parameter, quantize=False))
         if on_progress is not None:
             on_progress((steps + 4 + polish_step + 1) / total_work, "Polishing colors")
 
     return Grid(glyph.detach().cpu().numpy().reshape(rows, cols).astype(np.uint8),
-                color_parameter.detach().cpu().numpy().reshape(rows, cols, 3),
-                background_color.detach().cpu().numpy())
+                quantize_playback_lab(color_parameter.detach().cpu().numpy().reshape(rows, cols, 3)),
+                quantize_playback_lab(background_color.detach().cpu().numpy()))

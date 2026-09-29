@@ -11,17 +11,16 @@ candidate, using the inverse CDF rather than a softmax helper. A Gumbel scale of
 from __future__ import annotations
 
 import html
-import json
 from pathlib import Path
 
 import numpy as np
-import torch
 from PIL import Image, ImageDraw, ImageFont
 
 from ascii_optimizer.assets import glyph_masks, load_target, resolve_font
-from ascii_optimizer.cli import DEFAULT_CHARS, solve_style
-from ascii_optimizer.optimizer import DITHER_TO_LOGIT_SCALE, _sobel_gradients, render_grid
-from ascii_optimizer.tone import display_tone_lab, oklab_to_srgb, srgb_to_oklab
+from ascii_optimizer.defaults import DEFAULT_CHARS
+from experiment_utils import (coverage_metrics, image_metrics, preview as _render,
+                              image as _image, reset_runs, source_size, solve_style, write_report, gradient_rmse as _gradient_rmse)
+from ascii_optimizer.optimizer import DITHER_TO_LOGIT_SCALE
 
 
 OUTPUT = Path("rendered/logit_noise")
@@ -41,39 +40,10 @@ PANEL_WIDTH = 480
 GUMBEL_STD = np.pi / np.sqrt(6)
 
 
-def _image(array: np.ndarray) -> Image.Image:
-    return Image.fromarray(np.rint(np.clip(array, 0, 1) * 255).astype(np.uint8), "RGB")
-
-
-def _render(grid, masks: np.ndarray, size: tuple[int, int]) -> np.ndarray:
-    lab = render_grid(grid, masks)[:size[1], :size[0]]
-    return oklab_to_srgb(display_tone_lab(lab))
-
-
-def _gradient_rmse(reference: np.ndarray, rendered: np.ndarray) -> float:
-    reference_lab = torch.from_numpy(srgb_to_oklab(reference)).permute(2, 0, 1).unsqueeze(0)
-    rendered_lab = torch.from_numpy(srgb_to_oklab(rendered)).permute(2, 0, 1).unsqueeze(0)
-    reference_x, reference_y = _sobel_gradients(reference_lab)
-    rendered_x, rendered_y = _sobel_gradients(rendered_lab)
-    error = ((rendered_x - reference_x).square() + (rendered_y - reference_y).square()).sum(1)
-    return float(error.mean().sqrt() * 100)
-
-
-def _metrics(reference: np.ndarray, rendered: np.ndarray, grid, baseline_grid,
-             masks: np.ndarray) -> dict[str, float]:
-    reference_lab = srgb_to_oklab(reference)
-    rendered_lab = srgb_to_oklab(rendered)
-    delta = reference_lab - rendered_lab
-    delta_e = np.sqrt(np.square(delta).sum(-1))
-    coverage = masks[grid.glyph].mean((1, 2))
-    return {
-        "mean_oklab_delta_e_x100": float(delta_e.mean() * 100),
-        "p90_oklab_delta_e_x100": float(np.quantile(delta_e, 0.9) * 100),
-        "oklab_gradient_rmse_x100": _gradient_rmse(reference, rendered),
-        "glyph_change_fraction_vs_no_noise": float(np.mean(grid.glyph != baseline_grid.glyph)),
-        "mean_glyph_coverage": float(coverage.mean()),
-        "dense_glyph_fraction": float(np.mean(coverage >= 0.3)),
-    }
+def _metrics(reference, rendered, grid, baseline_grid, masks):
+    return {**image_metrics(reference, rendered), **coverage_metrics(grid, masks),
+            "oklab_gradient_rmse_x100": _gradient_rmse(reference, rendered),
+            "glyph_change_fraction_vs_no_noise": float((grid.glyph != baseline_grid.glyph).mean())}
 
 
 def _fit_panel(image: Image.Image, width: int) -> Image.Image:
@@ -159,6 +129,7 @@ def _html_report(results: dict) -> str:
 
 
 def main() -> None:
+    reset_runs()
     OUTPUT.mkdir(parents=True, exist_ok=True)
     masks = glyph_masks(resolve_font("Monospace"), list(DEFAULT_CHARS), CELL)
     settings = {
@@ -204,8 +175,7 @@ def main() -> None:
     panel_titles["gumbel_max"] = f"Exact Gumbel-Max · scale 1 · SD {GUMBEL_STD:.3f}"
 
     for label, source_path in SOURCES:
-        with Image.open(source_path) as source_image:
-            size = (WIDTH, round(WIDTH * source_image.height / source_image.width))
+        size = source_size(source_path, WIDTH)
         reference = load_target(source_path, size, "fill", False)
         directory = OUTPUT / label
         directory.mkdir(parents=True, exist_ok=True)
@@ -234,6 +204,7 @@ def main() -> None:
                          else noise_scale * GUMBEL_STD)
             image_results["variants"][key] = {
                 "title": title,
+                "experiment": grid.experiment,
                 "distribution": distribution,
                 "dither_level": level,
                 "logit_multiplier": noise_scale,
@@ -250,7 +221,7 @@ def main() -> None:
         results["images"][label] = image_results
         print(f"{label}: wrote {directory}", flush=True)
 
-    (OUTPUT / "metrics.json").write_text(json.dumps(results, indent=2) + "\n")
+    write_report(OUTPUT / "metrics.json", results)
     (OUTPUT / "index.html").write_text(_html_report(results))
     print(f"Wrote {OUTPUT}", flush=True)
 

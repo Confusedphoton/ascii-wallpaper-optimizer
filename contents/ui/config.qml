@@ -3,8 +3,11 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+pragma ComponentBehavior: Bound
+
 import QtCore
 import QtQuick
+import "RenderSettings.js" as RenderSettings
 import QtQuick.Controls as Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
@@ -63,8 +66,6 @@ Item {
     property var foundMonoFonts: []
     property int fontScanIndex: 0
     property bool fontScanStarted: false
-    property int renderRevision: 0
-    property int transitionRevision: 0
     property bool controlsReady: false
 
     function colorHex(color) {
@@ -333,33 +334,14 @@ Item {
 
     RenderClient {
         id: renderer
-        requestSettings: ({
-            images: root.editMode === "Slideshow" ? Array.from(root.editImages) : Array.from(root.editImages).slice(0, 1),
-            font: root.activeSettings.FontFamily,
-            chars: Array.from(root.activeSettings.AsciiChars || []).join(""),
-            detail: root.activeSettings.Detail,
-            grayscale: root.activeSettings.Grayscale,
-            frames: root.activeSettings.TransitionFrames,
-            transition_pace: root.activeSettings.TransitionPace,
-            transition_field: root.activeSettings.TransitionField,
-            transition_spread: root.activeSettings.TransitionSpread,
-            dither: root.activeSettings.Dither,
-            glyph_luminance_bonus: root.activeSettings.RenderStyle === "headroom" ? root.activeSettings.GlyphLuminanceBonus : 0,
-            gradient_loss_strength: root.activeSettings.RenderStyle === "headroom" ? root.activeSettings.GradientLossStrength : 0,
-            structure_dither: root.activeSettings.StructureDither,
-            style: root.activeSettings.RenderStyle,
-            invert_ink: root.activeSettings.InvertInk,
-            background: root.activeSettings.BackgroundMode === 1 ? root.activeSettings.BackgroundColor : "auto"
-        })
+        requestSettings: RenderSettings.request(
+            root.editMode === "Slideshow" ? Array.from(root.editImages) : Array.from(root.editImages).slice(0, 1), root.activeSettings)
         cachedDirectory: root.activeSettings.RenderDirectory
-        onRenderStateChanged: {
-            if (renderState === "ready") {
-                root.transitionRevision++
-                if (currentRequestForced) root.renderRevision++
-                if (root.activeSettings.RenderDirectory !== directory) {
-                    root.setProfileSetting("RenderDirectory", directory)
-                }
-            }
+        playbackSettings: ({mode: root.editMode, slideInterval: root.activeSettings.SlideInterval,
+            transitionDuration: root.activeSettings.TransitionDuration})
+        onAssetsReady: {
+            if (root.activeSettings.RenderDirectory !== displayDirectory)
+                root.setProfileSetting("RenderDirectory", displayDirectory)
         }
     }
 
@@ -378,13 +360,13 @@ Item {
         onAccepted: {
             if (fileMode === FileDialog.OpenFiles) {
                 for (const file of selectedFiles) {
-                    const clean = cleanPath(file.toString());
+                    const clean = root.cleanPath(file.toString());
 
                     if (!clean) continue;
 
                     let exists = false;
                     for (let i = 0; i < imageList.count; ++i) {
-                        if (cleanPath(imageList.get(i).path) === clean) {
+                        if (root.cleanPath(imageList.get(i).path) === clean) {
                             exists = true;
                             break;
                         }
@@ -395,27 +377,27 @@ Item {
                     }
                 }
             } else {
-                if (_activePicker !== -1) {
-                    const clean = cleanPath(selectedFile.toString());
+                if (root._activePicker !== -1) {
+                    const clean = root.cleanPath(selectedFile.toString());
 
-                    if (_activePicker === 0 && imageList.count > 1) {
+                    if (root._activePicker === 0 && imageList.count > 1) {
                         imageList.remove(1, imageList.count - 1)
                     }
 
                     let duplicate = false
                     for (let i = 0; i < imageList.count; ++i) {
-                        if (i === _activePicker) continue
-                        if (cleanPath(imageList.get(i).path) === clean) {
+                        if (i === root._activePicker) continue
+                        if (root.cleanPath(imageList.get(i).path) === clean) {
                             duplicate = true; break
                         }
                     }
 
                     if (!duplicate) {
-                        imageList.setProperty(_activePicker, "path", clean)
+                        imageList.setProperty(root._activePicker, "path", clean)
                     }
                 }
 
-                _activePicker = -1
+                root._activePicker = -1
             }
 
             root.syncToConfig();
@@ -472,66 +454,19 @@ Item {
 
                 clip: true
 
-                property int currentIdx: 0
-                property int nextIdx: 0
-
                 function resetPreview() {
-                    previewTimer.stop();
-                    crossfadeAnimation.stop();
-                    previewShader.transitionProgress = 0.0;
-                    currentIdx = 0;
-                    nextIdx = 0;
-                    previewTimer.restart();
+                    previewPlayback.reset()
                 }
 
-                onCurrentIdxChanged: previewShader.transitionProgress = 0.0
-                Connections {
-                    target: root
-                    function onCfg_ModeChanged() { previewContainer.resetPreview() }
-                    function onCfg_ModeBChanged() { previewContainer.resetPreview() }
-                }
-
-                function getPreviewPath(index) {
-                    if (imageList.count === 0 || index < 0 || index >= imageList.count) {
-                        return "";
-                    }
-
-                    let path = imageList.get(index).path;
-                    return root.toFileUrl(path);
-                }
-
-                Timer {
-                    id: previewTimer
-                    
-                    interval: root.activeSettings.SlideInterval * 1000
-                    running: root.editMode === "Slideshow" && imageList.count > 1
-                        && previewContainer.currentIdx === previewContainer.nextIdx
-                    repeat: true
-
-                    onTriggered: {
-                        if (imageList.count > 1) {
-                            previewContainer.nextIdx = (previewContainer.currentIdx + 1) % imageList.count;
-                            crossfadeAnimation.restart();
-                        }
-                    }
-                }
-
-                NumberAnimation {
-                    id: crossfadeAnimation
-
-                    property: "transitionProgress"
-                    target: previewShader
-
-                    from: 0.0
-                    to: 1.0
-
-                    duration: root.activeSettings.TransitionDuration
-                    easing.type: Easing.Linear
-                    
-                    onFinished: {
-                        previewContainer.currentIdx = previewContainer.nextIdx;
-                        previewShader.transitionProgress = 0.0;
-                    }
+                SlideshowPlayer {
+                    id: previewPlayback
+                    ready: previewShader.ready
+                    loading: previewShader.loading
+                    enabled: renderer.displayPlaybackSettings.mode === "Slideshow"
+                    imageCount: renderer.displayImageCount
+                    generation: renderer.displayGeneration
+                    slideInterval: (renderer.displayPlaybackSettings.slideInterval || 10) * 1000
+                    transitionDuration: renderer.displayPlaybackSettings.transitionDuration || 1500
                 }
 
                 Item {
@@ -546,12 +481,13 @@ Item {
                         anchors.fill: parent
 
                         renderDirectory: renderer.displayDirectory
-                        currentIndex: previewContainer.currentIdx
-                        nextIndex: previewContainer.nextIdx
-                        transitionFrames: root.activeSettings.TransitionFrames
-                        detail: root.activeSettings.Detail
-                        revision: root.renderRevision
-                        transitionRevision: root.transitionRevision
+                        generation: renderer.displayGeneration
+                        manifest: renderer.displayManifest
+                        imageCount: renderer.displayImageCount
+                        currentIndex: previewPlayback.currentIndex
+                        nextIndex: previewPlayback.nextIndex
+                        transitionProgress: previewPlayback.transitionProgress
+                        transitionFrames: renderer.displayFrameCount
                     }
                 }
 
@@ -588,14 +524,14 @@ Item {
                     source: previewImage
                     maskEnabled: true
                     maskSource: maskRect
-                    visible: renderer.renderState === "ready" && previewShader.ready
+                    visible: previewShader.ready
                 }
 
                 Controls.Label {
                     anchors.centerIn: parent
                     text: "Select an image to render"
                     opacity: 0.5
-                    visible: previewContainer.getPreviewPath(previewContainer.currentIdx) === ""
+                    visible: !renderer.displayDirectory && !previewShader.ready
                 }
 
                 Rectangle {
@@ -710,8 +646,11 @@ Item {
                             model: imageList
 
                             delegate: RowLayout {
+                                id: imageRow
+                                required property int index
+                                required property string path
                                 Layout.fillWidth: true
-                                visible: root.editMode === "Slideshow" || index === 0
+                                visible: root.editMode === "Slideshow" || imageRow.index === 0
 
                                 ColumnLayout {
                                     spacing: -5
@@ -722,13 +661,13 @@ Item {
                                     Controls.ToolButton {
                                         icon.name: "arrow-up"
                                         visible: root.editMode === "Slideshow"
-                                        enabled: visible && index > 0
+                                        enabled: visible && imageRow.index > 0
 
                                         Layout.fillWidth: true
                                         Layout.fillHeight: true
 
                                         onClicked: {
-                                            imageList.move(index, index - 1, 1);
+                                            imageList.move(imageRow.index, imageRow.index - 1, 1);
 
                                             root.syncToConfig();
                                             previewContainer.resetPreview();
@@ -738,13 +677,13 @@ Item {
                                     Controls.ToolButton {
                                         icon.name: "arrow-down"
                                         visible: root.editMode === "Slideshow"
-                                        enabled: visible && index < imageList.count - 1
+                                        enabled: visible && imageRow.index < imageList.count - 1
 
                                         Layout.fillWidth: true
                                         Layout.fillHeight: true
 
                                         onClicked: {
-                                            imageList.move(index, index + 1, 1);
+                                            imageList.move(imageRow.index, imageRow.index + 1, 1);
 
                                             root.syncToConfig();
                                             previewContainer.resetPreview();
@@ -753,7 +692,7 @@ Item {
                                 }
 
                                 Controls.TextField {
-                                    text: cleanPath(model.path)
+                                    text: root.cleanPath(imageRow.path)
                                     placeholderText: "Select a file…"
                                     readOnly: true
                                     Layout.fillWidth: true
@@ -766,7 +705,7 @@ Item {
                                     enabled: root.editMode !== "Slideshow"
 
                                     onClicked: {
-                                        root._activePicker = index;
+                                        root._activePicker = imageRow.index;
 
                                         imagePicker.fileMode = FileDialog.OpenFile;
                                         imagePicker.open();
@@ -780,7 +719,7 @@ Item {
                                     visible: root.editMode === "Slideshow" ? true : false
 
                                     onClicked: {
-                                        root.removeImage(index)
+                                        root.removeImage(imageRow.index)
                                     }
                                 }
                             }
@@ -988,6 +927,9 @@ Item {
                         model: root.activeSettings.AsciiChars
 
                         delegate: Controls.TextField {
+                            id: glyphEditor
+                            required property int index
+                            required property string modelData
                             width: Kirigami.Units.gridUnit * 1.15
                             height: Kirigami.Units.gridUnit * 1.45
 
@@ -1002,11 +944,11 @@ Item {
                             color: activeFocus ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
                             background: Rectangle {
                                 radius: Kirigami.Units.smallSpacing
-                                color: activeFocus
+                                color: glyphEditor.activeFocus
                                     ? Kirigami.Theme.highlightColor
                                     : Kirigami.Theme.alternateBackgroundColor
                                 border.width: 1
-                                border.color: activeFocus
+                                border.color: glyphEditor.activeFocus
                                     ? Kirigami.Theme.highlightColor
                                     : Qt.alpha(Kirigami.Theme.textColor, 0.2)
                             }

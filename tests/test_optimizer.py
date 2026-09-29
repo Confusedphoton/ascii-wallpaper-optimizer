@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import argparse
 import json
-import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -12,17 +10,33 @@ import torch
 from PIL import Image
 
 from ascii_optimizer.assets import blue_noise, cell_for_display, glyph_masks, linear_to_srgb, resolve_font, srgb_to_linear
-from ascii_optimizer.cli import DEFAULT_CHARS, build, solve_style
+from ascii_optimizer.cli import DEFAULT_CHARS, build, make_parser, solve_style
 from ascii_optimizer.defaults import DEFAULT_GRADIENT_LOSS_STRENGTH
-from ascii_optimizer.optimizer import Grid, _loss, render_grid, solve
+from ascii_optimizer.optimizer import Grid, _local_color_weight, _loss, render_grid, solve
+from ascii_optimizer.settings import normalize_options
 from ascii_optimizer.service import _validated_request
 from ascii_optimizer.structure import STRUCTURE_CHARS
-from ascii_optimizer.tone import display_tone, encode_headroom
+from ascii_optimizer.tone import display_tone, encode_headroom, srgb_to_oklab
 from ascii_optimizer.transition import ease, glyph_paths, local_progress, path_glyphs, phase_offsets
 from ascii_optimizer import service
 
 
-def test_render_uses_mask_once_and_preserves_linear_color():
+@pytest.fixture(autouse=True)
+def use_requested_screen_size(monkeypatch):
+    monkeypatch.setattr(service, "_screen_size", lambda name, fallback: tuple(fallback))
+
+
+@pytest.fixture
+def batch_args():
+    def create(*, images, output, size, **options):
+        args = make_parser().parse_args([*map(str, images), "--output", str(output),
+                                         "--size", f"{size[0]}x{size[1]}"])
+        vars(args).update(options)
+        return args
+    return create
+
+
+def test_render_uses_mask_once_and_preserves_oklab_color():
     masks = np.array([[[0.0, 0.5], [1.0, 0.25]]], dtype=np.float32)
     grid = Grid(np.array([[0]], dtype=np.uint8),
                 np.array([[[0.8, 0.4, 0.2]]], dtype=np.float32))
@@ -48,67 +62,38 @@ def test_fixed_and_dynamic_background_use_one_color_for_the_whole_grid():
     masks = np.stack((np.zeros((4, 3)), np.ones((4, 3))), axis=0).astype(np.float32)
     fixed = solve(source, masks, steps=2, background="#203040")
     np.testing.assert_allclose(fixed.background,
-        srgb_to_linear(torch.tensor([32, 48, 64], dtype=torch.float32) / 255).numpy(), atol=1e-6)
+        srgb_to_oklab(np.array([32, 48, 64], dtype=np.float32) / 255), atol=1e-6)
     assert fixed.background.shape == (3,)
     dynamic = solve(source, masks, steps=2, background="auto")
     assert dynamic.background.shape == (3,)
-    assert (dynamic.background >= 0).all()
+    assert 0 <= dynamic.background[0] <= 1
+    assert np.isfinite(dynamic.background).all()
 
 
 def test_detail_uses_physical_display_size():
-    cells = [cell_for_display((2560, 1600), detail) for detail in range(3)]
-    assert cells == [(14, 28), (21, 42), (32, 64)]
-    assert [(2560 + w - 1) // w for w, _ in cells] == [183, 122, 80]
+    cells = [cell_for_display((2560, 1600), detail) for detail in range(5)]
+    assert cells == [(14, 28), (21, 42), (32, 64), (11, 22), (8, 16)]
+    assert [(2560 + w - 1) // w for w, _ in cells] == [183, 122, 80, 233, 320]
     assert cell_for_display((1280, 800), 2) == (16, 32)
 
 
-def test_plasma_defaults_match_renderer_defaults(tmp_path: Path):
+@pytest.mark.parametrize("suffix", ["", "B"])
+def test_plasma_defaults_match_shared_options(suffix):
     namespace = {"k": "http://www.kde.org/standards/kcfg/1.0"}
-    config = ET.parse("contents/config/main.xml").getroot()
+    config = ET.parse(Path(__file__).resolve().parents[1] / "contents/config/main.xml").getroot()
     entries = {entry.get("name"): entry for entry in config.findall(".//k:entry", namespace)}
     encoded_chars = ",".join(
         r"\s" if char == " " else r"\\" if char == "\\" else char
         for char in DEFAULT_CHARS
     )
-    assert entries["AsciiChars"].find("k:default", namespace).text == encoded_chars
-    assert float(entries["GradientLossStrength"].find("k:default", namespace).text) == DEFAULT_GRADIENT_LOSS_STRENGTH
-
-    config_qml = Path("contents/ui/config.qml").read_text()
-    client_qml = Path("contents/ui/RenderClient.qml").read_text()
-    main_qml = Path("contents/ui/main.qml").read_text()
-
-    def qml_string(source: str, name: str) -> str:
-        match = re.search(rf'(?:readonly )?property string {name}: ("(?:\\.|[^"\\])*")', source)
-        assert match, f"Missing QML string default: {name}"
-        return json.loads(match.group(1))
-
-    assert qml_string(config_qml, "standardChars") == DEFAULT_CHARS
-    assert qml_string(config_qml, "structureChars") == STRUCTURE_CHARS
-    assert qml_string(client_qml, "characters") == DEFAULT_CHARS
-    chars_list = re.search(r"property list<string> cfg_AsciiChars: (\[[^\]]*\])", config_qml)
-    assert chars_list and "".join(json.loads(chars_list.group(1))) == DEFAULT_CHARS
-    assert "cfg_GradientLossStrength: gradientLossSlider.value" in config_qml
-    assert "gradient_loss_strength: gradientLossStrength" in client_qml
-    assert "wallpaper.configuration.GradientLossStrength" in main_qml
-    assert '"--gradient-loss-strength", str(settings["gradient_loss_strength"])' in Path(
-        "ascii_optimizer/service.py").read_text()
-
-    image = tmp_path / "default.png"
-    Image.new("RGB", (8, 8), (100, 120, 140)).save(image)
-    request = _validated_request({
-        "images": [str(image)], "font": "Monospace", "chars": DEFAULT_CHARS,
-        "detail": 1, "grayscale": False, "frames": 2, "dither": 0.005,
-        "size": [8, 8], "screen": "nonexistent",
-    })
-    assert request["chars"] == DEFAULT_CHARS
-    assert request["gradient_loss_strength"] == DEFAULT_GRADIENT_LOSS_STRENGTH
-
-    structure_request = _validated_request({
-        "images": [str(image)], "font": "Monospace", "chars": STRUCTURE_CHARS,
-        "detail": 1, "grayscale": False, "frames": 2, "dither": 0.005,
-        "style": "structure", "size": [8, 8], "screen": "nonexistent",
-    })
-    assert structure_request["gradient_loss_strength"] == 0
+    assert entries["AsciiChars" + suffix].find("k:default", namespace).text == encoded_chars
+    defaults = normalize_options({})
+    for name, option in (("Detail", "detail"), ("Dither", "dither"),
+                         ("GradientLossStrength", "gradient_loss_strength"),
+                         ("GlyphLuminanceBonus", "glyph_luminance_bonus"),
+                         ("StructureDither", "structure_dither"),
+                         ("TransitionFrames", "frames"), ("TransitionSpread", "transition_spread")):
+        assert float(entries[name + suffix].find("k:default", namespace).text) == defaults[option]
 
 
 def test_full_frame_loss_couples_cells_across_boundary():
@@ -121,17 +106,20 @@ def test_full_frame_loss_couples_cells_across_boundary():
     assert rendered.grad[:, :, :, 3].abs().sum() > 0
 
 
-def test_detail_losses_can_preserve_a_single_colored_pixel_over_a_larger_gray_patch():
-    source = np.zeros((8, 8, 3), dtype=np.float32)
-    source[:2, :2] = 0.65
-    source[5, 5] = [1.0, 0.05, 0.8]
-    masks = np.zeros((3, 8, 8), dtype=np.float32)
-    masks[1, :2, :2] = 1
-    masks[2, 5, 5] = 1
-    settings = dict(steps=20, candidates=3, dither=0, background="#000000")
-    assert solve(source, masks, detail_loss="default", **settings).glyph[0, 0] == 1
-    assert solve(source, masks, detail_loss="local_color", **settings).glyph[0, 0] == 2
-    assert solve(source, masks, detail_loss="color_tail", **settings).glyph[0, 0] == 2
+def test_local_color_objective_prioritizes_errors_at_small_colored_details():
+    target = torch.zeros((1, 3, 8, 8))
+    target[:, 0] = 0.5
+    target[:, 1:, 3, 3] = torch.tensor([0.2, -0.1])
+    at_detail = target.clone()
+    at_detail[:, 0, 3, 3] += 0.1
+    elsewhere = target.clone()
+    elsewhere[:, 0, 4, 4] += 0.1
+    weight = _local_color_weight(target)
+    # Equal lightness errors at symmetric positions cost the same in the base
+    # objective; local weighting gives the unusual color additional influence.
+    torch.testing.assert_close(_loss(at_detail, target), _loss(elsewhere, target))
+    assert _loss(at_detail, target, detail_loss="local_color", local_weight=weight) > _loss(
+        elsewhere, target, detail_loss="local_color", local_weight=weight) * 2
 
 
 def test_blue_noise_is_seeded_and_low_frequency_suppressed():
@@ -215,7 +203,7 @@ def test_progress_reports_completed_solve_and_space_glyph(tmp_path: Path):
     assert all(left[0] <= right[0] for left, right in zip(updates, updates[1:]))
 
 
-def test_batch_transition_endpoints_equal_stills(tmp_path: Path, capsys):
+def test_batch_transition_endpoints_equal_stills(tmp_path: Path, capsys, batch_args):
     images = []
     for index in range(2):
         image = np.zeros((8, 12, 3), dtype=np.uint8)
@@ -224,7 +212,7 @@ def test_batch_transition_endpoints_equal_stills(tmp_path: Path, capsys):
         Image.fromarray(image).save(path)
         images.append(path)
     output = tmp_path / "out"
-    args = argparse.Namespace(images=images, output=output, size=(13, 9),
+    args = batch_args(images=images, output=output, size=(13, 9),
         font="DejaVu Sans Mono", chars=" .#", cell=(3, 4), detail=1,
         crop="fill", grayscale=False, frames=3, steps=2, transition_steps=2,
         candidates=3, dither=0.003, background="auto", seed=1, device="cpu", force=False)
@@ -301,12 +289,12 @@ def test_inverting_headroom_changes_solved_ink():
     assert inverted.color.mean() < normal.color.mean() * 0.5
 
 
-def test_render_style_and_inversion_are_saved_with_assets(tmp_path: Path):
+def test_render_style_and_inversion_are_saved_with_assets(tmp_path: Path, batch_args):
     image = tmp_path / "input.png"
     Image.new("RGB", (12, 8), (100, 130, 170)).save(image)
     second = tmp_path / "second.png"
     Image.new("RGB", (12, 8), (160, 90, 70)).save(second)
-    args = argparse.Namespace(images=[image, second], output=tmp_path / "out", size=(12, 8),
+    args = batch_args(images=[image, second], output=tmp_path / "out", size=(12, 8),
         font="DejaVu Sans Mono", chars=" .#", cell=(3, 4), detail=1,
         crop="fill", grayscale=False, frames=3, steps=2, transition_steps=2,
         candidates=3, dither=0.003, structure_dither=0.06, style="structure",
@@ -328,7 +316,7 @@ def test_render_style_and_inversion_are_saved_with_assets(tmp_path: Path):
         "invert_ink": True, "size": [12, 8], "screen": "nonexistent"})
     assert request["style"] == "structure" and request["invert_ink"] is True
 
-    default_args = argparse.Namespace(images=[image], output=tmp_path / "default-structure", size=(12, 8),
+    default_args = batch_args(images=[image], output=tmp_path / "default-structure", size=(12, 8),
         font="DejaVu Sans Mono", chars=DEFAULT_CHARS, cell=(3, 4), detail=1,
         crop="fill", grayscale=False, frames=2, steps=2, transition_steps=2,
         candidates=3, dither=0.003, structure_dither=0.06, style="structure",

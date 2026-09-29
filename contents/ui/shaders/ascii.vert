@@ -9,6 +9,13 @@ layout(std140, binding = 0) uniform buf {
     mat4 qt_Matrix;
     float qt_Opacity;
     vec2 gridSize;
+    vec2 outputSize;
+    vec2 cellSize;
+    float atlasCount;
+    float invertInk;
+    float metadataAvailable;
+    vec3 backgroundLab;
+    float backgroundAvailable;
 };
 
 void main() {

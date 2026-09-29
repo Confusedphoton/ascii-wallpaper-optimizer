@@ -1,7 +1,4 @@
-/*
- * SPDX-FileCopyrightText: 2026 korvexx <korvexx.dev@proton.me>
- * SPDX-License-Identifier: AGPL-3.0-or-later
- */
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
 
 import QtQuick
 
@@ -9,100 +6,94 @@ Item {
     id: asciiRoot
 
     property string renderDirectory: ""
+    property string generation: ""
+    property var manifest: ({})
     property int currentIndex: 0
     property int nextIndex: 0
     property real transitionProgress: 0.0
     property int transitionFrames: 16
-    property int detail: 1
-    property int revision: 0
-    property int transitionRevision: 0
+    property int imageCount: 1
+    property int activeBuffer: -1
+    readonly property var displayedFrame: activeBuffer === 0 ? firstFrame : activeBuffer === 1 ? secondFrame : null
+    readonly property bool ready: !!displayedFrame && displayedFrame.ready
+    readonly property string displayGeneration: ready ? displayedFrame.descriptor.generation : ""
+    readonly property string displayedKey: ready ? displayedFrame.frameKey : ""
+    readonly property int displayImageCount: ready ? Number(displayedFrame.manifest.image_count)
+        || displayedFrame.descriptor.imageCount : 0
+    readonly property int displayFrameCount: ready ? Number(displayedFrame.manifest.frame_count)
+        || displayedFrame.descriptor.frameCount : 0
+    readonly property bool loading: !!renderDirectory && displayedKey !== desiredKey
+    readonly property int frameCount: Math.max(2, Number(manifest.frame_count) || transitionFrames)
+    readonly property int frameIndex: Math.max(0, Math.min(frameCount - 1,
+        Math.floor(transitionProgress * (frameCount - 1))))
+    readonly property string desiredKey: descriptor(currentIndex, nextIndex, frameIndex).key
+    signal framePresented()
 
-    readonly property bool ready: glyphMap.status === Image.Ready
-        && colorMap.status === Image.Ready && atlasImage.status === Image.Ready
-        && metadataImage.status === Image.Ready && backgroundMap.status === Image.Ready
-
-    readonly property bool transitioning: currentIndex !== nextIndex
-    readonly property int frameIndex: Math.min(transitionFrames - 1,
-        Math.floor(transitionProgress * (transitionFrames - 1)))
-
-    function fileUrl(relative) {
-        const directory = String(renderDirectory || "").trim().replace(/\/$/, "");
-        if (!directory) return "";
-        const version = relative.startsWith("transitions/") ? transitionRevision : revision;
-        return "file://" + (directory + "/" + relative).split("/").map(encodeURIComponent).join("/")
-            + "?v=" + version;
+    onDesiredKeyChanged: refresh.restart()
+    onManifestChanged: refresh.restart()
+    onRenderDirectoryChanged: {
+        if (!renderDirectory) activeBuffer = -1
     }
+    Component.onCompleted: refresh.restart()
 
-    function mapPath(kind) {
-        if (transitioning) {
-            const pair = String(currentIndex).padStart(4, "0") + "-" + String(nextIndex).padStart(4, "0");
-            const frame = String(frameIndex).padStart(4, "0");
-            return fileUrl("transitions/" + pair + "/" + frame + "/" + kind + ".png");
+    function descriptor(current, next, index) {
+        const directory = String(renderDirectory || "").trim().replace(/\/$/, "")
+        let path = "stills/" + String(current).padStart(4, "0")
+        if (current !== next && index > 0 && index < frameCount - 1) {
+            const pair = String(current).padStart(4, "0") + "-" + String(next).padStart(4, "0")
+            path = "transitions/" + pair + "/" + String(index).padStart(4, "0")
+        } else if (current !== next && index === frameCount - 1) {
+            path = "stills/" + String(next).padStart(4, "0")
         }
-        return fileUrl("stills/" + String(currentIndex).padStart(4, "0") + "/" + kind + ".png");
+        const version = generation || String(manifest.generation || directory)
+        return {key: directory + "/" + path + "?v=" + version,
+            url: "file://" + directory.split("/").map(encodeURIComponent).join("/"),
+            generation: version, path: path, manifest: manifest,
+            imageCount: Math.max(1, Number(manifest.image_count) || imageCount), frameCount: frameCount}
     }
 
-    Image {
-        id: glyphMap
-        source: asciiRoot.mapPath("glyph")
-        visible: false
-        smooth: false
-        cache: true
-        layer.enabled: true
-        asynchronous: true
+    function updateFrame() {
+        if (!renderDirectory) return
+        if (displayedKey === desiredKey) { prefetch(); return }
+        const buffer = activeBuffer === 0 ? secondFrame : firstFrame
+        buffer.load(descriptor(currentIndex, nextIndex, frameIndex))
+        present(buffer)
     }
 
-    Image {
-        id: colorMap
-        source: asciiRoot.mapPath("color")
-        visible: false
-        smooth: false
-        cache: true
-        layer.enabled: true
-        asynchronous: true
+    function present(buffer) {
+        if (!renderDirectory || !buffer.ready || buffer.frameKey !== desiredKey) return
+        const nextBuffer = buffer === firstFrame ? 0 : 1
+        if (activeBuffer !== nextBuffer) {
+            activeBuffer = nextBuffer
+            framePresented()
+        }
+        Qt.callLater(prefetch)
     }
 
-    Image {
-        id: backgroundMap
-        source: asciiRoot.mapPath("background")
-        visible: false
-        smooth: false
-        cache: true
-        layer.enabled: true
-        asynchronous: true
+    function prefetch() {
+        if (!renderDirectory || !ready || displayedKey !== desiredKey) return
+        let upcoming
+        if (currentIndex !== nextIndex && frameIndex < frameCount - 1)
+            upcoming = descriptor(currentIndex, nextIndex, frameIndex + 1)
+        else if (currentIndex === nextIndex && displayImageCount > 1)
+            upcoming = descriptor(currentIndex, (currentIndex + 1) % displayImageCount, 1)
+        if (upcoming && upcoming.key !== desiredKey) {
+            const buffer = activeBuffer === 0 ? secondFrame : firstFrame
+            buffer.load(upcoming)
+        }
     }
 
-    Image {
-        id: atlasImage
-        source: asciiRoot.fileUrl("atlas.png")
-        visible: false
-        smooth: false
-        cache: true
-        layer.enabled: true
-        asynchronous: true
-    }
-
-    Image {
-        id: metadataImage
-        source: asciiRoot.fileUrl("metadata.png")
-        visible: false
-        smooth: false
-        cache: true
-        layer.enabled: true
-        asynchronous: true
-    }
-
-    ShaderEffect {
+    Timer { id: refresh; interval: 0; onTriggered: asciiRoot.updateFrame() }
+    AsciiFrame {
+        id: firstFrame
         anchors.fill: parent
-        visible: asciiRoot.ready
-        blending: false
-        property variant glyphs: glyphMap
-        property variant colors: colorMap
-        property variant backgrounds: backgroundMap
-        property variant atlas: atlasImage
-        property variant metadata: metadataImage
-        property size gridSize: Qt.size(glyphMap.implicitWidth, glyphMap.implicitHeight)
-        vertexShader: "shaders/ascii.vert.qsb"
-        fragmentShader: "shaders/ascii.frag.qsb"
+        active: asciiRoot.activeBuffer === 0
+        onCompleted: asciiRoot.present(firstFrame)
+    }
+    AsciiFrame {
+        id: secondFrame
+        anchors.fill: parent
+        active: asciiRoot.activeBuffer === 1
+        onCompleted: asciiRoot.present(secondFrame)
     }
 }
