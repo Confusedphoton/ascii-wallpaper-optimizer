@@ -8,7 +8,8 @@ from PIL import Image
 from ascii_optimizer import optimizer
 from ascii_optimizer.assets import load_target
 from ascii_optimizer.optimizer import (Grid, _FrameObjective, _display_headroom_lab,
-                                       _loss, _project_oklab_colors,
+                                       _loss, _playback_color, _project_oklab_colors,
+                                       _saturation_loss,
                                        fit_fixed_glyphs, render_grid, solve)
 from ascii_optimizer.structure import fit_structure_colors, solve_structure
 from ascii_optimizer.tone import (display_tone_lab, encode_headroom_lab,
@@ -43,6 +44,71 @@ def test_playback_projection_keeps_gradients_across_rgb_byte_boundaries():
     assert color.grad.abs().sum() > 0
     np.testing.assert_allclose(projected.detach().numpy(),
                                quantize_playback_lab(color.detach().numpy()), atol=3e-6)
+
+
+def test_rgb_ink_has_finite_gradients_at_black_white_and_saturated_boundaries():
+    srgb = torch.tensor([[0, 0, 0], [1, 1, 1], [1, 0, 0], [0, 0, 1],
+                         [0.21, 0.43, 0.67]], dtype=torch.float32, requires_grad=True)
+    lab = _playback_color(srgb)
+    lab.sum().backward()
+    assert torch.isfinite(srgb.grad).all()
+    assert srgb.grad[-1].abs().sum() > 0
+    expected = srgb_to_oklab(np.rint(srgb.detach().numpy() * 255) / 255)
+    np.testing.assert_allclose(lab.detach().numpy(), expected, atol=3e-7)
+
+
+@pytest.mark.parametrize("wrong_hue", ["opposite", "perpendicular"])
+def test_chrominance_correction_rejects_unrelated_hues_with_sufficient_saturation(wrong_hue):
+    target = torch.tensor([0.5, 0.02, -0.03]).reshape(1, 3, 1, 1)
+    shifted = target.clone()
+    if wrong_hue == "opposite":
+        shifted[:, 1:] *= -1
+    else:
+        shifted[:, 1] -= 2 * target[:, 2]
+        shifted[:, 2] += 2 * target[:, 1]
+    matching_loss = _saturation_loss(target, target, displayed_lab=target)
+    shifted_loss = _saturation_loss(shifted, target, displayed_lab=shifted)
+    assert matching_loss < 1e-10
+    assert shifted_loss > 0.001
+
+
+def _sparse_masks():
+    masks = np.zeros((4, 4, 4), dtype=np.float32)
+    masks[1] = np.eye(4)
+    masks[2, :, 1:3] = 1
+    masks[3] = np.indices((4, 4)).sum(0) % 2
+    return masks
+
+
+@pytest.mark.parametrize("fixed_glyphs", [False, True])
+def test_neutral_source_stays_neutral_with_light_ink_bonus(fixed_glyphs):
+    source_lab = srgb_to_oklab(np.full((16, 16, 3), 0.5, dtype=np.float32))
+    target = encode_headroom_lab(source_lab)
+    masks = _sparse_masks()
+    settings = dict(input_oklab=True, steps=36, glyph_luminance_bonus=0.12,
+                    saturation_target_oklab=source_lab, gradient_target_oklab=source_lab,
+                    gradient_loss_strength=1.5)
+    if fixed_glyphs:
+        grid = fit_fixed_glyphs(target, masks, np.ones((4, 4), dtype=np.uint8),
+                                background_oklab=np.zeros(3, dtype=np.float32), **settings)
+    else:
+        grid = solve(target, masks, candidates=4, dither=0.014, background="#000000", **settings)
+    displayed = srgb_to_oklab(oklab_to_srgb(display_tone_lab(render_grid(grid, masks))))
+    assert np.abs(displayed[..., 1:]).max() < 0.001
+
+
+def test_faint_purple_source_does_not_turn_yellow_during_gamut_constrained_solve():
+    source_lab = srgb_to_oklab(np.full((16, 16, 3), [0.25, 0.24, 0.27], dtype=np.float32))
+    masks = _sparse_masks()
+    grid = solve(encode_headroom_lab(source_lab), masks, input_oklab=True,
+                 steps=36, candidates=4, dither=0.014, background="#000000",
+                 glyph_luminance_bonus=0.12, saturation_target_oklab=source_lab,
+                 gradient_target_oklab=source_lab, gradient_loss_strength=1.5)
+    displayed = srgb_to_oklab(oklab_to_srgb(display_tone_lab(render_grid(grid, masks))))
+    cells = displayed.reshape(4, 4, 4, 4, 3).mean((1, 3))
+    assert (cells[..., 1] > 0).all()
+    assert (cells[..., 2] < 0).all()
+    assert np.sqrt(np.mean((cells[..., 1:] - source_lab[0, 0, 1:]) ** 2)) < 0.01
 
 
 @pytest.mark.parametrize("invert_ink", [False, True])

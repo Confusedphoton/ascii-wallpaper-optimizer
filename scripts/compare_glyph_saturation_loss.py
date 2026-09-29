@@ -44,7 +44,7 @@ def main() -> None:
             "seed": base.SEED,
             "dither": base.DITHER,
             "default_saturation_loss_strength_for_nonzero_bonus": SATURATION_LOSS,
-            "saturation_loss": "weighted squared deficit in displayed OKLab chroma with RGB8-constrained ink",
+            "saturation_loss": "weighted source-hue chroma deficit and perpendicular chroma error in displayed OKLab with RGB8-constrained ink",
             "variants": [{"key": key, "label": label, "glyph_luminance_bonus": bonus,
                           "saturation_loss_strength": saturation}
                          for key, label, bonus, saturation in VARIANTS],

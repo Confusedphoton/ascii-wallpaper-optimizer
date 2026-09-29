@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .assets import blue_noise
+from .assets import blue_noise, linear_to_srgb, srgb_to_linear
 from .settings import finite_float
 from .tone import quantize_playback_lab, srgb_to_oklab
 
@@ -85,7 +85,27 @@ def _oklab_to_rgb(color: torch.Tensor) -> torch.Tensor:
 
 def _rgb_to_oklab(color: torch.Tensor) -> torch.Tensor:
     _, _, rgb_lms, lms_lab = _color_matrices(color.device, color.dtype)
-    return (color @ rgb_lms).clamp_min(0).pow(1 / 3) @ lms_lab
+    lms = (color @ rgb_lms).clamp_min(0)
+    # The cube-root derivative is infinite at black. Keep exact forward values
+    # with a finite derivative for colors fitted at the RGB gamut boundary.
+    roots = lms.clamp_min(1e-12).pow(1 / 3)
+    roots = roots + (lms.pow(1 / 3) - roots).detach()
+    return roots @ lms_lab
+
+
+def _color_parameter(lab: torch.Tensor) -> torch.nn.Parameter:
+    """Fit continuous sRGB channels, so every update has a displayable ink."""
+    with torch.no_grad():
+        _, rgb = _gamut_projection(lab)
+        return torch.nn.Parameter(linear_to_srgb(rgb))
+
+
+def _playback_color(srgb: torch.Tensor) -> torch.Tensor:
+    """Decode RGB8 ink with gradients through RGB, except for byte rounding."""
+    srgb = srgb.clamp(0, 1)
+    quantized = (srgb * 255).round() / 255
+    srgb = srgb + (quantized - srgb).detach()
+    return _rgb_to_oklab(srgb_to_linear(srgb))
 
 
 def _gamut_projection(color: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -143,18 +163,26 @@ def _saturation_loss(rendered: torch.Tensor, target_lab: torch.Tensor,
                     invert_ink: bool = False, displayed_lab: torch.Tensor | None = None,
                     source_chroma: torch.Tensor | None = None,
                     source_weight: torch.Tensor | None = None) -> torch.Tensor:
-    """Penalize loss of source chroma after the OKLab display tone transform."""
+    """Preserve source chroma and hue after the OKLab display tone transform.
+
+    A magnitude-only deficit also rewards unrelated hues. Measure the deficit
+    along the source hue and penalize perpendicular chroma. Allow stronger ink
+    in that hue so sparse glyphs can compensate for their background gaps.
+    """
     if displayed_lab is None:
         displayed_lab = _display_headroom_lab(rendered, invert_ink=invert_ink)
     if source_chroma is None:
         source_chroma = (target_lab[:, 1:].square().sum(1, keepdim=True) + 1e-8).sqrt()
-    output_chroma = (displayed_lab[:, 1:].square().sum(1, keepdim=True) + 1e-8).sqrt()
     scale = (torch.quantile(source_chroma.detach().flatten(), 0.95).clamp_min(0.02)
              if chroma_scale is None else chroma_scale)
     weight = (1 + 4 * (source_chroma / scale).clamp(max=1).square()
               if source_weight is None else source_weight)
-    chroma_deficit = torch.relu(source_chroma - output_chroma)
-    return (weight * chroma_deficit.square()).mean((1, 2, 3))
+    direction = target_lab[:, 1:] / source_chroma
+    aligned_chroma = (displayed_lab[:, 1:] * direction).sum(1, keepdim=True)
+    perpendicular = displayed_lab[:, 1:] - aligned_chroma * direction
+    chroma_error = (torch.relu(source_chroma - aligned_chroma).square()
+                    + perpendicular.square().sum(1, keepdim=True))
+    return (weight * chroma_error).mean((1, 2, 3))
 
 
 def _display_headroom_lab(lab: torch.Tensor, *, invert_ink: bool = False) -> torch.Tensor:
@@ -489,8 +517,7 @@ def fit_fixed_glyphs(image_srgb: np.ndarray, masks_np: np.ndarray, glyphs: np.nd
     numerator = (weights[..., None] * mask[..., None]
                  * (cells - (1 - mask[..., None]) * background)).sum(1)
     denominator = (weights * mask.square()).sum(1).clamp_min(1e-8)
-    color_parameter = torch.nn.Parameter(_project_oklab_colors(
-        numerator / denominator[..., None], quantize=False))
+    color_parameter = _color_parameter(numerator / denominator[..., None])
     previous_colors = (torch.as_tensor(previous.color, dtype=torch.float32,
                                       device=device).reshape(-1, 3)
                        if previous is not None else None)
@@ -512,23 +539,23 @@ def fit_fixed_glyphs(image_srgb: np.ndarray, masks_np: np.ndarray, glyphs: np.nd
 
     # Preserve the best representable fit. Color objectives may disagree at a
     # gamut boundary, and the final Adam step need not be the best one.
-    best_color = _project_oklab_colors(color_parameter.detach())
+    best_color = _playback_color(color_parameter.detach())
     best_loss = color_loss(best_color).detach()
-    optimizer = torch.optim.Adam((color_parameter,), lr=0.04)
+    optimizer = torch.optim.Adam((color_parameter,), lr=0.01)
     for step in range(steps):
         optimizer.zero_grad(set_to_none=True)
-        color = _project_oklab_colors(color_parameter)
+        color = _playback_color(color_parameter)
         loss = color_loss(color)
         best_color = torch.where(loss.detach() < best_loss, color.detach(), best_color)
         best_loss = torch.minimum(loss.detach(), best_loss)
         loss.backward()
         optimizer.step()
         with torch.no_grad():
-            color_parameter.copy_(_project_oklab_colors(color_parameter, quantize=False))
+            color_parameter.clamp_(0, 1)
         if on_progress is not None:
             on_progress((step + 1) / max(steps, 1), "Fitting path glyph colors")
     with torch.no_grad():
-        color = _project_oklab_colors(color_parameter)
+        color = _playback_color(color_parameter)
         best_color = torch.where(color_loss(color) < best_loss, color, best_color)
     if on_progress is not None and steps == 0:
         on_progress(1.0, "Fitting path glyph colors")
@@ -556,7 +583,7 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
           gradient_shortlist_strength: float | None = None,
           invert_ink: bool = False,
           input_oklab: bool = False) -> Grid:
-    """Optimize one complete grid with OKLab colors, scores, and parameters."""
+    """Optimize a complete grid with OKLab scoring and RGB-constrained ink."""
     if masks_np.shape[0] > 256:
         raise ValueError("The glyph map supports at most 256 characters")
     if detail_loss not in DETAIL_LOSSES:
@@ -721,8 +748,9 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
     logits = torch.nn.Parameter((-initial_errors / 0.02).clamp(-20, 0).detach())
     first = initial_errors.argmin(1)
     initial_color = _project_oklab_colors(fitted[torch.arange(len(fitted), device=device), first])
-    color_parameter = torch.nn.Parameter(initial_color.detach())
-    optimizer = torch.optim.Adam((logits, color_parameter), lr=0.12)
+    color_parameter = _color_parameter(initial_color)
+    optimizer = torch.optim.Adam(({"params": (logits,), "lr": 0.12},
+                                  {"params": (color_parameter,), "lr": 0.03}))
     prev_masks = prev_colors = scheduled_masks = None
     if previous is not None and destination is not None:
         prev_masks = bank[torch.as_tensor(previous.glyph.astype(np.int64), device=device).flatten()]
@@ -742,7 +770,7 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         temperature = max(0.3, 1.0 - 0.7 * step / max(1, steps - 1))
         weights = torch.softmax(logits / temperature, dim=1)
         mask = (weights[..., None] * sample_masks).sum(1)
-        color = _project_oklab_colors(color_parameter)
+        color = _playback_color(color_parameter)
         rendered = _render(mask, color, rows, cols, cell_height, cell_width, background_color)
         loss = frame_loss(rendered)
         if glyph_luminance_bonus:
@@ -755,7 +783,7 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         loss.backward()
         optimizer.step()
         with torch.no_grad():
-            color_parameter.copy_(_project_oklab_colors(color_parameter, quantize=False))
+            color_parameter.clamp_(0, 1)
         if on_progress is not None:
             on_progress((step + 1) / total_work, "Optimizing glyphs and colors")
 
@@ -770,7 +798,7 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         selected = selection_logits.argmax(1)
         glyph = indices.gather(1, selected[:, None]).squeeze(1)
         hard_masks = bank[glyph]
-        hard_color = _project_oklab_colors(color_parameter.detach())
+        hard_color = _playback_color(color_parameter.detach())
 
     def hard_score(chosen_masks: torch.Tensor, chosen_color: torch.Tensor) -> torch.Tensor:
         score = frame_loss(_render(chosen_masks, chosen_color, rows, cols, cell_height, cell_width, background_color))
@@ -820,23 +848,29 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
             on_progress((steps + parity + 1) / total_work, "Refining character boundaries")
 
     # Final colors are optimized against the actual discrete glyphs.
-    color_parameter = torch.nn.Parameter(hard_color.detach().clone())
-    color_optimizer = torch.optim.Adam((color_parameter,), lr=0.04)
+    color_parameter = _color_parameter(hard_color)
+    color_optimizer = torch.optim.Adam((color_parameter,), lr=0.01)
+    best_color = hard_color.detach().clone()
+    best_loss = hard_score(hard_masks, best_color).detach()
     for polish_step in range(polish_steps):
         color_optimizer.zero_grad(set_to_none=True)
-        color = _project_oklab_colors(color_parameter)
-        loss = frame_loss(_render(hard_masks, color, rows, cols, cell_height, cell_width, background_color))
-        if glyph_luminance_bonus:
-            loss = loss - glyph_luminance_bonus * _ink_lightness(color).mean()
-        if prev_colors is not None:
-            loss = loss + 0.010 * (color - prev_colors).square().mean()
+        color = _playback_color(color_parameter)
+        loss = hard_score(hard_masks, color)
+        # Retain the best persisted fit, including the pre-polish colors.
+        score = loss.detach()
+        best_color = torch.where(score < best_loss, color.detach(), best_color)
+        best_loss = torch.minimum(score, best_loss)
         loss.backward()
         color_optimizer.step()
         with torch.no_grad():
-            color_parameter.copy_(_project_oklab_colors(color_parameter, quantize=False))
+            color_parameter.clamp_(0, 1)
         if on_progress is not None:
             on_progress((steps + 4 + polish_step + 1) / total_work, "Polishing colors")
 
+    with torch.no_grad():
+        color = _playback_color(color_parameter)
+        best_color = torch.where(hard_score(hard_masks, color) < best_loss, color, best_color)
+
     return Grid(glyph.detach().cpu().numpy().reshape(rows, cols).astype(np.uint8),
-                quantize_playback_lab(color_parameter.detach().cpu().numpy().reshape(rows, cols, 3)),
+                quantize_playback_lab(best_color.cpu().numpy().reshape(rows, cols, 3)),
                 quantize_playback_lab(background_color.detach().cpu().numpy()))
