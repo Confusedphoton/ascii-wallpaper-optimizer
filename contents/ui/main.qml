@@ -35,13 +35,33 @@ WallpaperItem {
         : (wallpaper.configuration.ModeB || "Image")
     readonly property var configImages: activeProfile === "A" ? (wallpaper.configuration.Images || [])
         : (wallpaper.configuration.ImagesB || [])
-    readonly property int slideInterval: {
-        let v = (wallpaper.configuration.SlideInterval !== undefined) ? wallpaper.configuration.SlideInterval : 10;
-        return Math.max(5, v);
+    readonly property var activeSettings: {
+        const config = wallpaper.configuration
+        const b = activeProfile === "B"
+        const useBSettings = b && !!config.ProfileSettingsInitialized
+        const setting = name => config[name + (useBSettings ? "B" : "")]
+        const chars = setting("AsciiChars") || [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@", "\\", "=", "^"]
+        return {
+            fontFamily: setting("FontFamily") || "Monospace",
+            characters: Array.from(chars).map((glyph, index) => index === 0 && glyph === "\\s" ? " " : glyph).join(""),
+            detail: setting("Detail") !== undefined ? setting("Detail") : 1,
+            grayscale: !!setting("Grayscale"),
+            slideInterval: Math.max(5, setting("SlideInterval") !== undefined ? setting("SlideInterval") : 10),
+            transitionFrames: setting("TransitionFrames") || 16,
+            transitionDuration: Math.max(100, setting("TransitionDuration") || 1500),
+            transitionPace: setting("TransitionPace") || "ease-in-out",
+            transitionField: setting("TransitionField") || "blue-noise",
+            transitionSpread: setting("TransitionSpread") !== undefined ? setting("TransitionSpread") : 0.65,
+            dither: setting("Dither") !== undefined ? setting("Dither") : 0.005,
+            gradientLossStrength: setting("GradientLossStrength") !== undefined ? setting("GradientLossStrength") : 1.5,
+            structureDither: setting("StructureDither") !== undefined ? setting("StructureDither") : 0.06,
+            renderStyle: setting("RenderStyle") || "headroom",
+            invertInk: !!setting("InvertInk"),
+            backgroundMode: setting("BackgroundMode") !== undefined ? setting("BackgroundMode") : 0,
+            backgroundColor: setting("BackgroundColor") || "#202028",
+            renderDirectory: b && !useBSettings ? "" : (setting("RenderDirectory") || "")
+        }
     }
-
-    readonly property int transitionFrames: wallpaper.configuration.TransitionFrames || 16
-    readonly property int transitionDuration: Math.max(100, wallpaper.configuration.TransitionDuration || 1500)
     property int renderRevision: 0
 
     property int currentIdx: 0
@@ -49,29 +69,25 @@ WallpaperItem {
 
     RenderClient {
         id: renderer
-        images: root.mode === "Slideshow" ? Array.from(root.configImages)
-            : Array.from(root.configImages).slice(0, 1)
-        fontFamily: wallpaper.configuration.FontFamily || "Monospace"
-        characters: Array.from(wallpaper.configuration.AsciiChars || []).map(
-            (glyph, index) => index === 0 && glyph === "\\s" ? " " : glyph).join("")
-        detail: (wallpaper.configuration.Detail !== undefined) ? wallpaper.configuration.Detail : 1
-        grayscale: !!wallpaper.configuration.Grayscale
-        frames: root.transitionFrames
-        transitionPace: wallpaper.configuration.TransitionPace || "ease-in-out"
-        transitionField: wallpaper.configuration.TransitionField || "blue-noise"
-        transitionSpread: (wallpaper.configuration.TransitionSpread !== undefined)
-            ? wallpaper.configuration.TransitionSpread : 0.65
-        dither: (wallpaper.configuration.Dither !== undefined) ? wallpaper.configuration.Dither : 0.005
-        gradientLossStrength: (wallpaper.configuration.RenderStyle || "headroom") === "headroom"
-            ? ((wallpaper.configuration.GradientLossStrength !== undefined)
-                ? wallpaper.configuration.GradientLossStrength : 1.5) : 0
-        structureDither: (wallpaper.configuration.StructureDither !== undefined)
-            ? wallpaper.configuration.StructureDither : 0.06
-        renderStyle: wallpaper.configuration.RenderStyle || "headroom"
-        invertInk: !!wallpaper.configuration.InvertInk
-        background: wallpaper.configuration.BackgroundMode === 1
-            ? (wallpaper.configuration.BackgroundColor || "#202028") : "auto"
-        cachedDirectory: wallpaper.configuration.RenderDirectory || ""
+        requestSettings: ({
+            images: root.mode === "Slideshow" ? Array.from(root.configImages)
+                : Array.from(root.configImages).slice(0, 1),
+            font: root.activeSettings.fontFamily,
+            chars: root.activeSettings.characters,
+            detail: root.activeSettings.detail,
+            grayscale: root.activeSettings.grayscale,
+            frames: root.activeSettings.transitionFrames,
+            transition_pace: root.activeSettings.transitionPace,
+            transition_field: root.activeSettings.transitionField,
+            transition_spread: root.activeSettings.transitionSpread,
+            dither: root.activeSettings.dither,
+            gradient_loss_strength: root.activeSettings.renderStyle === "headroom" ? root.activeSettings.gradientLossStrength : 0,
+            structure_dither: root.activeSettings.structureDither,
+            style: root.activeSettings.renderStyle,
+            invert_ink: root.activeSettings.invertInk,
+            background: root.activeSettings.backgroundMode === 1 ? root.activeSettings.backgroundColor : "auto"
+        })
+        cachedDirectory: root.activeSettings.renderDirectory
         onRenderStateChanged: if (renderState === "ready") root.renderRevision++
     }
 
@@ -80,7 +96,7 @@ WallpaperItem {
 
         running: root.mode === "Slideshow" && root.configImages.length > 1
             && root.currentIdx === root.nextIdx && shaderContainer.ready
-        interval: root.slideInterval * 1000
+        interval: root.activeSettings.slideInterval * 1000
         repeat: true
 
         onTriggered: {
@@ -98,7 +114,7 @@ WallpaperItem {
         from: 0.0
         to: 1.0
 
-        duration: root.transitionDuration
+        duration: root.activeSettings.transitionDuration
         easing.type: Easing.Linear
 
         onFinished: {
@@ -150,8 +166,8 @@ WallpaperItem {
         renderDirectory: renderer.displayDirectory
         currentIndex: root.currentIdx
         nextIndex: root.nextIdx
-        transitionFrames: root.transitionFrames
-        detail: (wallpaper.configuration.Detail !== undefined) ? wallpaper.configuration.Detail : 1
+        transitionFrames: root.activeSettings.transitionFrames
+        detail: root.activeSettings.detail
         revision: root.renderRevision
     }
 
