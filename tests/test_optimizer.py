@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -10,7 +12,8 @@ import torch
 from PIL import Image
 
 from ascii_optimizer.assets import blue_noise, cell_for_display, glyph_masks, linear_to_srgb, resolve_font, srgb_to_linear
-from ascii_optimizer.cli import build, solve_style
+from ascii_optimizer.cli import DEFAULT_CHARS, build, solve_style
+from ascii_optimizer.defaults import DEFAULT_GRADIENT_LOSS_STRENGTH
 from ascii_optimizer.optimizer import Grid, _loss, render_grid, solve
 from ascii_optimizer.service import _validated_request
 from ascii_optimizer.structure import STRUCTURE_CHARS
@@ -57,6 +60,55 @@ def test_detail_uses_physical_display_size():
     assert cells == [(14, 28), (21, 42), (32, 64)]
     assert [(2560 + w - 1) // w for w, _ in cells] == [183, 122, 80]
     assert cell_for_display((1280, 800), 2) == (16, 32)
+
+
+def test_plasma_defaults_match_renderer_defaults(tmp_path: Path):
+    namespace = {"k": "http://www.kde.org/standards/kcfg/1.0"}
+    config = ET.parse("contents/config/main.xml").getroot()
+    entries = {entry.get("name"): entry for entry in config.findall(".//k:entry", namespace)}
+    encoded_chars = ",".join(
+        r"\s" if char == " " else r"\\" if char == "\\" else char
+        for char in DEFAULT_CHARS
+    )
+    assert entries["AsciiChars"].find("k:default", namespace).text == encoded_chars
+    assert float(entries["GradientLossStrength"].find("k:default", namespace).text) == DEFAULT_GRADIENT_LOSS_STRENGTH
+
+    config_qml = Path("contents/ui/config.qml").read_text()
+    client_qml = Path("contents/ui/RenderClient.qml").read_text()
+    main_qml = Path("contents/ui/main.qml").read_text()
+
+    def qml_string(source: str, name: str) -> str:
+        match = re.search(rf'(?:readonly )?property string {name}: ("(?:\\.|[^"\\])*")', source)
+        assert match, f"Missing QML string default: {name}"
+        return json.loads(match.group(1))
+
+    assert qml_string(config_qml, "standardChars") == DEFAULT_CHARS
+    assert qml_string(config_qml, "structureChars") == STRUCTURE_CHARS
+    assert qml_string(client_qml, "characters") == DEFAULT_CHARS
+    chars_list = re.search(r"property list<string> cfg_AsciiChars: (\[[^\]]*\])", config_qml)
+    assert chars_list and "".join(json.loads(chars_list.group(1))) == DEFAULT_CHARS
+    assert "cfg_GradientLossStrength: gradientLossSlider.value" in config_qml
+    assert "gradient_loss_strength: gradientLossStrength" in client_qml
+    assert "wallpaper.configuration.GradientLossStrength" in main_qml
+    assert '"--gradient-loss-strength", str(settings["gradient_loss_strength"])' in Path(
+        "ascii_optimizer/service.py").read_text()
+
+    image = tmp_path / "default.png"
+    Image.new("RGB", (8, 8), (100, 120, 140)).save(image)
+    request = _validated_request({
+        "images": [str(image)], "font": "Monospace", "chars": DEFAULT_CHARS,
+        "detail": 1, "grayscale": False, "frames": 2, "dither": 0.005,
+        "size": [8, 8], "screen": "nonexistent",
+    })
+    assert request["chars"] == DEFAULT_CHARS
+    assert request["gradient_loss_strength"] == DEFAULT_GRADIENT_LOSS_STRENGTH
+
+    structure_request = _validated_request({
+        "images": [str(image)], "font": "Monospace", "chars": STRUCTURE_CHARS,
+        "detail": 1, "grayscale": False, "frames": 2, "dither": 0.005,
+        "style": "structure", "size": [8, 8], "screen": "nonexistent",
+    })
+    assert structure_request["gradient_loss_strength"] == 0
 
 
 def test_full_frame_loss_couples_cells_across_boundary():
@@ -194,6 +246,7 @@ def test_batch_transition_endpoints_equal_stills(tmp_path: Path, capsys):
     metadata = np.asarray(Image.open(output / "metadata.png"))
     assert tuple(metadata[0, 0]) == (0, 13, 3)
     assert tuple(metadata[0, 1]) == (0, 9, 4)
+    assert json.loads((output / "manifest.json").read_text())["signature"]["gradient_loss_strength"] == DEFAULT_GRADIENT_LOSS_STRENGTH
     build(args)
     assert "Already rendered" in capsys.readouterr().out
     args.dither = 0.02
@@ -264,6 +317,7 @@ def test_render_style_and_inversion_are_saved_with_assets(tmp_path: Path):
     manifest = json.loads((args.output / "manifest.json").read_text())
     assert manifest["signature"]["style"] == "structure"
     assert manifest["signature"]["invert_ink"] is True
+    assert manifest["signature"]["gradient_loss_strength"] == 0
     for kind in ("glyph", "color", "background"):
         assert (args.output / "transitions/0000-0001/0000" / f"{kind}.png").read_bytes() == (args.output / "stills/0000" / f"{kind}.png").read_bytes()
         assert (args.output / "transitions/0000-0001/0002" / f"{kind}.png").read_bytes() == (args.output / "stills/0001" / f"{kind}.png").read_bytes()
@@ -273,3 +327,13 @@ def test_render_style_and_inversion_are_saved_with_assets(tmp_path: Path):
         "dither": 0.005, "structure_dither": 0.06, "style": "structure",
         "invert_ink": True, "size": [12, 8], "screen": "nonexistent"})
     assert request["style"] == "structure" and request["invert_ink"] is True
+
+    default_args = argparse.Namespace(images=[image], output=tmp_path / "default-structure", size=(12, 8),
+        font="DejaVu Sans Mono", chars=DEFAULT_CHARS, cell=(3, 4), detail=1,
+        crop="fill", grayscale=False, frames=2, steps=2, transition_steps=2,
+        candidates=3, dither=0.003, structure_dither=0.06, style="structure",
+        invert_ink=False, background="auto", seed=1, device="cpu", force=False)
+    build(default_args)
+    default_manifest = json.loads((default_args.output / "manifest.json").read_text())
+    assert default_manifest["signature"]["chars"] == STRUCTURE_CHARS
+    assert default_manifest["signature"]["gradient_loss_strength"] == 0

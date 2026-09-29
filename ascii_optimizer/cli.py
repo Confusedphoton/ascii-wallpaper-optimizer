@@ -15,13 +15,11 @@ from PIL import Image
 
 from . import __version__
 from .assets import cell_for_display, glyph_masks, linear_to_srgb, load_target, resolve_font, save_atlas, save_metadata, srgb_to_linear
+from .defaults import DEFAULT_CHARS, DEFAULT_GRADIENT_LOSS_STRENGTH
 from .optimizer import Grid, _choose_background, render_grid, solve
 from .structure import STRUCTURE_CHARS, STRUCTURE_DITHER, solve_structure
 from .tone import display_tone, encode_headroom, encoded_background, invert_source
 from .transition import FIELDS, PACES, ease, glyph_paths, local_progress, path_glyphs, phase_offsets, recolor
-
-
-DEFAULT_CHARS = " .´:rszunvcxLOGDQ0KNMW&@\\=^"
 
 
 def _size(value: str) -> tuple[int, int]:
@@ -86,7 +84,7 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
     if objective_space not in ("linear_rgb", "oklab"):
         raise ValueError(f"Unknown objective space: {objective_space}")
     if gradient_loss_strength is None:
-        gradient_loss_strength = 1.5 if style == "headroom" else 0.0
+        gradient_loss_strength = DEFAULT_GRADIENT_LOSS_STRENGTH if style == "headroom" else 0.0
     if style == "structure" and glyph_luminance_bonus:
         raise ValueError("glyph_luminance_bonus is only available for the headroom objective")
     if style == "structure" and saturation_loss_strength:
@@ -134,7 +132,7 @@ def build(args: argparse.Namespace) -> None:
     invert_ink = bool(getattr(args, "invert_ink", False))
     gradient_loss_strength = getattr(args, "gradient_loss_strength", None)
     if gradient_loss_strength is None:
-        gradient_loss_strength = 1.5 if style == "headroom" else 0.0
+        gradient_loss_strength = DEFAULT_GRADIENT_LOSS_STRENGTH if style == "headroom" else 0.0
     structure_dither = float(getattr(args, "structure_dither", STRUCTURE_DITHER))
     transition_pace = getattr(args, "transition_pace", "ease-in-out")
     transition_field = getattr(args, "transition_field", "blue-noise")

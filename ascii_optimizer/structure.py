@@ -8,11 +8,11 @@ import numpy as np
 import torch
 
 from .assets import blue_noise, srgb_to_linear
+from .defaults import STRUCTURE_CHARS
 from .optimizer import Grid
 from .tone import gamut_map, rgb_to_oklab
 
 
-STRUCTURE_CHARS = " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&@[]{}"
 STRUCTURE_DITHER = 0.06
 
 

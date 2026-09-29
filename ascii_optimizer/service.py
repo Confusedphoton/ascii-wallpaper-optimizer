@@ -20,6 +20,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import __version__
+from .defaults import DEFAULT_GRADIENT_LOSS_STRENGTH
 
 PORT = 48741
 ADDRESS = "127.0.0.1"
@@ -83,12 +84,17 @@ def _validated_request(raw: dict) -> dict:
     transition_pace = str(raw.get("transition_pace", "ease-in-out"))
     transition_field = str(raw.get("transition_field", "blue-noise"))
     transition_spread = float(raw.get("transition_spread", 0.65))
+    gradient_loss_strength = float(raw.get(
+        "gradient_loss_strength",
+        DEFAULT_GRADIENT_LOSS_STRENGTH if style == "headroom" else 0.0))
     invert_ink = raw.get("invert_ink", False)
     background = str(raw.get("background", "auto"))
     if detail not in (0, 1, 2, 3, 4) or not 2 <= frames <= 120 or not 0 <= dither <= 0.05:
         raise ValueError("Detail, frame count, or dithering strength is out of range.")
     if style not in ("headroom", "structure") or not isinstance(invert_ink, bool) or not 0 <= structure_dither <= 0.12:
         raise ValueError("Render style, ink polarity, or structure dithering is invalid.")
+    if gradient_loss_strength < 0 or (style == "structure" and gradient_loss_strength != 0):
+        raise ValueError("Gradient loss must be nonnegative and is only available for headroom rendering.")
     if transition_pace not in ("linear", "ease-in", "ease-out", "ease-in-out") or transition_field not in (
             "blue-noise", "ripple", "spiral", "directional", "edge", "salience") or not 0 <= transition_spread <= 0.9:
         raise ValueError("Transition pace, field, or spread is invalid.")
@@ -113,7 +119,7 @@ def _validated_request(raw: dict) -> dict:
         "chars": chars, "detail": detail, "grayscale": bool(raw["grayscale"]),
         "frames": frames, "dither": dither, "structure_dither": structure_dither,
         "transition_pace": transition_pace, "transition_field": transition_field,
-        "transition_spread": transition_spread,
+        "transition_spread": transition_spread, "gradient_loss_strength": gradient_loss_strength,
         "style": style, "invert_ink": invert_ink,
         "background": background, "size": list(size),
     }
@@ -169,6 +175,7 @@ class RenderQueue:
                        "--transition-field", settings["transition_field"],
                        "--transition-spread", str(settings["transition_spread"]),
                        "--dither", str(settings["dither"]),
+                       "--gradient-loss-strength", str(settings["gradient_loss_strength"]),
                        "--style", settings["style"],
                        "--structure-dither", str(settings["structure_dither"]),
                        "--background", settings["background"], "--progress-json"]

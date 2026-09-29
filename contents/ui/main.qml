@@ -15,7 +15,8 @@ WallpaperItem {
     property int timeRevision: 0
     readonly property string scheduledProfile: {
         timeRevision
-        if (!wallpaper.configuration.ScheduleEnabled) return "A"
+        if (!wallpaper.configuration.ScheduleEnabled)
+            return wallpaper.configuration.ManualProfile === "B" ? "B" : "A"
         const parse = value => {
             const parts = String(value).split(":").map(Number)
             return parts.length === 2 && parts[0] >= 0 && parts[0] < 24 && parts[1] >= 0 && parts[1] < 60
@@ -61,22 +62,17 @@ WallpaperItem {
         transitionSpread: (wallpaper.configuration.TransitionSpread !== undefined)
             ? wallpaper.configuration.TransitionSpread : 0.65
         dither: (wallpaper.configuration.Dither !== undefined) ? wallpaper.configuration.Dither : 0.005
+        gradientLossStrength: (wallpaper.configuration.RenderStyle || "headroom") === "headroom"
+            ? ((wallpaper.configuration.GradientLossStrength !== undefined)
+                ? wallpaper.configuration.GradientLossStrength : 1.5) : 0
         structureDither: (wallpaper.configuration.StructureDither !== undefined)
             ? wallpaper.configuration.StructureDither : 0.06
         renderStyle: wallpaper.configuration.RenderStyle || "headroom"
         invertInk: !!wallpaper.configuration.InvertInk
         background: wallpaper.configuration.BackgroundMode === 1
             ? (wallpaper.configuration.BackgroundColor || "#202028") : "auto"
+        cachedDirectory: wallpaper.configuration.RenderDirectory || ""
         onRenderStateChanged: if (renderState === "ready") root.renderRevision++
-    }
-
-    Image {
-        anchors.fill: parent
-        source: root.configImages.length > 0 ? "file://" + String(root.configImages[0]).split("/").map(encodeURIComponent).join("/") : ""
-        sourceSize: Qt.size(Math.max(1, root.width), Math.max(1, root.height))
-        fillMode: Image.PreserveAspectCrop
-        asynchronous: true
-        visible: !shaderContainer.ready
     }
 
     Timer {
@@ -151,7 +147,7 @@ WallpaperItem {
         id: shaderContainer
         anchors.fill: parent
         
-        renderDirectory: renderer.renderState === "ready" ? renderer.directory : ""
+        renderDirectory: renderer.displayDirectory
         currentIndex: root.currentIdx
         nextIndex: root.nextIdx
         transitionFrames: root.transitionFrames

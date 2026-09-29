@@ -18,6 +18,7 @@
     <entry name="ModeB" type="String"><default>Image</default></entry>
     <entry name="ImagesB" type="StringList"><default></default></entry>
     <entry name="ScheduleEnabled" type="Bool"><default>false</default></entry>
+    <entry name="ManualProfile" type="String"><default>A</default></entry>
     <entry name="ProfileAStart" type="String"><default>07:00</default></entry>
     <entry name="ProfileBStart" type="String"><default>19:00</default></entry>
     <entry name="RenderDirectory" type="String">
@@ -34,7 +35,7 @@
         <max>4</max>
     </entry>
     <entry name="AsciiChars" type="StringList">
-      <default>\s,.,´,:,r,s,z,u,n,v,c,x,L,O,G,D,Q,0,K,N,M,W,&amp;,@</default>
+      <default>\s,.,´,:,r,s,z,u,n,v,c,x,L,O,G,D,Q,0,K,N,M,W,&amp;,@,\\,=,^</default>
     </entry>
     <entry name="FontFamily" type="String">
       <default>Monospace</default>
@@ -60,6 +61,11 @@
         <default>0.005</default>
         <min>0</min>
         <max>0.05</max>
+    </entry>
+    <entry name="GradientLossStrength" type="Double">
+        <default>1.5</default>
+        <min>0</min>
+        <max>4</max>
     </entry>
     <entry name="RenderStyle" type="String">
         <default>headroom</default>

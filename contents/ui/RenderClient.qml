@@ -7,7 +7,7 @@ Item {
 
     property var images: []
     property string fontFamily: "Monospace"
-    property string characters: " .´:rszunvcxLOGDQ0KNMW&@"
+    property string characters: " .´:rszunvcxLOGDQ0KNMW&@\\=^"
     property int detail: 1
     property bool grayscale: false
     property int frames: 16
@@ -15,10 +15,12 @@ Item {
     property string transitionField: "blue-noise"
     property real transitionSpread: 0.65
     property real dither: 0.005
+    property real gradientLossStrength: 1.5
     property real structureDither: 0.06
     property string renderStyle: "headroom"
     property bool invertInk: false
     property string background: "auto"
+    property string cachedDirectory: ""
     property string screenName: Screen.name || ""
     property int physicalWidth: Math.round(Screen.width * Screen.devicePixelRatio)
     property int physicalHeight: Math.round(Screen.height * Screen.devicePixelRatio)
@@ -29,12 +31,14 @@ Item {
     property string error: ""
     property real progress: 0
     property string directory: ""
+    property string displayDirectory: cachedDirectory
     property string jobId: ""
     property int requestSerial: 0
 
     readonly property string settingsKey: JSON.stringify({
         images: Array.from(images || []), font: fontFamily, chars: characters,
         detail: detail, grayscale: grayscale, frames: frames, dither: dither,
+        gradient_loss_strength: gradientLossStrength,
         transition_pace: transitionPace, transition_field: transitionField,
         transition_spread: transitionSpread,
         structure_dither: structureDither, style: renderStyle, invert_ink: invertInk,
@@ -77,7 +81,9 @@ Item {
         progress = Math.max(0, Math.min(1, Number(job.progress) || 0))
         directory = job.directory || ""
         jobId = job.id || ""
-        renderState = job.state || "error"
+        const state = job.state || "error"
+        renderState = state
+        if (state === "ready" && directory) displayDirectory = directory
     }
 
     function start(force) {
@@ -88,6 +94,7 @@ Item {
             renderState = "idle"
             stage = "Select an image"
             directory = ""
+            displayDirectory = ""
             jobId = ""
             return
         }

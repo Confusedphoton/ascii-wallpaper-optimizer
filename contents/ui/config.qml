@@ -24,6 +24,7 @@ Item {
     property string cfg_ModeB: "Image"
     property list<string> cfg_ImagesB: []
     property bool cfg_ScheduleEnabled: false
+    property string cfg_ManualProfile: "A"
     property string cfg_ProfileAStart: "07:00"
     property string cfg_ProfileBStart: "19:00"
     property int editProfile: 0
@@ -39,9 +40,11 @@ Item {
     property int cfg_BackgroundMode: 0
     property string cfg_BackgroundColor: "#202028"
     property string cfg_RenderStyle: "headroom"
-    readonly property string standardChars: " .´:rszunvcxLOGDQ0KNMW&@"
-    readonly property string structureChars: " .´:-_/|+rszunvcxLOGDQ0KNMW&@[]{}"
-    property list<string> cfg_AsciiChars: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@"]
+    readonly property string standardChars: " .´:rszunvcxLOGDQ0KNMW&@\\=^"
+    readonly property string legacyStandardChars: " .´:rszunvcxLOGDQ0KNMW&@"
+    readonly property string structureChars: " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&@[]{}"
+    readonly property string legacyStructureChars: " .´:-_/|+rszunvcxLOGDQ0KNMW&@[]{}"
+    property list<string> cfg_AsciiChars: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@", "\\", "=", "^"]
     property list<string> cfg_Images: []
     property var monoFonts: [cfg_FontFamily]
     property var fontFamiliesToCheck: []
@@ -58,9 +61,11 @@ Item {
 
     function applyStyleCharacters(style) {
         const current = Array.from(cfg_AsciiChars).join("")
-        if (style === "structure" && current === standardChars)
+        if (style === "structure" && (current === standardChars || current === legacyStandardChars
+                || current === legacyStructureChars))
             cfg_AsciiChars = Array.from(structureChars)
-        else if (style === "headroom" && current === structureChars)
+        else if (style === "headroom" && (current === legacyStandardChars
+                || current === structureChars || current === legacyStructureChars))
             cfg_AsciiChars = Array.from(standardChars)
     }
 
@@ -69,6 +74,7 @@ Item {
     property alias cfg_Grayscale: grayscaleCheck.checked
     property alias cfg_SlideInterval: intervalSlider.value
     property alias cfg_Dither: ditherSlider.value
+    property alias cfg_GradientLossStrength: gradientLossSlider.value
     property alias cfg_StructureDither: structureDitherSlider.value
     property alias cfg_InvertInk: invertInkCheck.checked
 
@@ -258,10 +264,12 @@ Item {
         transitionField: root.cfg_TransitionField
         transitionSpread: root.cfg_TransitionSpread
         dither: root.cfg_Dither
+        gradientLossStrength: root.cfg_RenderStyle === "headroom" ? root.cfg_GradientLossStrength : 0
         structureDither: root.cfg_StructureDither
         renderStyle: root.cfg_RenderStyle
         invertInk: root.cfg_InvertInk
         background: root.cfg_BackgroundMode === 1 ? root.cfg_BackgroundColor : "auto"
+        cachedDirectory: root.cfg_RenderDirectory
         onRenderStateChanged: {
             if (renderState === "ready") {
                 root.renderRevision++
@@ -411,15 +419,6 @@ Item {
                     return root.toFileUrl(path);
                 }
 
-                Image {
-                    anchors.fill: parent
-                    source: previewContainer.getPreviewPath(previewContainer.currentIdx)
-                    sourceSize: Qt.size(offscreenBuffer.width, offscreenBuffer.height)
-                    fillMode: Image.PreserveAspectCrop
-                    asynchronous: true
-                    visible: renderer.renderState !== "ready" || !previewShader.ready
-                }
-
                 Timer {
                     id: previewTimer
                     
@@ -465,7 +464,7 @@ Item {
                         id: previewShader
                         anchors.fill: parent
 
-                        renderDirectory: renderer.renderState === "ready" ? renderer.directory : ""
+                        renderDirectory: renderer.displayDirectory
                         currentIndex: previewContainer.currentIdx
                         nextIndex: previewContainer.nextIdx
                         transitionFrames: root.cfg_TransitionFrames
@@ -588,13 +587,36 @@ Item {
                 onActivated: index => root.editProfile = index
             }
 
-            Controls.CheckBox {
+            Controls.Switch {
                 Kirigami.FormData.label: "Time of Day:"
                 text: "Switch profiles automatically"
                 checked: root.cfg_ScheduleEnabled
                 onToggled: {
                     root.cfg_ScheduleEnabled = checked
                     if (root.configDialog) root.configDialog.changed = true
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Manual Profile:"
+                visible: !root.cfg_ScheduleEnabled
+
+                Controls.RadioButton {
+                    text: "Profile A"
+                    checked: root.cfg_ManualProfile === "A"
+                    onClicked: {
+                        root.cfg_ManualProfile = "A"
+                        if (root.configDialog) root.configDialog.changed = true
+                    }
+                }
+
+                Controls.RadioButton {
+                    text: "Profile B"
+                    checked: root.cfg_ManualProfile === "B"
+                    onClicked: {
+                        root.cfg_ManualProfile = "B"
+                        if (root.configDialog) root.configDialog.changed = true
+                    }
                 }
             }
 
@@ -822,7 +844,7 @@ Item {
             Controls.Label {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                text: "Changes render in the background. The source image remains visible until ASCII assets are ready."
+                text: "Changes render in the background. The last saved ASCII render stays visible until replacement assets are ready."
             }
 
             Controls.ComboBox {
@@ -1027,6 +1049,28 @@ Item {
                 Controls.Label {
                     Layout.preferredWidth: Kirigami.Units.gridUnit * 10
                     text: ditherSlider.value.toFixed(3)
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Sobel Edge Loss:"
+                visible: root.cfg_RenderStyle === "headroom"
+
+                Controls.Slider {
+                    id: gradientLossSlider
+                    Layout.fillWidth: true
+                    from: 0
+                    to: 4
+                    stepSize: 0.1
+                    value: 1.5
+                    onValueChanged: {
+                        if (root.controlsReady && root.configDialog)
+                            root.configDialog.changed = true
+                    }
+                }
+                Controls.Label {
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 10
+                    text: gradientLossSlider.value.toFixed(1)
                 }
             }
 
