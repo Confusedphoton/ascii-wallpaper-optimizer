@@ -46,6 +46,10 @@ def main() -> None:
     run("systemctl", "--user", "enable", "--now", "ascii-wallpaper-renderer.service")
     run("systemctl", "--user", "restart", "ascii-wallpaper-renderer.service")
     run("kbuildsycoca6", "--noincremental")
+    # Plasma keeps the previous QML and compiled shader in a running wallpaper
+    # instance even after kpackagetool upgrades the files on disk.
+    if action == "--upgrade":
+        run("systemctl", "--user", "try-restart", "plasma-plasmashell.service")
     print("Installed. Reopen wallpaper settings, then add ASCII Wallpaper Profile to your panel or dock.")
 
 

@@ -29,6 +29,10 @@ PlasmoidItem {
         xhr.send(method === "POST" ? JSON.stringify({profile: next}) : null)
     }
 
+    function toggleProfile(target) {
+        root.request("POST", root.profile === target ? "auto" : target)
+    }
+
     Timer {
         interval: 2000
         repeat: true
@@ -52,8 +56,8 @@ PlasmoidItem {
         Controls.Label { text: "ASCII Wallpaper Profile"; font.bold: true }
         Controls.Label { text: root.error || (root.profile === "auto" ? "Following time of day" : "Manual override: " + root.profile) }
         RowLayout {
-            Controls.Button { text: "A"; checkable: true; checked: root.profile === "A"; onClicked: root.request("POST", "A") }
-            Controls.Button { text: "B"; checkable: true; checked: root.profile === "B"; onClicked: root.request("POST", "B") }
+            Controls.Button { text: "A"; checkable: true; checked: root.profile === "A"; onClicked: root.toggleProfile("A") }
+            Controls.Button { text: "B"; checkable: true; checked: root.profile === "B"; onClicked: root.toggleProfile("B") }
         }
         Controls.Button { text: "Follow schedule"; enabled: root.profile !== "auto"; onClicked: root.request("POST", "auto") }
     }

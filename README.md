@@ -14,11 +14,11 @@ python3 -m venv .venv
 .venv/bin/python scripts/install.py
 ```
 
-If your Python installation does not include `pip`, `uv venv .venv` and `uv pip install --python .venv/bin/python -e .` work as well. Run the installer again after updating the project. It upgrades the Plasma package and restarts the local user service. Reopen wallpaper settings to load the updated QML.
+If your Python installation does not include `pip`, `uv venv .venv` and `uv pip install --python .venv/bin/python -e .` work as well. Run the installer again after updating the project. It upgrades the Plasma package and restarts the local user service. On an upgrade it also restarts the running Plasma shell so wallpapers load the new QML and shader; the desktop and panels briefly reload. Reopen wallpaper settings afterward.
 
 In Plasma's wallpaper settings, select **ASCII Wallpaper Optimizer** and choose an image or slideshow. Rendering starts automatically. A progress bar and status message appear in the settings and on the desktop while the source image is shown. The generated asset directory is recorded in **Render Cache**. **Render now** retries a failed render or rebuilds completed assets. Adjust style, ink polarity, font, characters, detail, grayscale, transition frames, dithering strength, and background color in **Appearance**; each change schedules another render.
 
-Use **Editing Profile** to set an independent image or slideshow for profiles A and B. Enable **Switch profiles automatically** and set the two `HH:MM` start times to follow local time of day. The two profiles share appearance and transition settings. Add **ASCII Wallpaper Profile** to a Plasma panel or dock after installation: click its compact button to pin A or B, hold it to open the choices, or select **Follow schedule** to clear the override. The override is shared by wallpapers using this plugin and persists across renderer restarts. A newly selected profile may need time to render its assets.
+Use **Editing Profile** to set an independent image or slideshow for profiles A and B. Enable **Switch profiles automatically** and set the two `HH:MM` start times to follow local time of day. The two profiles share appearance and transition settings. Add **ASCII Wallpaper Profile** to a Plasma panel or dock after installation: click its compact button to pin A or B, then hold it to open the choices. In the menu, click A or B to force that profile; click the selected profile again, or select **Follow schedule**, to clear the override. The override is shared by wallpapers using this plugin and persists across renderer restarts. A newly selected profile may need time to render its assets.
 
 You can also run the renderer from a terminal for export or batch work:
 
