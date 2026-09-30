@@ -50,6 +50,7 @@ WallpaperItem {
             " .´:rszunvcxLOGDQ0KNMW&@\\/=^|[]{}",
             " .´:rszunvcxLOGDQ0KNMW&@\\=^|[]{}",
             " .´:rszunvcxLOGDQ0KNMW&@",
+            " .´:rszunvcxLOGDQ0KNMW&@\\=^",
             " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&@[]{}",
             " .´:-_/|+rszunvcxLOGDQ0KNMW&@[]{}"
         ]

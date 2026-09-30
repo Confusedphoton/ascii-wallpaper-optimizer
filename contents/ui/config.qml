@@ -58,6 +58,7 @@ Item {
     readonly property string previousStandardChars: " .´:rszunvcxLOGDQ0KNMW&@\\/=^|[]{}"
     readonly property string legacyStandardChars: " .´:rszunvcxLOGDQ0KNMW&@\\=^|[]{}"
     readonly property string legacyOlderStandardChars: " .´:rszunvcxLOGDQ0KNMW&@"
+    readonly property string legacyOlderStandardWithBasicSymbolsChars: " .´:rszunvcxLOGDQ0KNMW&@\\=^"
     readonly property string structureChars: " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&#[]{}"
     readonly property string previousStructureChars: " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&@[]{}"
     readonly property string legacyStructureChars: " .´:-_/|+rszunvcxLOGDQ0KNMW&@[]{}"
@@ -79,10 +80,12 @@ Item {
         const current = Array.from(activeSettings.AsciiChars || []).join("")
         if (style === "structure" && (current === standardChars || current === previousStandardChars
                 || current === legacyStandardChars || current === legacyOlderStandardChars
+                || current === legacyOlderStandardWithBasicSymbolsChars
                 || current === structureChars || current === previousStructureChars || current === legacyStructureChars))
             setProfileSetting("AsciiChars", Array.from(structureChars))
         else if (style === "headroom" && (current === previousStandardChars || current === legacyStandardChars
-                || current === legacyOlderStandardChars || current === structureChars
+                || current === legacyOlderStandardChars || current === legacyOlderStandardWithBasicSymbolsChars
+                || current === structureChars
                 || current === previousStructureChars || current === legacyStructureChars))
             setProfileSetting("AsciiChars", Array.from(standardChars))
     }
@@ -106,6 +109,7 @@ Item {
     property real cfg_StructureDitherB: 0.06
     property bool cfg_InvertInkB: false
     property var activeSettings: ({})
+    property string glyphEditorMessage: ""
 
     property string cfg_Image: ""
 
@@ -145,6 +149,61 @@ Item {
         const suffix = editProfile === 0 ? "" : "B"
         root["cfg_" + name + suffix] = value
         if (root.configDialog) root.configDialog.changed = true
+    }
+
+    function restoreCharacterDefaults() {
+        const chars = activeSettings.RenderStyle === "structure" ? structureChars : standardChars
+        setProfileSetting("AsciiChars", Array.from(chars))
+        glyphEditorMessage = ""
+    }
+
+    function editGlyph(index, value) {
+        const glyphs = Array.from(activeSettings.AsciiChars || [])
+        const replacement = Array.from(value)
+        if (replacement.length !== 1) {
+            glyphEditorMessage = "Enter one glyph per item."
+            return false
+        }
+        if (glyphs.some((glyph, glyphIndex) => glyphIndex !== index && glyph === replacement[0])) {
+            glyphEditorMessage = "Each glyph must be unique."
+            return false
+        }
+        glyphs[index] = replacement[0]
+        setProfileSetting("AsciiChars", glyphs)
+        glyphEditorMessage = ""
+        return true
+    }
+
+    function addGlyph(value) {
+        const glyphs = Array.from(activeSettings.AsciiChars || [])
+        const addition = Array.from(value)
+        if (addition.length !== 1) {
+            glyphEditorMessage = "Enter one glyph to add."
+            return false
+        }
+        if (glyphs.length >= 256) {
+            glyphEditorMessage = "The glyph list can contain at most 256 characters."
+            return false
+        }
+        if (glyphs.includes(addition[0])) {
+            glyphEditorMessage = "Each glyph must be unique."
+            return false
+        }
+        glyphs.push(addition[0])
+        setProfileSetting("AsciiChars", glyphs)
+        glyphEditorMessage = ""
+        return true
+    }
+
+    function removeGlyph(index) {
+        const glyphs = Array.from(activeSettings.AsciiChars || [])
+        if (glyphs.length <= 1) {
+            glyphEditorMessage = "Keep at least one glyph in the list."
+            return
+        }
+        glyphs.splice(index, 1)
+        setProfileSetting("AsciiChars", glyphs)
+        glyphEditorMessage = ""
     }
 
     function initializeProfileSettings() {
@@ -923,50 +982,98 @@ Item {
                 Kirigami.FormData.label: "Characters:"
                 Layout.fillWidth: true
 
-                Grid {
+                Flow {
                     Layout.fillWidth: true
-
-                    columns: 12
                     spacing: Kirigami.Units.smallSpacing
 
                     Repeater {
                         model: root.activeSettings.AsciiChars
 
-                        delegate: Controls.TextField {
-                            id: glyphEditor
+                        delegate: Row {
                             required property int index
                             required property string modelData
-                            width: Kirigami.Units.gridUnit * 1.15
-                            height: Kirigami.Units.gridUnit * 1.45
+                            spacing: 1
+                            width: glyphEditor.width + removeGlyphButton.width + spacing
+                            height: Math.max(glyphEditor.height, removeGlyphButton.height)
 
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                                                        
-                            text: modelData
-                            font.family: root.activeSettings.FontFamily
+                            Controls.TextField {
+                                id: glyphEditor
+                                width: Kirigami.Units.gridUnit * 1.35
+                                height: Kirigami.Units.gridUnit * 1.45
 
-                            maximumLength: 1
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                                text: modelData
+                                font.family: root.activeSettings.FontFamily
 
-                            color: activeFocus ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
-                            background: Rectangle {
-                                radius: Kirigami.Units.smallSpacing
-                                color: glyphEditor.activeFocus
-                                    ? Kirigami.Theme.highlightColor
-                                    : Kirigami.Theme.alternateBackgroundColor
-                                border.width: 1
-                                border.color: glyphEditor.activeFocus
-                                    ? Kirigami.Theme.highlightColor
-                                    : Qt.alpha(Kirigami.Theme.textColor, 0.2)
+                                color: activeFocus ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
+                                background: Rectangle {
+                                    radius: Kirigami.Units.smallSpacing
+                                    color: glyphEditor.activeFocus
+                                        ? Kirigami.Theme.highlightColor
+                                        : Kirigami.Theme.alternateBackgroundColor
+                                    border.width: 1
+                                    border.color: glyphEditor.activeFocus
+                                        ? Kirigami.Theme.highlightColor
+                                        : Qt.alpha(Kirigami.Theme.textColor, 0.2)
+                                }
+
+                                onEditingFinished: {
+                                    if (!root.editGlyph(index, text))
+                                        text = modelData
+                                }
                             }
 
-                            onEditingFinished: {
-                                let arr = Array.from(root.activeSettings.AsciiChars)
-
-                                arr[index] = text
-                                root.setProfileSetting("AsciiChars", arr)
+                            Controls.ToolButton {
+                                id: removeGlyphButton
+                                width: Kirigami.Units.gridUnit * 1.1
+                                height: glyphEditor.height
+                                icon.name: "list-remove"
+                                Accessible.name: "Remove glyph"
+                                Controls.ToolTip.text: "Remove glyph"
+                                Controls.ToolTip.visible: hovered
+                                enabled: Array.from(root.activeSettings.AsciiChars || []).length > 1
+                                onClicked: root.removeGlyph(index)
                             }
                         }
                     }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Kirigami.Units.smallSpacing
+
+                    Controls.TextField {
+                        id: newGlyphField
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 5
+                        placeholderText: "Add one glyph"
+                        onAccepted: {
+                            if (root.addGlyph(text)) clear()
+                        }
+                    }
+
+                    Controls.Button {
+                        text: "Add"
+                        enabled: Array.from(newGlyphField.text).length === 1
+                        onClicked: {
+                            if (root.addGlyph(newGlyphField.text)) {
+                                newGlyphField.clear()
+                                newGlyphField.forceActiveFocus()
+                            }
+                        }
+                    }
+
+                    Controls.Button {
+                        text: "Restore defaults"
+                        onClicked: root.restoreCharacterDefaults()
+                    }
+                }
+
+                Controls.Label {
+                    Layout.fillWidth: true
+                    visible: root.glyphEditorMessage.length > 0
+                    text: root.glyphEditorMessage
+                    wrapMode: Text.WordWrap
                 }
             }
 
