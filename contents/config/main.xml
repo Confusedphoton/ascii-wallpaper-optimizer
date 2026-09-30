@@ -37,7 +37,7 @@
         <max>4</max>
     </entry>
     <entry name="AsciiChars" type="StringList">
-      <default>\s,.,´,:,r,s,z,u,n,v,c,x,L,O,G,D,Q,0,K,N,M,W,&amp;,@,#,\\,/,=,^,|,[,],{,}</default>
+      <default>\s,.,´,:,r,s,z,u,n,v,c,x,L,O,G,D,Q,0,K,N,M,W,&amp;,#,\\,/,=,^,|,[,],{,}</default>
     </entry>
     <entry name="FontFamily" type="String">
       <default>Monospace</default>
@@ -95,7 +95,7 @@
     </entry>
     <entry name="DetailB" type="Int"><default>1</default><min>0</min><max>4</max></entry>
     <entry name="AsciiCharsB" type="StringList">
-      <default>\s,.,´,:,r,s,z,u,n,v,c,x,L,O,G,D,Q,0,K,N,M,W,&amp;,@,#,\\,/,=,^,|,[,],{,}</default>
+      <default>\s,.,´,:,r,s,z,u,n,v,c,x,L,O,G,D,Q,0,K,N,M,W,&amp;,#,\\,/,=,^,|,[,],{,}</default>
     </entry>
     <entry name="FontFamilyB" type="String"><default>Monospace</default></entry>
     <entry name="GrayscaleB" type="Bool"><default>false</default></entry>

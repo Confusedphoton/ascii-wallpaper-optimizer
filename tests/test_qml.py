@@ -79,12 +79,14 @@ def test_qml_playback_and_client_lifecycle(tmp_path: Path) -> None:
             elif name == "timeout" and counts[name] == 1:
                 time.sleep(0.3)
                 self.reply(self.job(name, "late-reply"))
+            elif name == "queued":
+                self.reply(dict(self.job(name, "queued-ready"), state="queued", progress=0))
             else:
                 self.reply(self.job(name, "refresh-old" if name == "refresh" else name + "-ready"))
 
         def do_GET(self):
             parsed = urlsplit(self.path)
-            query = parse_qs(parsed.query)
+            query = parse_qs(parsed.query, keep_blank_values=True)
             assert query.get("client_id")
             assert "generation" in query
             name = parsed.path.rsplit("/", 1)[-1]

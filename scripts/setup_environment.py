@@ -47,12 +47,17 @@ def main() -> None:
 
     if args.backend == "auto":
         vendors = detect_gpu_vendors()
-        if vendors:
+        if "NVIDIA" in vendors:
             backend = "auto"
             print(
                 f"Detected {', '.join(sorted(vendors))} GPU(s); asking uv to choose a compatible PyTorch build.",
                 flush=True,
             )
+        elif "AMD" in vendors:
+            # Driver/library discovery can miss AMD GPUs even when /dev/kfd
+            # works. PCI detection must not silently install CPU-only torch.
+            backend = "rocm7.2"
+            print("Detected AMD GPU; selecting ROCm 7.2 PyTorch.", flush=True)
         else:
             backend = "cpu"
             print("No AMD or NVIDIA GPU detected; selecting CPU PyTorch.", flush=True)
@@ -62,8 +67,10 @@ def main() -> None:
             parser.error("ROCm PyTorch wheels are supported here only on Linux.")
         print(f"Using the requested {args.backend} PyTorch backend.", flush=True)
 
-    commands = (
-        ["uv", "venv", "--python", ">=3.10", str(VENV)],
+    commands = []
+    if not (VENV / "bin/python").is_file():
+        commands.append(["uv", "venv", "--python", ">=3.10", str(VENV)])
+    commands.extend((
         [
             "uv",
             "pip",
@@ -77,7 +84,9 @@ def main() -> None:
             "-e",
             ".",
         ],
-    )
+        [str(VENV / "bin/python"), "-m", "ascii_optimizer.runtime", "--backend",
+         "rocm" if backend.startswith("rocm") else "cuda" if backend != "cpu" else "cpu"],
+    ))
     try:
         for command in commands:
             print("+", " ".join(command), flush=True)

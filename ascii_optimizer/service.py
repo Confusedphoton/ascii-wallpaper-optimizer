@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
+from .revision import render_revision
 from .settings import normalize_options, validate_size
 
 PORT = 48741
@@ -111,7 +112,7 @@ def _validated_request(raw: dict) -> dict:
              "transition_pace", "transition_field", "transition_spread", "gradient_loss_strength",
              "glyph_luminance_bonus", "style", "invert_ink", "background", "crop", "steps",
              "transition_steps", "candidates", "seed")
-    return dict({name: options[name] for name in names}, version=__version__, images=images,
+    return dict({name: options[name] for name in names}, version=__version__, render_revision=render_revision(), images=images,
                 image_hashes=[_file_hash(Path(path)) for path in images],
                 font=str(font.resolve()), font_hash=_file_hash(font), size=list(size))
 
@@ -300,6 +301,7 @@ class RenderQueue:
                                     job["progress"] = float(update["progress"])
                                     job["stage"] = str(update["stage"])
                         elif line:
+                            print(line, flush=True)
                             recent_lines.append(line)
                             recent_lines = recent_lines[-12:]
                     code = process.wait()

@@ -40,13 +40,14 @@ WallpaperItem {
         const b = activeProfile === "B"
         const useBSettings = b && !!config.ProfileSettingsInitialized
         const setting = name => config[name + (useBSettings ? "B" : "")]
-        let chars = Array.from(setting("AsciiChars") || [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@", "#", "\\", "/", "=", "^", "|", "[", "]", "{", "}"])
+        let chars = Array.from(setting("AsciiChars") || [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "#", "\\", "/", "=", "^", "|", "[", "]", "{", "}"])
         if (chars.length && chars[0] === "\\s") chars[0] = " "
         const style = setting("RenderStyle") || "headroom"
         const currentChars = chars.join("")
         const standardChars = " .´:rszunvcxLOGDQ0KNMW&#\\/=^|[]{}"
         const structureChars = " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&#[]{}"
         const previousDefaults = [
+            " .´:rszunvcxLOGDQ0KNMW&@#\\/=^|[]{}",
             " .´:rszunvcxLOGDQ0KNMW&@\\/=^|[]{}",
             " .´:rszunvcxLOGDQ0KNMW&@\\=^|[]{}",
             " .´:rszunvcxLOGDQ0KNMW&@",

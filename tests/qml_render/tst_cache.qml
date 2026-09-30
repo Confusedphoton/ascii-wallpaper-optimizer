@@ -106,4 +106,35 @@ TestCase {
         item.renderDirectory = ""
         verify(!item.ready)
     }
+
+    function test_thumbnail_downsampling_preserves_glyph_coverage_and_colors() {
+        if (Screen.devicePixelRatio !== 1) skip("Pixel averages use a 1x thumbnail")
+        const item = createTemporaryObject(shaderComponent, tests, {
+            width: 4, height: 2, outputTextureSize: Qt.size(16, 8),
+            smoothOutput: true, mipmapOutput: true,
+            renderDirectory: TestConfig.fixtureRoot, generation: "thumbnail",
+            manifest: TestConfig.manifest, imageCount: 2
+        })
+        tryCompare(item, "ready", true, 2000)
+        tryCompare(item, "loading", false, 2000)
+        const image = grabImage(item)
+        const expected = TestConfig.pixels["stills/0000"]
+        compare(image.width, 4)
+        compare(image.height, 2)
+        for (let y = 0; y < 2; y++) {
+            for (let x = 0; x < 4; x++) {
+                const average = [0, 0, 0]
+                for (let dy = 0; dy < 4; dy++) {
+                    for (let dx = 0; dx < 4; dx++) {
+                        const offset = ((y * 4 + dy) * 16 + x * 4 + dx) * 3
+                        for (let channel = 0; channel < 3; channel++)
+                            average[channel] += expected[offset + channel] / 16
+                    }
+                }
+                verify(Math.abs(image.red(x, y) - average[0]) <= 2, "Red thumbnail coverage")
+                verify(Math.abs(image.green(x, y) - average[1]) <= 2, "Green thumbnail coverage")
+                verify(Math.abs(image.blue(x, y) - average[2]) <= 2, "Blue thumbnail coverage")
+            }
+        }
+    }
 }

@@ -29,7 +29,9 @@ Item {
     readonly property int frameCount: Math.max(2, Number(manifest.frame_count) || transitionFrames)
     readonly property int frameIndex: Math.max(0, Math.min(frameCount - 1,
         transitionFrame >= 0 ? transitionFrame : Math.floor(transitionProgress * (frameCount - 1))))
-    readonly property size outputTextureSize: Qt.size(Math.max(1, Math.round(width * Screen.devicePixelRatio)),
+    property bool smoothOutput: false
+    property bool mipmapOutput: false
+    property size outputTextureSize: Qt.size(Math.max(1, Math.round(width * Screen.devicePixelRatio)),
         Math.max(1, Math.round(height * Screen.devicePixelRatio)))
     readonly property string desiredKey: descriptor(currentIndex, nextIndex, frameIndex).key
     signal framePresented()
@@ -154,8 +156,8 @@ Item {
         format: ShaderEffectSource.RGBA8
         hideSource: true
         live: false
-        smooth: false
-        mipmap: false
+        smooth: asciiRoot.smoothOutput
+        mipmap: asciiRoot.mipmapOutput
         samples: 0
         visible: asciiRoot.ready || !!asciiRoot.pendingDescriptor
         onScheduledUpdateCompleted: asciiRoot.finishCapture()

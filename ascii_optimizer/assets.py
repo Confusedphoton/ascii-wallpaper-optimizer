@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 import subprocess
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageCms, ImageDraw, ImageFont, ImageOps
 
 
 # Keep levels 0–2 stable for saved configs; levels 3–4 add denser grids.
@@ -72,7 +73,20 @@ def save_metadata(size: tuple[int, int], cell: tuple[int, int], count: int, path
 def load_target(path: Path, size: tuple[int, int], crop: str, grayscale: bool) -> np.ndarray:
     width, height = size
     with Image.open(path) as original:
-        source = ImageOps.exif_transpose(original).convert("RGB")
+        source = ImageOps.exif_transpose(original)
+        # OKLab conversion expects sRGB, not unconverted Display P3/Adobe RGB
+        # channel values. Transform before resizing or calculating grayscale.
+        profile = original.info.get("icc_profile")
+        if profile:
+            try:
+                source = ImageCms.profileToProfile(
+                    source, ImageCms.ImageCmsProfile(BytesIO(profile)),
+                    ImageCms.createProfile("sRGB"), outputMode="RGB")
+            except (ImageCms.PyCMSError, OSError, ValueError):
+                # Preserve support for files with invalid or unsupported tags.
+                source = source.convert("RGB")
+        else:
+            source = source.convert("RGB")
         if crop == "fill":
             source = ImageOps.fit(source, size, method=Image.Resampling.LANCZOS)
         elif crop == "fit":

@@ -81,6 +81,15 @@ TestCase {
         compare(renderer.error, "")
     }
 
+    function test_queued_render_is_polled_until_its_assets_are_published() {
+        const renderer = client("/queued.png")
+        renderer.statusInterval = 20
+        renderer.start(false)
+        tryCompare(renderer, "renderState", "ready", 3000)
+        compare(renderer.displayGeneration, "queued-ready")
+        verify(renderer.displayDirectory.length > 0)
+    }
+
     function test_request_timeout_ignores_late_reply() {
         const renderer = client("/timeout.png")
         renderer.requestTimeout = 100

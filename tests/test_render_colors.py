@@ -230,3 +230,26 @@ def test_fit_crop_preserves_image_extent_and_black_borders_in_both_color_modes(t
     # Fill occupies the entire requested image instead of retaining fit borders.
     filled = load_target(path, (4, 4), "fill", grayscale)
     np.testing.assert_allclose(filled, np.broadcast_to(expected, (4, 4, 3)), atol=1e-7)
+
+
+def test_profiled_image_is_converted_to_srgb_before_color_solving(tmp_path):
+    from io import BytesIO
+    from PIL import ImageCms
+
+    # LAB has a different channel encoding; treating its bytes as RGB produces
+    # a strong hue shift. A tagged TIFF exercises the actual CMS conversion.
+    profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("LAB")).tobytes()
+    original = Image.new("LAB", (4, 4), (135, 180, 110))
+    path = tmp_path / "profiled.tif"
+    original.save(path, icc_profile=profile)
+    expected = ImageCms.profileToProfile(original, ImageCms.ImageCmsProfile(BytesIO(profile)),
+                                        ImageCms.createProfile("sRGB"), outputMode="RGB")
+    actual = load_target(path, (4, 4), "fill", False)
+    np.testing.assert_array_equal(np.rint(actual * 255).astype(np.uint8), np.asarray(expected))
+
+
+def test_invalid_color_profile_keeps_image_readable(tmp_path):
+    path = tmp_path / "invalid-profile.png"
+    Image.new("RGB", (4, 4), (90, 120, 150)).save(path, icc_profile=b"invalid ICC")
+    actual = load_target(path, (4, 4), "fill", False)
+    np.testing.assert_allclose(actual[0, 0], np.array([90, 120, 150]) / 255, atol=1e-7)

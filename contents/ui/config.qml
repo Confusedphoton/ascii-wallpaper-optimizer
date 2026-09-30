@@ -11,7 +11,6 @@ import "RenderSettings.js" as RenderSettings
 import QtQuick.Controls as Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
-import QtQuick.Effects
 import org.kde.kirigami as Kirigami
 
 Item {
@@ -22,6 +21,15 @@ Item {
 
     property var configDialog
     property var wallpaperConfiguration
+    signal configurationChanged()
+
+    Settings {
+        id: editorState
+        location: StandardPaths.writableLocation(StandardPaths.ConfigLocation)
+            + "/ascii-wallpaper-optimizer/editor.ini"
+        category: "WallpaperEditor"
+        property int lastProfile: -1
+    }
 
     property string cfg_Mode: "Image"
     property string cfg_ModeB: "Image"
@@ -55,6 +63,7 @@ Item {
     property string cfg_BackgroundColorB: "#202028"
     property string cfg_RenderStyleB: "headroom"
     readonly property string standardChars: " .´:rszunvcxLOGDQ0KNMW&#\\/=^|[]{}"
+    readonly property string previousStandardWithAtChars: " .´:rszunvcxLOGDQ0KNMW&@#\\/=^|[]{}"
     readonly property string previousStandardChars: " .´:rszunvcxLOGDQ0KNMW&@\\/=^|[]{}"
     readonly property string legacyStandardChars: " .´:rszunvcxLOGDQ0KNMW&@\\=^|[]{}"
     readonly property string legacyOlderStandardChars: " .´:rszunvcxLOGDQ0KNMW&@"
@@ -62,7 +71,7 @@ Item {
     readonly property string structureChars: " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&#[]{}"
     readonly property string previousStructureChars: " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&@[]{}"
     readonly property string legacyStructureChars: " .´:-_/|+rszunvcxLOGDQ0KNMW&@[]{}"
-    property list<string> cfg_AsciiChars: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@", "#", "\\", "/", "=", "^", "|", "[", "]", "{", "}"]
+    property list<string> cfg_AsciiChars: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "#", "\\", "/", "=", "^", "|", "[", "]", "{", "}"]
     property list<string> cfg_Images: []
     property var monoFonts: [cfg_FontFamily]
     property var fontFamiliesToCheck: []
@@ -78,12 +87,12 @@ Item {
 
     function applyStyleCharacters(style) {
         const current = Array.from(activeSettings.AsciiChars || []).join("")
-        if (style === "structure" && (current === standardChars || current === previousStandardChars
+        if (style === "structure" && (current === standardChars || current === previousStandardWithAtChars || current === previousStandardChars
                 || current === legacyStandardChars || current === legacyOlderStandardChars
                 || current === legacyOlderStandardWithBasicSymbolsChars
                 || current === structureChars || current === previousStructureChars || current === legacyStructureChars))
             setProfileSetting("AsciiChars", Array.from(structureChars))
-        else if (style === "headroom" && (current === previousStandardChars || current === legacyStandardChars
+        else if (style === "headroom" && (current === previousStandardWithAtChars || current === previousStandardChars || current === legacyStandardChars
                 || current === legacyOlderStandardChars || current === legacyOlderStandardWithBasicSymbolsChars
                 || current === structureChars
                 || current === previousStructureChars || current === legacyStructureChars))
@@ -100,7 +109,7 @@ Item {
     property real cfg_GlyphLuminanceBonus: 0.12
     property real cfg_StructureDither: 0.06
     property bool cfg_InvertInk: false
-    property list<string> cfg_AsciiCharsB: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@", "#", "\\", "/", "=", "^", "|", "[", "]", "{", "}"]
+    property list<string> cfg_AsciiCharsB: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "#", "\\", "/", "=", "^", "|", "[", "]", "{", "}"]
     property bool cfg_GrayscaleB: false
     property int cfg_SlideIntervalB: 10
     property real cfg_DitherB: 0.005
@@ -108,12 +117,12 @@ Item {
     property real cfg_GlyphLuminanceBonusB: 0.12
     property real cfg_StructureDitherB: 0.06
     property bool cfg_InvertInkB: false
-    property var activeSettings: ({})
+    property var activeSettings: makeProfileSettings()
     property string glyphEditorMessage: ""
 
     property string cfg_Image: ""
 
-    ListModel { id: imageList }
+    ListModel { id: imageList; objectName: "imageList" }
     property int _activePicker: -1
     property bool _isInternalUpdate: false
 
@@ -148,7 +157,7 @@ Item {
         activeSettings = next
         const suffix = editProfile === 0 ? "" : "B"
         root["cfg_" + name + suffix] = value
-        if (root.configDialog) root.configDialog.changed = true
+        root.configurationChanged()
     }
 
     function restoreCharacterDefaults() {
@@ -157,53 +166,30 @@ Item {
         glyphEditorMessage = ""
     }
 
-    function editGlyph(index, value) {
-        const glyphs = Array.from(activeSettings.AsciiChars || [])
-        const replacement = Array.from(value)
-        if (replacement.length !== 1) {
-            glyphEditorMessage = "Enter one glyph per item."
+    function setCharacters(value) {
+        const glyphs = Array.from(value)
+        if (glyphs.length < 1 || glyphs.length > 256) {
+            glyphEditorMessage = "Enter between 1 and 256 characters."
             return false
         }
-        if (glyphs.some((glyph, glyphIndex) => glyphIndex !== index && glyph === replacement[0])) {
-            glyphEditorMessage = "Each glyph must be unique."
+        if (new Set(glyphs).size !== glyphs.length) {
+            glyphEditorMessage = "Each character must be unique (including spaces)."
             return false
         }
-        glyphs[index] = replacement[0]
+        if (/[\r\n\t]/.test(value)) {
+            glyphEditorMessage = "Use printable characters and spaces."
+            return false
+        }
         setProfileSetting("AsciiChars", glyphs)
         glyphEditorMessage = ""
         return true
     }
 
-    function addGlyph(value) {
-        const glyphs = Array.from(activeSettings.AsciiChars || [])
-        const addition = Array.from(value)
-        if (addition.length !== 1) {
-            glyphEditorMessage = "Enter one glyph to add."
-            return false
-        }
-        if (glyphs.length >= 256) {
-            glyphEditorMessage = "The glyph list can contain at most 256 characters."
-            return false
-        }
-        if (glyphs.includes(addition[0])) {
-            glyphEditorMessage = "Each glyph must be unique."
-            return false
-        }
-        glyphs.push(addition[0])
-        setProfileSetting("AsciiChars", glyphs)
-        glyphEditorMessage = ""
-        return true
-    }
-
-    function removeGlyph(index) {
-        const glyphs = Array.from(activeSettings.AsciiChars || [])
-        if (glyphs.length <= 1) {
-            glyphEditorMessage = "Keep at least one glyph in the list."
-            return
-        }
-        glyphs.splice(index, 1)
-        setProfileSetting("AsciiChars", glyphs)
-        glyphEditorMessage = ""
+    // Plasma calls this before copying cfg_ properties on Apply/OK.
+    function saveConfig() {
+        if (!root.setCharacters(characterField.text))
+            characterField.text = Array.from(activeSettings.AsciiChars || []).join("")
+        syncToConfig()
     }
 
     function initializeProfileSettings() {
@@ -218,14 +204,20 @@ Item {
     }
 
     onCfg_ImagesChanged: {
-        if (editProfile === 0) loadFromConfig();
+        if (controlsReady && editProfile === 0) loadFromConfig();
     }
-    onCfg_ImagesBChanged: if (editProfile === 1) loadFromConfig()
+    onCfg_ImagesBChanged: if (controlsReady && editProfile === 1) loadFromConfig()
     onEditProfileChanged: {
+        if (!controlsReady) return
+        editorState.lastProfile = editProfile
+        editorState.sync()
         activeSettings = makeProfileSettings()
+        glyphEditorMessage = ""
         loadFromConfig()
-        if (controlsReady) previewContainer.resetPreview()
+        previewContainer.resetPreview()
     }
+    onEditModeChanged: if (controlsReady) loadFromConfig()
+
     onCfg_FontFamilyChanged: {
         if (!monoFonts.includes(cfg_FontFamily))
             monoFonts = [cfg_FontFamily].concat(monoFonts)
@@ -236,6 +228,7 @@ Item {
         if (!monoFonts.includes(activeSettings.FontFamily))
             monoFonts = [activeSettings.FontFamily].concat(monoFonts)
         fontCombo.editText = activeSettings.FontFamily
+        characterField.text = Array.from(activeSettings.AsciiChars || []).join("")
     }
 
     function loadFromConfig() {
@@ -245,7 +238,9 @@ Item {
         imageList.clear();
 
         let migrated = false;
-        let currentImages = Array.from(root.editImages || []);
+        // Derived bindings can still contain the previous profile while its
+        // change handler is running. Read this profile's storage directly.
+        let currentImages = Array.from((editProfile === 0 ? cfg_Images : cfg_ImagesB) || []);
 
         if (editProfile === 0 && root.cfg_Image && root.cfg_Image.trim() !== "") {
             const cleaned = root.cfg_Image.trim();
@@ -285,7 +280,7 @@ Item {
             imageList.append({ "path": decoded });
         }
 
-        if (imageList.count === 0 && root.editMode !== "Slideshow") {
+        if (imageList.count === 0 && (editProfile === 0 ? cfg_Mode : cfg_ModeB) !== "Slideshow") {
             imageList.append({ "path": "" });
         }
 
@@ -312,9 +307,7 @@ Item {
         
         if (editProfile === 0) root.cfg_Images = Array.from(unique);
         else root.cfg_ImagesB = Array.from(unique);
-        if (root.configDialog) {
-            root.configDialog.changed = true;
-        }
+        root.configurationChanged()
         _isInternalUpdate = false;
     }
 
@@ -339,12 +332,14 @@ Item {
     }
 
     function cleanPath(url) {
-        const stripped = String(url).replace(/^file:\/{2}/, "").trim();
-        
+        const path = String(url).trim()
+        // Filesystem paths can contain literal percent escapes. Decode URLs once.
+        if (!path.startsWith("file://")) return path
+        const stripped = path.slice(7)
         try {
-            return decodeURIComponent(stripped);
+            return decodeURIComponent(stripped)
         } catch (e) {
-            return stripped;
+            return stripped
         }
     }
 
@@ -355,15 +350,18 @@ Item {
         return "file://" + clean.split("/").map(encodeURIComponent).join("/");
     }
 
-    Component.onCompleted: {
-        initializeProfileSettings()
-        activeSettings = makeProfileSettings()
-        loadFromConfig()
-        applyStyleCharacters(activeSettings.RenderStyle)
-        fontCombo.editText = activeSettings.FontFamily
-        startFontScan()
-        Qt.callLater(function() { root.controlsReady = true })
-    }
+    Component.onCompleted: Qt.callLater(function() {
+        // Wait until Plasma has supplied every cfg_ property before migrations.
+        root.editProfile = editorState.lastProfile === 0 || editorState.lastProfile === 1
+            ? editorState.lastProfile : root.cfg_ManualProfile === "B" ? 1 : 0
+        root.initializeProfileSettings()
+        root.activeSettings = root.makeProfileSettings()
+        root.loadFromConfig()
+        root.applyStyleCharacters(root.activeSettings.RenderStyle)
+        fontCombo.editText = root.activeSettings.FontFamily
+        root.controlsReady = true
+        root.startFontScan()
+    })
 
     function startFontScan() {
         if (fontScanStarted) return
@@ -397,13 +395,15 @@ Item {
 
     RenderClient {
         id: renderer
+        objectName: "renderClient"
+        autoStart: root.controlsReady
         requestSettings: RenderSettings.request(
             root.editMode === "Slideshow" ? Array.from(root.editImages) : Array.from(root.editImages).slice(0, 1), root.activeSettings)
         cachedDirectory: root.activeSettings.RenderDirectory
         playbackSettings: ({mode: root.editMode, slideInterval: root.activeSettings.SlideInterval,
             transitionDuration: root.activeSettings.TransitionDuration})
         onAssetsReady: {
-            if (root.activeSettings.RenderDirectory !== displayDirectory)
+            if (root.controlsReady && root.activeSettings.RenderDirectory !== displayDirectory)
                 root.setProfileSetting("RenderDirectory", displayDirectory)
         }
     }
@@ -533,63 +533,26 @@ Item {
                     transitionDuration: renderer.displayPlaybackSettings.transitionDuration || 1500
                 }
 
-                Item {
-                    id: offscreenBuffer
-
-                    width: 854
-                    height: Math.max(1, Math.round(width * renderer.physicalHeight
-                        / Math.max(1, renderer.physicalWidth)))
-
-                    AsciiShader {
-                        id: previewShader
-                        anchors.fill: parent
-
-                        renderDirectory: renderer.displayDirectory
-                        generation: renderer.displayGeneration
-                        manifest: renderer.displayManifest
-                        imageCount: renderer.displayImageCount
-                        currentIndex: previewPlayback.currentIndex
-                        nextIndex: previewPlayback.nextIndex
-                        transitionProgress: previewPlayback.transitionProgress
-                        transitionFrame: previewPlayback.transitionFrame
-                        transitionFrames: renderer.displayFrameCount
-                    }
-                }
-
-                Rectangle {
-                    id: maskRect
+                AsciiShader {
+                    id: previewShader
+                    objectName: "previewShader"
                     anchors.fill: parent
-                    radius: Kirigami.Units.mediumSpacing
-                    
-                    visible: false
-                    layer.enabled: true
-                }
+                    // Compose at display resolution before shrinking the glyphs.
+                    // Sampling the maps directly at thumbnail size aliases their
+                    // coverage and changes the apparent brightness and colors.
+                    outputTextureSize: Qt.size(renderer.physicalWidth, renderer.physicalHeight)
+                    smoothOutput: true
+                    mipmapOutput: true
 
-                ShaderEffectSource {
-                    id: previewImage
-                    sourceItem: offscreenBuffer
-
-                    anchors.fill: parent
-                    textureSize: Qt.size(offscreenBuffer.width, offscreenBuffer.height)
-                    format: ShaderEffectSource.RGBA8
-
-                    mipmap: false
-                    smooth: true
-                    samples: 0
-
-                    live: true
-                    hideSource: true
-                    recursive: false
-                    
-                    visible: false
-                }
-
-                MultiEffect {
-                    anchors.fill: parent
-                    source: previewImage
-                    maskEnabled: true
-                    maskSource: maskRect
-                    visible: previewShader.ready
+                    renderDirectory: renderer.displayDirectory
+                    generation: renderer.displayGeneration
+                    manifest: renderer.displayManifest
+                    imageCount: renderer.displayImageCount
+                    currentIndex: previewPlayback.currentIndex
+                    nextIndex: previewPlayback.nextIndex
+                    transitionProgress: previewPlayback.transitionProgress
+                    transitionFrame: previewPlayback.transitionFrame
+                    transitionFrames: renderer.displayFrameCount
                 }
 
                 Controls.Label {
@@ -659,6 +622,78 @@ Item {
 
             Kirigami.Separator {
                 Kirigami.FormData.isSection: true
+                Kirigami.FormData.label: "Profile Mode"
+            }
+
+            Controls.ComboBox {
+                Kirigami.FormData.label: "Editing Profile:"
+                Layout.fillWidth: true
+                model: ["Profile A", "Profile B"]
+                currentIndex: root.editProfile
+                onActivated: index => root.editProfile = index
+            }
+
+            Controls.Switch {
+                Kirigami.FormData.label: "Time of Day:"
+                text: "Switch profiles automatically"
+                checked: root.cfg_ScheduleEnabled
+                onToggled: {
+                    root.cfg_ScheduleEnabled = checked
+                    root.configurationChanged()
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Manual Profile:"
+                visible: !root.cfg_ScheduleEnabled
+
+                Controls.RadioButton {
+                    text: "Profile A"
+                    checked: root.cfg_ManualProfile === "A"
+                    onClicked: {
+                        root.cfg_ManualProfile = "A"
+                        root.configurationChanged()
+                    }
+                }
+
+                Controls.RadioButton {
+                    text: "Profile B"
+                    checked: root.cfg_ManualProfile === "B"
+                    onClicked: {
+                        root.cfg_ManualProfile = "B"
+                        root.configurationChanged()
+                    }
+                }
+            }
+
+            Controls.TextField {
+                Kirigami.FormData.label: "Profile A From:"
+                visible: root.cfg_ScheduleEnabled
+                text: root.cfg_ProfileAStart
+                inputMask: "99:99"
+                onEditingFinished: {
+                    if (/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(text)) {
+                        root.cfg_ProfileAStart = text
+                        root.configurationChanged()
+                    } else text = root.cfg_ProfileAStart
+                }
+            }
+
+            Controls.TextField {
+                Kirigami.FormData.label: "Profile B From:"
+                visible: root.cfg_ScheduleEnabled
+                text: root.cfg_ProfileBStart
+                inputMask: "99:99"
+                onEditingFinished: {
+                    if (/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(text)) {
+                        root.cfg_ProfileBStart = text
+                        root.configurationChanged()
+                    } else text = root.cfg_ProfileBStart
+                }
+            }
+
+            Kirigami.Separator {
+                Kirigami.FormData.isSection: true
                 Kirigami.FormData.label: "Source"
             }
 
@@ -680,7 +715,7 @@ Item {
                         root.syncToConfig()
                     }
 
-                    if (root.configDialog) root.configDialog.changed = true
+                    root.configurationChanged()
                 }
             }
 
@@ -834,78 +869,6 @@ Item {
 
             Kirigami.Separator {
                 Kirigami.FormData.isSection: true
-                Kirigami.FormData.label: "Profile Mode"
-            }
-
-            Controls.ComboBox {
-                Kirigami.FormData.label: "Editing Profile:"
-                Layout.fillWidth: true
-                model: ["Profile A", "Profile B"]
-                currentIndex: root.editProfile
-                onActivated: index => root.editProfile = index
-            }
-
-            Controls.Switch {
-                Kirigami.FormData.label: "Time of Day:"
-                text: "Switch profiles automatically"
-                checked: root.cfg_ScheduleEnabled
-                onToggled: {
-                    root.cfg_ScheduleEnabled = checked
-                    if (root.configDialog) root.configDialog.changed = true
-                }
-            }
-
-            RowLayout {
-                Kirigami.FormData.label: "Manual Profile:"
-                visible: !root.cfg_ScheduleEnabled
-
-                Controls.RadioButton {
-                    text: "Profile A"
-                    checked: root.cfg_ManualProfile === "A"
-                    onClicked: {
-                        root.cfg_ManualProfile = "A"
-                        if (root.configDialog) root.configDialog.changed = true
-                    }
-                }
-
-                Controls.RadioButton {
-                    text: "Profile B"
-                    checked: root.cfg_ManualProfile === "B"
-                    onClicked: {
-                        root.cfg_ManualProfile = "B"
-                        if (root.configDialog) root.configDialog.changed = true
-                    }
-                }
-            }
-
-            Controls.TextField {
-                Kirigami.FormData.label: "Profile A From:"
-                visible: root.cfg_ScheduleEnabled
-                text: root.cfg_ProfileAStart
-                inputMask: "99:99"
-                onEditingFinished: {
-                    if (/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(text)) {
-                        root.cfg_ProfileAStart = text
-                        if (root.configDialog) root.configDialog.changed = true
-                    } else text = root.cfg_ProfileAStart
-                }
-            }
-
-            Controls.TextField {
-                Kirigami.FormData.label: "Profile B From:"
-                visible: root.cfg_ScheduleEnabled
-                text: root.cfg_ProfileBStart
-                inputMask: "99:99"
-                onEditingFinished: {
-                    if (/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(text)) {
-                        root.cfg_ProfileBStart = text
-                        if (root.configDialog) root.configDialog.changed = true
-                    } else text = root.cfg_ProfileBStart
-                }
-            }
-
-            Kirigami.Separator {
-                Kirigami.FormData.isSection: true
                 Kirigami.FormData.label: "Style"
             }
 
@@ -982,87 +945,28 @@ Item {
                 Kirigami.FormData.label: "Characters:"
                 Layout.fillWidth: true
 
-                Flow {
+                Controls.TextField {
+                    id: characterField
+                    objectName: "characterField"
                     Layout.fillWidth: true
-                    spacing: Kirigami.Units.smallSpacing
-
-                    Repeater {
-                        model: root.activeSettings.AsciiChars
-
-                        delegate: Row {
-                            required property int index
-                            required property string modelData
-                            spacing: 1
-                            width: glyphEditor.width + removeGlyphButton.width + spacing
-                            height: Math.max(glyphEditor.height, removeGlyphButton.height)
-
-                            Controls.TextField {
-                                id: glyphEditor
-                                width: Kirigami.Units.gridUnit * 1.35
-                                height: Kirigami.Units.gridUnit * 1.45
-
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
-                                text: modelData
-                                font.family: root.activeSettings.FontFamily
-
-                                color: activeFocus ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
-                                background: Rectangle {
-                                    radius: Kirigami.Units.smallSpacing
-                                    color: glyphEditor.activeFocus
-                                        ? Kirigami.Theme.highlightColor
-                                        : Kirigami.Theme.alternateBackgroundColor
-                                    border.width: 1
-                                    border.color: glyphEditor.activeFocus
-                                        ? Kirigami.Theme.highlightColor
-                                        : Qt.alpha(Kirigami.Theme.textColor, 0.2)
-                                }
-
-                                onEditingFinished: {
-                                    if (!root.editGlyph(index, text))
-                                        text = modelData
-                                }
-                            }
-
-                            Controls.ToolButton {
-                                id: removeGlyphButton
-                                width: Kirigami.Units.gridUnit * 1.1
-                                height: glyphEditor.height
-                                icon.name: "list-remove"
-                                Accessible.name: "Remove glyph"
-                                Controls.ToolTip.text: "Remove glyph"
-                                Controls.ToolTip.visible: hovered
-                                enabled: Array.from(root.activeSettings.AsciiChars || []).length > 1
-                                onClicked: root.removeGlyph(index)
-                            }
-                        }
+                    text: Array.from(root.activeSettings.AsciiChars || []).join("")
+                    font.family: root.activeSettings.FontFamily
+                    selectByMouse: true
+                    Accessible.name: "ASCII characters"
+                    onTextEdited: root.setCharacters(text)
+                    onEditingFinished: {
+                        if (!root.setCharacters(text))
+                            text = Array.from(root.activeSettings.AsciiChars || []).join("")
                     }
                 }
 
                 RowLayout {
                     Layout.fillWidth: true
-                    spacing: Kirigami.Units.smallSpacing
-
-                    Controls.TextField {
-                        id: newGlyphField
-                        Layout.preferredWidth: Kirigami.Units.gridUnit * 5
-                        placeholderText: "Add one glyph"
-                        onAccepted: {
-                            if (root.addGlyph(text)) clear()
-                        }
+                    Controls.Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        text: "One copy of each character. Spaces count as characters."
                     }
-
-                    Controls.Button {
-                        text: "Add"
-                        enabled: Array.from(newGlyphField.text).length === 1
-                        onClicked: {
-                            if (root.addGlyph(newGlyphField.text)) {
-                                newGlyphField.clear()
-                                newGlyphField.forceActiveFocus()
-                            }
-                        }
-                    }
-
                     Controls.Button {
                         text: "Restore defaults"
                         onClicked: root.restoreCharacterDefaults()

@@ -5,9 +5,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
+import threading
 import uuid
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable
 
@@ -16,10 +20,12 @@ import torch
 from PIL import Image
 
 from . import __version__
+from .revision import render_revision
 from .assets import cell_for_display, glyph_masks, load_target, resolve_font, save_atlas, save_metadata
 from .defaults import (DEFAULT_CHARS, DEFAULT_GRADIENT_LOSS_STRENGTH,
                        DEFAULT_GLYPH_LUMINANCE_BONUS, MAX_GLYPH_LUMINANCE_BONUS)
-from .optimizer import Grid, _choose_background, fit_fixed_glyphs, render_grid, solve
+from .optimizer import Grid, _choose_background, _color_matrices, fit_fixed_glyphs, render_grid, solve
+from .runtime import select_device
 from .settings import normalize_options, validate_size
 from .structure import STRUCTURE_CHARS, fit_structure_colors, solve_structure
 from .tone import (display_tone_lab, encode_headroom_lab,
@@ -206,14 +212,84 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
     return grid
 
 
+def _render_transition(index: int, images: list[Path], output: Path,
+                       args: argparse.Namespace, masks: np.ndarray, cell: tuple[int, int],
+                       paths: list[list[list[int]]], report: Callable[[float, str], None]) -> dict:
+    """Render one pair in order, retaining its previous-frame color objective."""
+    following = (index + 1) % len(images)
+    base = output / "transitions" / f"{index:04d}-{following:04d}"
+    backgrounds = {}
+    print(f"Optimizing transition {index + 1}/{len(images)}", flush=True)
+    start = _load_grid(output / "stills" / f"{index:04d}")
+    destination = _load_grid(output / "stills" / f"{following:04d}")
+    previous = start
+    shape = previous.glyph.shape
+    longest = max(len(paths[int(a)][int(b)]) - 1 for a, b in np.unique(
+        np.stack((previous.glyph.ravel(), destination.glyph.ravel()), axis=1), axis=0))
+    if longest > args.frames - 1:
+        raise ValueError(f"This transition needs at least {longest + 1} frames for adjacent glyph steps")
+    source_target = load_target(images[index], args.size, args.crop, args.grayscale)
+    destination_target = load_target(images[following], args.size, args.crop, args.grayscale)
+    offsets = phase_offsets(shape, args.transition_field, args.seed + index * 10007,
+                            source_target)
+    cell_height, cell_width = cell[1], cell[0]
+    for frame in range(args.frames):
+        fraction = frame / (args.frames - 1)
+        progress = ease(fraction, args.transition_pace)
+        if frame == 0:
+            grid = start
+        elif frame == args.frames - 1:
+            grid = destination
+        else:
+            local = local_progress(progress, offsets, args.transition_spread)
+            pixel_progress = np.repeat(np.repeat(local, cell_height, axis=0), cell_width, axis=1)
+            pixel_progress = pixel_progress[:args.size[1], :args.size[0], None]
+            target = (1 - pixel_progress) * source_target + pixel_progress * destination_target
+            glyphs = path_glyphs(start.glyph, destination.glyph, local, paths,
+                                previous.glyph, args.frames - 1 - frame)
+            source_lab = srgb_to_oklab(target)
+            original_background, solve_background = _backgrounds(source_lab, args.background, args.invert_ink)
+            if args.style == "headroom":
+                grid = fit_fixed_glyphs(
+                    encode_headroom_lab(source_lab, invert_ink=args.invert_ink), masks, glyphs,
+                    background_oklab=solve_background, input_oklab=True,
+                    steps=args.transition_steps, device=args.device,
+                    previous=previous, destination=destination, progress=float(local.mean()),
+                    glyph_luminance_bonus=args.glyph_luminance_bonus,
+                    gradient_loss_strength=float(args.gradient_loss_strength),
+                    saturation_target_oklab=source_lab, gradient_target_oklab=source_lab,
+                    invert_ink=args.invert_ink,
+                    on_progress=lambda fraction, stage, index=index, frame=frame: report(
+                        frame - 1 + fraction, f"Transition {index + 1}/{len(images)}, frame {frame + 1}/{args.frames}: {stage}"))
+            else:
+                selection = invert_source(target) if args.invert_ink else target
+                grid = fit_structure_colors(selection, masks, glyphs,
+                                            solve_background if args.invert_ink else original_background)
+                grid.background = solve_background
+            del target, source_lab
+        frame_dir = base / f"{frame:04d}"
+        if frame in (0, args.frames - 1):
+            _copy_grid(output / "stills" / f"{index if frame == 0 else following:04d}", frame_dir)
+        else:
+            grid = _save_grid(grid, frame_dir, False, masks, args.size, args.invert_ink)
+        backgrounds[f"transitions/{index:04d}-{following:04d}/{frame:04d}"] = grid.background.tolist()
+        previous = grid
+        if frame not in (0, args.frames - 1):
+            report(float(frame), f"Transition {index + 1}/{len(images)}: finished frame {frame + 1}/{args.frames}")
+    return backgrounds
+
+
 def build(args: argparse.Namespace) -> None:
     vars(args).update(normalize_options(vars(args)))
+    transition_workers = getattr(args, "transition_workers", 2)
+    if isinstance(transition_workers, bool) or not isinstance(transition_workers, int) or transition_workers < 1:
+        raise ValueError("transition_workers must be a positive integer")
+    args.device = select_device(args.device)
     args.size = validate_size(args.size)
     style, invert_ink = args.style, args.invert_ink
     glyph_luminance_bonus = args.glyph_luminance_bonus
     gradient_loss_strength = args.gradient_loss_strength
     structure_dither = args.structure_dither
-    transition_pace, transition_field, transition_spread = args.transition_pace, args.transition_field, args.transition_spread
     if not args.images:
         raise ValueError("At least one source image is required")
     report_progress = getattr(args, "progress_json", False)
@@ -240,7 +316,7 @@ def build(args: argparse.Namespace) -> None:
         if not path.is_file():
             raise FileNotFoundError(path)
     signature = {
-        "version": __version__, "images": [str(path) for path in images],
+        "version": __version__, "render_revision": render_revision(), "images": [str(path) for path in images],
         "image_hashes": [_file_hash(path) for path in images],
         "font": str(font), "font_hash": _file_hash(font),
         "size": list(args.size), "cell": list(cell), "detail": args.detail, "chars": effective_chars,
@@ -250,8 +326,8 @@ def build(args: argparse.Namespace) -> None:
         "crop": args.crop, "grayscale": args.grayscale,
         "frames": args.frames, "steps": args.steps,
         "transition_steps": args.transition_steps,
-        "transition_pace": transition_pace, "transition_field": transition_field,
-        "transition_spread": transition_spread,
+        "transition_pace": args.transition_pace, "transition_field": args.transition_field,
+        "transition_spread": args.transition_spread,
         "candidates": args.candidates, "dither": args.dither, "background": args.background, "seed": args.seed,
     }
     output = args.output.expanduser().resolve()
@@ -292,8 +368,8 @@ def build(args: argparse.Namespace) -> None:
     old_hashes = old_signature.get("image_hashes", [])
     if not isinstance(old_hashes, list):
         old_hashes = []
-    # Keep grids on disk. Source arrays are loaded only for one still or one
-    # transition pair, so slideshow length does not determine image RAM usage.
+    # Keep grids on disk. Each transition worker loads only its active pair,
+    # so source-image memory is bounded by worker count, not slideshow length.
     background_labs: dict[str, list[float]] = {}
     grid_shape = None
     for index, image in enumerate(images):
@@ -337,6 +413,7 @@ def build(args: argparse.Namespace) -> None:
         report(0.0, f"Finished image {index + 1}/{len(images)}")
     if len(images) > 1:
         paths = glyph_paths(masks)
+        pending_pairs = []
         for index in range(len(images)):
             following = (index + 1) % len(images)
             base = output / "transitions" / f"{index:04d}-{following:04d}"
@@ -352,65 +429,59 @@ def build(args: argparse.Namespace) -> None:
                 completed_units += args.frames - 2
                 report(0.0, f"Reused transition {index + 1}/{len(images)}")
                 continue
-            print(f"Optimizing transition {index + 1}/{len(images)}", flush=True)
-            start = _load_grid(output / "stills" / f"{index:04d}")
-            destination = _load_grid(output / "stills" / f"{following:04d}")
-            previous = start
-            shape = previous.glyph.shape
-            longest = max(len(paths[int(a)][int(b)]) - 1 for a, b in np.unique(
-                np.stack((previous.glyph.ravel(), destination.glyph.ravel()), axis=1), axis=0))
-            if longest > args.frames - 1:
-                raise ValueError(f"This transition needs at least {longest + 1} frames for adjacent glyph steps")
-            source_target = load_target(images[index], args.size, args.crop, args.grayscale)
-            destination_target = load_target(images[following], args.size, args.crop, args.grayscale)
-            offsets = phase_offsets(shape, transition_field, args.seed + index * 10007,
-                                    source_target)
-            cell_height, cell_width = cell[1], cell[0]
-            for frame in range(args.frames):
-                fraction = frame / (args.frames - 1)
-                progress = ease(fraction, transition_pace)
-                if frame == 0:
-                    grid = start
-                elif frame == args.frames - 1:
-                    grid = destination
-                else:
-                    local = local_progress(progress, offsets, transition_spread)
-                    pixel_progress = np.repeat(np.repeat(local, cell_height, axis=0), cell_width, axis=1)
-                    pixel_progress = pixel_progress[:args.size[1], :args.size[0], None]
-                    target = (1 - pixel_progress) * source_target + pixel_progress * destination_target
-                    glyphs = path_glyphs(start.glyph, destination.glyph, local, paths,
-                                        previous.glyph, args.frames - 1 - frame)
-                    source_lab = srgb_to_oklab(target)
-                    original_background, solve_background = _backgrounds(source_lab, args.background, invert_ink)
-                    if style == "headroom":
-                        grid = fit_fixed_glyphs(
-                            encode_headroom_lab(source_lab, invert_ink=invert_ink), masks, glyphs,
-                            background_oklab=solve_background, input_oklab=True,
-                            steps=args.transition_steps, device=args.device,
-                            previous=previous, destination=destination, progress=float(local.mean()),
-                            glyph_luminance_bonus=glyph_luminance_bonus,
-                            gradient_loss_strength=float(gradient_loss_strength),
-                            saturation_target_oklab=source_lab, gradient_target_oklab=source_lab,
-                            invert_ink=invert_ink,
-                            on_progress=lambda fraction, stage, index=index, frame=frame: report(
-                                fraction, f"Transition {index + 1}/{len(images)}, frame {frame + 1}/{args.frames}: {stage}"))
-                    else:
-                        selection = invert_source(target) if invert_ink else target
-                        grid = fit_structure_colors(selection, masks, glyphs,
-                                                    solve_background if invert_ink else original_background)
-                        grid.background = solve_background
-                    del target, source_lab
-                frame_dir = base / f"{frame:04d}"
-                if frame in (0, args.frames - 1):
-                    _copy_grid(output / "stills" / f"{index if frame == 0 else following:04d}", frame_dir)
-                else:
-                    grid = _save_grid(grid, frame_dir, False, masks, args.size, invert_ink)
-                background_labs[f"transitions/{index:04d}-{following:04d}/{frame:04d}"] = grid.background.tolist()
-                previous = grid
-                if frame not in (0, args.frames - 1):
-                    completed_units += 1
-                    report(0.0, f"Finished transition frame {frame + 1}/{args.frames}")
-            del source_target, destination_target, start, destination, previous, grid
+            pending_pairs.append(index)
+        if pending_pairs:
+            workers = min(transition_workers, len(pending_pairs))
+            print(f"Rendering transitions with {workers} worker(s) on {args.device}", flush=True)
+            lock = threading.Lock()
+            cancelled = threading.Event()
+            pair_progress = {index: 0.0 for index in pending_pairs}
+
+            def pair_report(index: int, units: float, stage: str) -> None:
+                if cancelled.is_set():
+                    raise CancelledError("Transition render cancelled")
+                with lock:
+                    pair_progress[index] = max(pair_progress[index], units)
+                    report(sum(pair_progress.values()), stage)
+
+            gpu = style == "headroom" and torch.device(args.device).type == "cuda"
+            if gpu:
+                # These cached tensors are shared by the streams. Populate them
+                # before workers start and wait for their uploads to complete.
+                device = torch.device(args.device)
+                _color_matrices(torch.device("cuda", torch.cuda.current_device()
+                                             if device.index is None else device.index), torch.float32)
+                torch.cuda.synchronize(device)
+            old_threads = torch.get_num_threads()
+            if workers > 1:
+                torch.set_num_threads(min(old_threads, max(1, (os.cpu_count() or 1) // workers)))
+
+            def render_pair(index: int) -> dict:
+                stream = torch.cuda.Stream(device=args.device) if gpu else None
+                with torch.cuda.stream(stream) if stream is not None else nullcontext():
+                    try:
+                        pair_report(index, 0.0, f"Starting transition {index + 1}/{len(images)}")
+                        return _render_transition(index, images, output, args, masks, cell, paths,
+                                                  lambda units, stage: pair_report(index, units, stage))
+                    finally:
+                        if stream is not None:
+                            stream.synchronize()
+
+            try:
+                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ascii-transition") as executor:
+                    futures = [executor.submit(render_pair, index) for index in pending_pairs]
+                    try:
+                        for future in as_completed(futures):
+                            background_labs.update(future.result())
+                    except BaseException:
+                        cancelled.set()
+                        for future in futures:
+                            future.cancel()
+                        raise
+            finally:
+                if workers > 1:
+                    torch.set_num_threads(old_threads)
+            completed_units += len(pending_pairs) * (args.frames - 2)
     _atomic_json(manifest, {"signature": signature, "generation": getattr(args, "generation", None) or uuid.uuid4().hex,
                             "image_count": len(images), "frame_count": args.frames,
                             "grid": [grid_shape[1], grid_shape[0]], "output_size": list(args.size),
@@ -453,7 +524,10 @@ def make_parser() -> argparse.ArgumentParser:
                         help="Blue-noise coverage dither for the structure style")
     parser.add_argument("--background", default=defaults["background"], help="auto or a fixed #RRGGBB color")
     parser.add_argument("--seed", type=int, default=defaults["seed"])
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--device", default="auto", help="auto, cpu, or cuda (also used for ROCm)")
+    parser.add_argument("--transition-workers", type=int,
+                        default=os.environ.get("ASCII_WALLPAPER_TRANSITION_WORKERS", "2"),
+                        help="Concurrent transition pairs (default: 2; use 1 for lower memory use)")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--still-cache", type=Path, help="Reusable still-asset cache shared across render variants")
     parser.add_argument("--generation", help=argparse.SUPPRESS)

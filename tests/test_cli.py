@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import threading
 import weakref
 from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 
 from ascii_optimizer import cli
@@ -161,7 +163,8 @@ def test_transition_endpoints_copy_exact_still_bytes_and_manifest_describes_ever
                                           cli._load_grid(args.output / relative).background)
 
 
-def test_slideshow_keeps_at_most_two_loaded_source_targets_alive(fast_batch, monkeypatch):
+@pytest.mark.parametrize("workers", [1, 2])
+def test_slideshow_source_memory_is_bounded_by_workers(fast_batch, monkeypatch, workers):
     arguments, _, _ = fast_batch
     original = cli.load_target
     references = []
@@ -175,8 +178,8 @@ def test_slideshow_keeps_at_most_two_loaded_source_targets_alive(fast_batch, mon
         return result
 
     monkeypatch.setattr(cli, "load_target", track_target)
-    cli.build(arguments(count=8))
-    assert maximum == 2
+    cli.build(arguments(count=8, transition_workers=workers))
+    assert 2 <= maximum <= 2 * workers
     assert all(reference() is None for reference in references)
 
 
@@ -203,3 +206,74 @@ def test_failed_render_does_not_publish_a_partial_manifest(fast_batch, monkeypat
         cli.build(args)
     assert not (args.output / "manifest.json").exists()
     assert not list(args.output.glob("*.tmp"))
+
+
+def test_transition_pairs_overlap_and_progress_never_goes_backwards(fast_batch, monkeypatch, capsys):
+    arguments, _, _ = fast_batch
+    original = cli.fit_fixed_glyphs
+    barrier = threading.Barrier(2, timeout=10)
+    active = set()
+
+    def concurrent_fit(*args, **kwargs):
+        active.add(threading.current_thread().name)
+        barrier.wait()
+        kwargs["on_progress"](0.5, "Fitting colors")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "fit_fixed_glyphs", concurrent_fit)
+    args = arguments(transition_workers=2, progress_json=True)
+    cli.build(args)
+    assert len(active) == 2
+    updates = [json.loads(line.removeprefix("ASCII_PROGRESS ")) for line in
+               capsys.readouterr().out.splitlines() if line.startswith("ASCII_PROGRESS ")]
+    progress = [update["progress"] for update in updates]
+    assert progress == sorted(progress)
+    assert progress[-1] == 1
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_parallel_real_color_solver_matches_serial_assets(fast_batch, monkeypatch, device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("No GPU is available")
+    from ascii_optimizer.optimizer import fit_fixed_glyphs
+
+    arguments, _, _ = fast_batch
+    streams = set()
+
+    def real_fit(*args, **kwargs):
+        if device == "cuda":
+            streams.add(torch.cuda.current_stream().cuda_stream)
+        return fit_fixed_glyphs(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "fit_fixed_glyphs", real_fit)
+    serial = arguments("serial", frames=5, device=device, transition_workers=1)
+    parallel = arguments("parallel", frames=5, device=device, transition_workers=2)
+    cli.build(serial)
+    streams.clear()
+    cli.build(parallel)
+    if device == "cuda":
+        assert len(streams) == 2
+    for path in serial.output.rglob("*.png"):
+        assert path.read_bytes() == (parallel.output / path.relative_to(serial.output)).read_bytes()
+
+
+def test_parallel_failure_cancels_other_pairs_without_publishing(fast_batch, monkeypatch):
+    arguments, _, _ = fast_batch
+    barrier = threading.Barrier(2, timeout=10)
+
+    def fail(*args, **kwargs):
+        barrier.wait()
+        raise RuntimeError("transition failed")
+
+    monkeypatch.setattr(cli, "fit_fixed_glyphs", fail)
+    args = arguments(count=8, transition_workers=2)
+    with pytest.raises(RuntimeError, match="transition failed"):
+        cli.build(args)
+    assert not (args.output / "manifest.json").exists()
+
+
+@pytest.mark.parametrize("workers", [0, -1, True, 1.5])
+def test_invalid_worker_counts_are_rejected(fast_batch, workers):
+    arguments, _, _ = fast_batch
+    with pytest.raises(ValueError, match="transition_workers"):
+        cli.build(arguments(transition_workers=workers))
