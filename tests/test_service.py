@@ -66,6 +66,18 @@ def test_transition_variants_have_immutable_directories_and_return_correct_asset
     assert restarted.submit(request_settings)["generation"] == first["generation"]
 
 
+def test_obsolete_candidate_limits_do_not_split_service_jobs(tmp_path, request_settings):
+    assert "candidates" not in normalize_options(request_settings)
+    first_settings = service._validated_request(dict(request_settings, candidates=1))
+    assert first_settings == service._validated_request(dict(request_settings, candidates=256))
+    assert first_settings["glyph_search"] == "all"
+    queue = service.RenderQueue(tmp_path / "cache", start_worker=False)
+    first = queue.submit(dict(request_settings, candidates=1))
+    second = queue.submit(dict(request_settings, candidates=256))
+    assert first["id"] == second["id"]
+    assert "--candidates" not in queue._command(queue.jobs[first["id"]])
+
+
 def test_forced_generation_is_visible_to_existing_consumers_and_reuses_still_cache(tmp_path, request_settings):
     render_queue = service.RenderQueue(tmp_path / "cache", start_worker=False)
     first = render_queue.submit(dict(request_settings, client_id="wallpaper"))
@@ -124,11 +136,28 @@ def test_service_imports_no_numerical_runtime():
                     "assert not {'torch', 'numpy', 'PIL'} & sys.modules.keys()"], check=True)
 
 
-@pytest.mark.parametrize("name", ["gradient_loss_strength", "glyph_luminance_bonus", "dither", "structure_dither", "transition_spread"])
+@pytest.mark.parametrize("name", ["gradient_loss_strength", "glyph_luminance_bonus", "glyph_entropy_strength", "dither", "structure_dither", "transition_spread"])
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
 def test_shared_options_reject_nonfinite_values(name, value):
     with pytest.raises(ValueError, match=name):
         normalize_options({name: value})
+
+
+@pytest.mark.parametrize("strength", [-0.001, 0.101])
+def test_shared_options_bound_glyph_entropy_strength(strength):
+    with pytest.raises(ValueError, match="glyph_entropy_strength"):
+        normalize_options({"glyph_entropy_strength": strength})
+
+
+def test_service_entropy_defaults_and_changes_job_identity_and_command(tmp_path, request_settings):
+    queue = service.RenderQueue(tmp_path / "cache", start_worker=False)
+    first = queue.submit(request_settings)
+    settings = queue.jobs[first["id"]]["settings"]
+    assert settings["glyph_entropy_strength"] == 0.01
+    command = queue._command(queue.jobs[first["id"]])
+    assert command[command.index("--glyph-entropy-strength") + 1] == "0.01"
+    changed = queue.submit(dict(request_settings, glyph_entropy_strength=0.025))
+    assert changed["id"] != first["id"]
 
 
 @pytest.mark.parametrize("payload", ["[]", "null", "3", "invalid JSON"])

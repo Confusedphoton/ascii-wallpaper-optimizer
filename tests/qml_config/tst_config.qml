@@ -128,4 +128,31 @@ TestCase {
             "The preview must be visible in the actual config page")
         pagePixels.save(TestConfig.fixtureRoot + "/settings.png")
     }
+
+    function test_glyph_variety_slider_persists_each_profile_and_zero() {
+        const item = page({cfg_ProfileSettingsInitialized: true})
+        item.editProfile = 0
+        const slider = findChild(item, "glyphEntropySlider")
+        compare(slider.value, 0.01)
+        compare(slider.from, 0)
+        compare(slider.to, 0.1)
+        slider.forceActiveFocus()
+        for (let step = 0; step < 15; step++) keyClick(Qt.Key_Right)
+        compare(item.cfg_GlyphEntropyStrength, 0.025)
+        item.editProfile = 1
+        compare(slider.value, 0.01)
+        slider.forceActiveFocus()
+        for (let step = 0; step < 10; step++) keyClick(Qt.Key_Left)
+        compare(item.cfg_GlyphEntropyStrengthB, 0)
+        item.editProfile = 0
+        compare(slider.value, 0.025)
+        item.saveConfig()
+        const reopened = page(snapshot(item))
+        reopened.editProfile = 0
+        compare(findChild(reopened, "glyphEntropySlider").value, 0.025)
+        reopened.editProfile = 1
+        compare(findChild(reopened, "glyphEntropySlider").value, 0)
+        reopened.setProfileSetting("RenderStyle", "structure")
+        verify(!findChild(reopened, "glyphEntropySlider").visible)
+    }
 }

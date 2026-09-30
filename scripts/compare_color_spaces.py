@@ -74,6 +74,7 @@ def main() -> None:
             grid = solve_style(
                 reference, masks, style="headroom", invert_ink=False,
                 background="auto", seed=0, steps=STEPS, candidates=count,
+                use_shortlist=True,
                 dither=0.005, structure_dither=0.06, device="cpu",
             )
             grids[key] = grid

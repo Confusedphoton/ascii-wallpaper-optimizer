@@ -272,12 +272,137 @@ def test_structure_fixed_color_fit_matches_still_ink_without_reselecting_glyphs(
 
 
 @pytest.mark.parametrize("setting", ["gradient_loss_strength", "gradient_shortlist_strength",
-                                     "saturation_loss_strength", "glyph_luminance_bonus"])
+                                     "saturation_loss_strength", "glyph_luminance_bonus",
+                                     "glyph_error_movement_strength"])
 @pytest.mark.parametrize("value", [float("nan"), float("inf")])
 def test_solver_rejects_nonfinite_objective_weights(setting, value):
     with pytest.raises(ValueError, match=setting):
         solve(np.zeros((4, 4, 3), dtype=np.float32),
               np.zeros((1, 4, 4), dtype=np.float32), **{setting: value})
+
+
+def test_error_movement_preserves_local_palette_instead_of_averaging_it():
+    # Two colors with the same neighborhood mean: averaging them destroys
+    # palette information; exchanging their positions conserves it.
+    source = torch.tensor([0.65, 0.12, -0.10]).reshape(1, 3, 1, 1).expand(1, 3, 4, 4).clone()
+    source[:, 1:, :, 2:] *= -1
+    directions = _FrameObjective(source, "default", (2, 2), False, 0, 0,
+                                 glyph_error_movement_strength=1).error_movement_directions
+    samples = optimizer._error_movement_samples(source, (2, 2), directions)
+    swapped = source.flip(-1)
+    torch.testing.assert_close(optimizer._error_movement_samples(swapped, (2, 2), directions), samples)
+    averaged = source.mean((-2, -1), keepdim=True).expand_as(source).clone().requires_grad_()
+    loss = (optimizer._error_movement_samples(averaged, (2, 2), directions) - samples).square().mean()
+    assert loss > 0.001
+    loss.backward()
+    assert torch.isfinite(averaged.grad).all()
+    assert averaged.grad.abs().sum() > 0
+
+
+def test_error_movement_cannot_move_color_outside_neighboring_glyphs():
+    source = torch.zeros((1, 3, 4, 12))
+    source[:, 0] = 0.5
+    source[:, 1, :, :2] = 0.2
+    directions = torch.eye(3)
+    samples = optimizer._error_movement_samples(source, (2, 2), directions)
+    moved = source.roll(8, dims=-1)
+    assert (optimizer._error_movement_samples(moved, (2, 2), directions) - samples).square().mean() > 0
+
+
+@pytest.mark.parametrize("invert_ink", [False, True])
+def test_error_movement_compares_displayed_colors_to_original_source(invert_ink):
+    source = np.full((4, 4, 3), [0.7, 0.3, 0.4], np.float32)
+    target = _image_tensor(srgb_to_oklab(source))
+    encoded = _image_tensor(encode_headroom_lab(srgb_to_oklab(source), invert_ink=invert_ink))
+    baseline = _FrameObjective(encoded, "default", (2, 2), invert_ink, 0, 0)
+    movement = _FrameObjective(encoded, "default", (2, 2), invert_ink, 0, 0,
+                               glyph_error_movement_strength=4, error_movement_target=target)
+    torch.testing.assert_close(movement(encoded), baseline(encoded), atol=1e-8, rtol=0)
+
+
+def test_disabled_error_movement_is_identical_and_skips_transport(monkeypatch):
+    def unexpected(*args):
+        raise AssertionError("Disabled error movement must not compute transport")
+    monkeypatch.setattr(optimizer, "_error_movement_samples", unexpected)
+    source = np.random.default_rng(19).random((8, 8, 3), dtype=np.float32)
+    masks = np.stack((np.zeros((4, 4)), np.eye(4), np.ones((4, 4)))).astype(np.float32)
+    baseline = solve(source, masks, steps=2)
+    disabled = solve(source, masks, steps=2, glyph_error_movement_strength=0)
+    np.testing.assert_array_equal(baseline.glyph, disabled.glyph)
+    np.testing.assert_array_equal(baseline.color, disabled.color)
+
+
+@pytest.mark.parametrize("shape", [(3, 3), (3, 9), (9, 3)])
+def test_error_movement_handles_partial_and_single_cell_grids(shape):
+    source = np.random.default_rng(3).random((*shape, 3), dtype=np.float32)
+    masks = np.stack((np.zeros((4, 4)), np.eye(4), np.ones((4, 4)))).astype(np.float32)
+    grid = solve(source, masks, steps=1, glyph_error_movement_strength=4)
+    assert grid.glyph.shape == tuple((side + 3) // 4 for side in shape)
+    assert np.isfinite(grid.color).all()
+
+
+def test_error_movement_rejects_negative_strength_and_mismatched_target():
+    source = np.zeros((4, 4, 3), np.float32)
+    masks = np.ones((1, 4, 4), np.float32)
+    with pytest.raises(ValueError, match="glyph_error_movement_strength"):
+        solve(source, masks, glyph_error_movement_strength=-1)
+    with pytest.raises(ValueError, match="target must match"):
+        solve(source, masks, glyph_error_movement_strength=1,
+              error_movement_target_oklab=np.zeros((3, 3, 3), np.float32))
+
+
+@pytest.mark.parametrize("detail_loss", ["default", "local_color"])
+@pytest.mark.parametrize("with_endpoints", [False, True])
+def test_unshortlisted_solve_includes_every_glyph_and_bypasses_ranking(monkeypatch, detail_loss, with_endpoints):
+    source = np.random.default_rng(5).random((8, 8, 3), dtype=np.float32)
+    masks = np.stack((np.zeros((4, 4)), np.eye(4), np.fliplr(np.eye(4)), np.ones((4, 4)))).astype(np.float32)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("All-glyph optimization must bypass shortlist fitting")
+
+    monkeypatch.setattr(optimizer, "_candidate_fit", unexpected)
+    original_softmax = torch.softmax
+    counts = []
+
+    def record(logits, *args, **kwargs):
+        counts.append(logits.shape[1])
+        return original_softmax(logits, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "softmax", record)
+    endpoint_args = {}
+    if with_endpoints:
+        endpoint = Grid(np.zeros((2, 2), np.uint8), np.zeros((2, 2, 3), np.float32))
+        endpoint_args = dict(previous=endpoint, destination=endpoint, progress=0.5)
+    grid = solve(source, masks, use_shortlist=False, candidates=1, steps=2,
+                 detail_loss=detail_loss, glyph_error_movement_strength=4, **endpoint_args)
+    assert counts == [len(masks)] * 2  # endpoint glyphs are already present
+    assert np.isfinite(grid.color).all()
+    np.testing.assert_array_equal(grid.color, quantize_playback_lab(grid.color))
+
+
+def test_unshortlisted_solve_ignores_candidate_limit_and_shortlist_gradient_strength():
+    source = np.random.default_rng(5).random((8, 8, 3), dtype=np.float32)
+    masks = np.stack((np.zeros((4, 4)), np.eye(4), np.ones((4, 4)))).astype(np.float32)
+    first = solve(source, masks, steps=2, use_shortlist=False, candidates=1,
+                  gradient_shortlist_strength=0)
+    second = solve(source, masks, steps=2, use_shortlist=False, candidates=99,
+                   gradient_shortlist_strength=100)
+    np.testing.assert_array_equal(first.glyph, second.glyph)
+    np.testing.assert_array_equal(first.color, second.color)
+
+
+def test_default_full_bank_matches_approved_mode_and_requires_a_boolean(monkeypatch):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Default rendering must not rank a glyph shortlist")
+    monkeypatch.setattr(optimizer, "_candidate_fit", unexpected)
+    source = np.random.default_rng(5).random((8, 8, 3), dtype=np.float32)
+    masks = np.stack((np.zeros((4, 4)), np.eye(4), np.ones((4, 4)))).astype(np.float32)
+    default = solve(source, masks, steps=2)
+    explicit = solve(source, masks, steps=2, use_shortlist=False)
+    np.testing.assert_array_equal(default.glyph, explicit.glyph)
+    np.testing.assert_array_equal(default.color, explicit.color)
+    with pytest.raises(ValueError, match="use_shortlist"):
+        solve(source, masks, use_shortlist="false")
 
 
 @pytest.mark.parametrize("distribution", ["uniform", "gumbel"])

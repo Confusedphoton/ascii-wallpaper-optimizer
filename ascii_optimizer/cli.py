@@ -23,7 +23,9 @@ from . import __version__
 from .revision import render_revision
 from .assets import cell_for_display, glyph_masks, load_target, resolve_font, save_atlas, save_metadata
 from .defaults import (DEFAULT_CHARS, DEFAULT_GRADIENT_LOSS_STRENGTH,
-                       DEFAULT_GLYPH_LUMINANCE_BONUS, MAX_GLYPH_LUMINANCE_BONUS)
+                       DEFAULT_GLYPH_LUMINANCE_BONUS, MAX_GLYPH_LUMINANCE_BONUS,
+                       DEFAULT_USE_SHORTLIST, DEFAULT_GLYPH_ENTROPY_STRENGTH,
+                       MAX_GLYPH_ENTROPY_STRENGTH)
 from .optimizer import Grid, _choose_background, _color_matrices, fit_fixed_glyphs, render_grid, solve
 from .runtime import select_device
 from .settings import normalize_options, validate_size
@@ -156,7 +158,8 @@ def _backgrounds(source_lab: np.ndarray, background: str,
 
 def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                 invert_ink: bool, background: str, seed: int, steps: int,
-                candidates: int, dither: float, structure_dither: float,
+                candidates: int = 6, dither: float, structure_dither: float,
+                use_shortlist: bool = DEFAULT_USE_SHORTLIST,
                 logit_noise_distribution: str = "uniform",
                 device: str, previous: Grid | None = None,
                 destination: Grid | None = None, progress: float | None = None,
@@ -165,6 +168,8 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                 objective_space: str = "oklab",
                 glyph_luminance_bonus: float = 0.0,
                 saturation_loss_strength: float | None = None,
+                glyph_error_movement_strength: float = 0.0,
+                glyph_entropy_strength: float | None = None,
                 gradient_loss_strength: float | None = None) -> Grid:
     """Prepare a grid whose displayed pixels follow the chosen ink polarity."""
     if style not in ("headroom", "structure"):
@@ -173,12 +178,18 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
         raise ValueError("The renderer operates only in OKLab.")
     if gradient_loss_strength is None:
         gradient_loss_strength = DEFAULT_GRADIENT_LOSS_STRENGTH if style == "headroom" else 0.0
+    if glyph_entropy_strength is None:
+        glyph_entropy_strength = DEFAULT_GLYPH_ENTROPY_STRENGTH if style == "headroom" else 0.0
     if style == "structure" and glyph_luminance_bonus:
         raise ValueError("glyph_luminance_bonus is only available for the headroom objective")
     if style == "structure" and saturation_loss_strength:
         raise ValueError("saturation_loss_strength is only available for the headroom objective")
     if style == "structure" and gradient_loss_strength:
         raise ValueError("gradient_loss_strength is only available for the headroom objective")
+    if style == "structure" and glyph_error_movement_strength:
+        raise ValueError("glyph_error_movement_strength is only available for the headroom objective")
+    if style == "structure" and glyph_entropy_strength:
+        raise ValueError("glyph_entropy_strength is only available for the headroom objective")
     if style == "structure" and detail_loss != "default":
         raise ValueError("Feature/detail losses are not implemented for structure-first glyph selection")
     source_lab = srgb_to_oklab(target)
@@ -188,6 +199,7 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
         encoded_target = encode_headroom_lab(source_lab, invert_ink=invert_ink)
         return solve(encoded_target, masks, seed=seed, steps=steps,
                      candidates=candidates, dither=dither,
+                     use_shortlist=use_shortlist,
                      logit_noise_distribution=logit_noise_distribution,
                      background_oklab=solve_background, device=device,
                      input_oklab=True,
@@ -198,6 +210,9 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                      glyph_luminance_bonus=glyph_luminance_bonus,
                      saturation_loss_strength=saturation_loss_strength,
                      saturation_target_oklab=source_lab,
+                     glyph_error_movement_strength=glyph_error_movement_strength,
+                     glyph_entropy_strength=glyph_entropy_strength,
+                     error_movement_target_oklab=source_lab,
                      gradient_loss_strength=gradient_loss_strength,
                      gradient_target_oklab=source_lab,
                      invert_ink=invert_ink)
@@ -323,12 +338,14 @@ def build(args: argparse.Namespace) -> None:
         "style": style, "invert_ink": invert_ink, "structure_dither": structure_dither,
         "gradient_loss_strength": float(gradient_loss_strength),
         "glyph_luminance_bonus": glyph_luminance_bonus,
+        "glyph_entropy_strength": args.glyph_entropy_strength,
         "crop": args.crop, "grayscale": args.grayscale,
         "frames": args.frames, "steps": args.steps,
         "transition_steps": args.transition_steps,
         "transition_pace": args.transition_pace, "transition_field": args.transition_field,
         "transition_spread": args.transition_spread,
-        "candidates": args.candidates, "dither": args.dither, "background": args.background, "seed": args.seed,
+        "glyph_search": "all" if style == "headroom" else "structure",
+        "dither": args.dither, "background": args.background, "seed": args.seed,
     }
     output = args.output.expanduser().resolve()
     still_cache = getattr(args, "still_cache", None)
@@ -396,9 +413,10 @@ def build(args: argparse.Namespace) -> None:
             target = load_target(image, args.size, args.crop, args.grayscale)
             grid = solve_style(target, masks, style=style, invert_ink=invert_ink,
                          seed=args.seed + index, steps=args.steps,
-                         candidates=args.candidates, dither=args.dither, structure_dither=structure_dither,
+                         dither=args.dither, structure_dither=structure_dither,
                          background=args.background, device=args.device,
                          glyph_luminance_bonus=glyph_luminance_bonus,
+                         glyph_entropy_strength=args.glyph_entropy_strength,
                          gradient_loss_strength=float(gradient_loss_strength),
                          on_progress=lambda fraction, stage, index=index: report(
                              fraction, f"Image {index + 1}/{len(images)}: {stage}"))
@@ -509,11 +527,16 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--transition-spread", type=float, default=defaults["transition_spread"])
     parser.add_argument("--steps", type=int, default=defaults["steps"], help="Still optimization steps")
     parser.add_argument("--transition-steps", type=int, default=defaults["transition_steps"])
-    parser.add_argument("--candidates", type=int, default=defaults["candidates"])
+    # Accept old commands without restricting the full glyph-bank solve.
+    parser.add_argument("--candidates", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--dither", type=float, default=defaults["dither"],
                         help="Post-optimization glyph-logit noise (default: blue-noise uniform; Gumbel scale is dither × 100)")
     parser.add_argument("--gradient-loss-strength", type=float, default=None,
                         help="Weight for displayed OKLab Sobel gradients (default: 1.5 for headroom)")
+    parser.add_argument("--glyph-entropy-strength", type=float, default=None,
+                        help=("Weight for frame-wide glyph variety; 0 disables "
+                              f"(default: {DEFAULT_GLYPH_ENTROPY_STRENGTH:g} for headroom, "
+                              f"0 for structure; max: {MAX_GLYPH_ENTROPY_STRENGTH:g})"))
     parser.add_argument("--glyph-luminance-bonus", type=float, default=None,
                         help=("Bonus for lighter glyph ink with automatic chrominance correction "
                               f"(default: {DEFAULT_GLYPH_LUMINANCE_BONUS:g}, "

@@ -109,6 +109,7 @@ Item {
     property real cfg_Dither: 0.005
     property real cfg_GradientLossStrength: 1.5
     property real cfg_GlyphLuminanceBonus: 0.12
+    property real cfg_GlyphEntropyStrength: 0.01
     property real cfg_StructureDither: 0.06
     property bool cfg_InvertInk: false
     property list<string> cfg_AsciiCharsB: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "#", "\\", "/", "=", "^", "|", "[", "]", "{", "}"]
@@ -117,6 +118,7 @@ Item {
     property real cfg_DitherB: 0.005
     property real cfg_GradientLossStrengthB: 1.5
     property real cfg_GlyphLuminanceBonusB: 0.12
+    property real cfg_GlyphEntropyStrengthB: 0.01
     property real cfg_StructureDitherB: 0.06
     property bool cfg_InvertInkB: false
     property var activeSettings: makeProfileSettings()
@@ -149,6 +151,7 @@ Item {
             Dither: root["cfg_Dither" + suffix],
             GradientLossStrength: root["cfg_GradientLossStrength" + suffix],
             GlyphLuminanceBonus: root["cfg_GlyphLuminanceBonus" + suffix],
+            GlyphEntropyStrength: root["cfg_GlyphEntropyStrength" + suffix],
             StructureDither: root["cfg_StructureDither" + suffix],
             InvertInk: root["cfg_InvertInk" + suffix]
         }
@@ -200,7 +203,7 @@ Item {
         const names = ["FontFamily", "TransitionFrames", "TransitionDuration", "TransitionPace",
             "TransitionField", "TransitionSpread", "BackgroundMode", "BackgroundColor", "RenderStyle",
             "AsciiChars", "Detail", "Grayscale", "SlideInterval", "Dither",
-            "GradientLossStrength", "GlyphLuminanceBonus", "StructureDither", "InvertInk"]
+            "GradientLossStrength", "GlyphLuminanceBonus", "GlyphEntropyStrength", "StructureDither", "InvertInk"]
         for (const name of names)
             root["cfg_" + name + "B"] = root["cfg_" + name]
         cfg_ProfileSettingsInitialized = true
@@ -1070,6 +1073,28 @@ Item {
                 Controls.Label {
                     Layout.preferredWidth: Kirigami.Units.gridUnit * 10
                     text: glyphLuminanceBonusSlider.value.toFixed(4)
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Glyph Variety:"
+                visible: root.activeSettings.RenderStyle === "headroom"
+
+                Controls.Slider {
+                    id: glyphEntropySlider
+                    objectName: "glyphEntropySlider"
+                    Layout.fillWidth: true
+                    from: 0
+                    to: 0.1
+                    stepSize: 0.001
+                    value: root.activeSettings.GlyphEntropyStrength
+                    onMoved: root.setProfileSetting("GlyphEntropyStrength", value)
+                    Controls.ToolTip.text: "Higher values reduce repeated glyphs. Zero disables this; the default is 0.010."
+                    Controls.ToolTip.visible: hovered
+                }
+                Controls.Label {
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 10
+                    text: glyphEntropySlider.value.toFixed(3)
                 }
             }
 

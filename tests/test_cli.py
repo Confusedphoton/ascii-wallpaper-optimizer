@@ -66,6 +66,69 @@ def test_cli_defaults_follow_shared_validation():
         assert options[name] == expected
 
 
+@pytest.mark.parametrize("strength", [0, 0.004, 0.025, 0.1])
+def test_cli_entropy_option_is_adjustable(strength):
+    args = cli.make_parser().parse_args(["image.png", "--output", "render", "--size", "8x8",
+                                        "--glyph-entropy-strength", str(strength)])
+    assert normalize_options(vars(args))["glyph_entropy_strength"] == strength
+
+
+def test_entropy_reaches_solver_and_invalidates_still_cache(fast_batch, monkeypatch):
+    arguments, calls, _ = fast_batch
+    original = cli.solve_style
+    strengths = []
+    def capture(*args, **kwargs):
+        strengths.append(kwargs["glyph_entropy_strength"])
+        return original(*args, **kwargs)
+    monkeypatch.setattr(cli, "solve_style", capture)
+    args = arguments(count=1)
+    cli.build(args)
+    assert strengths == [0.01]
+    assert json.loads((args.output / "manifest.json").read_text())["signature"]["glyph_entropy_strength"] == 0.01
+    cli.build(args)
+    assert len(calls) == 1
+    args.glyph_entropy_strength = 0
+    cli.build(args)
+    assert strengths == [0.01, 0]
+    assert json.loads((args.output / "manifest.json").read_text())["signature"]["glyph_entropy_strength"] == 0
+
+
+def test_structure_entropy_defaults_to_zero_and_rejects_nonzero():
+    assert normalize_options({"style": "structure"})["glyph_entropy_strength"] == 0
+    with pytest.raises(ValueError, match="glyph_entropy_strength"):
+        normalize_options({"style": "structure", "glyph_entropy_strength": 0.01})
+
+
+def test_legacy_candidate_flag_does_not_restrict_rendering_or_split_cache(fast_batch):
+    arguments, calls, _ = fast_batch
+    args = arguments(count=1, candidates=1)
+    cli.build(args)
+    signature = json.loads((args.output / "manifest.json").read_text())["signature"]
+    assert signature["glyph_search"] == "all"
+    assert "candidates" not in signature
+    assert len(calls) == 1
+    args.candidates = 256
+    cli.build(args)
+    assert len(calls) == 1
+    parser = cli.make_parser()
+    assert "--candidates" not in parser.format_help()
+    assert parser.parse_args(["image.png", "--output", "render", "--size", "8x8", "--candidates", "1"]).candidates == 1
+
+
+def test_batch_uses_full_glyph_bank_with_legacy_candidate_limit(tmp_path, monkeypatch):
+    from ascii_optimizer import optimizer
+    def unexpected(*args, **kwargs):
+        raise AssertionError("CLI rendering must not call shortlist ranking")
+    monkeypatch.setattr(optimizer, "_candidate_fit", unexpected)
+    source = tmp_path / "source.png"
+    Image.new("RGB", (8, 8), (190, 120, 140)).save(source)
+    output = tmp_path / "output"
+    args = cli.make_parser().parse_args([str(source), "--output", str(output), "--size", "8x8",
+        "--cell", "4x4", "--chars", " .#|", "--candidates", "1", "--steps", "1", "--device", "cpu"])
+    cli.build(args)
+    assert (output / "stills/0000/preview.png").exists()
+
+
 def test_still_cache_reuses_transition_variants_and_keeps_copies_independent(fast_batch):
     arguments, calls, _ = fast_batch
     first = arguments()

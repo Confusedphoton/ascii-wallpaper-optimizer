@@ -76,6 +76,11 @@
         <min>0</min>
         <max>0.5</max>
     </entry>
+    <entry name="GlyphEntropyStrength" type="Double">
+        <default>0.01</default>
+        <min>0</min>
+        <max>0.1</max>
+    </entry>
     <entry name="RenderStyle" type="String">
         <default>headroom</default>
     </entry>
@@ -110,6 +115,7 @@
     <entry name="DitherB" type="Double"><default>0.005</default><min>0</min><max>0.05</max></entry>
     <entry name="GradientLossStrengthB" type="Double"><default>1.5</default><min>0</min><max>4</max></entry>
     <entry name="GlyphLuminanceBonusB" type="Double"><default>0.12</default><min>0</min><max>0.5</max></entry>
+    <entry name="GlyphEntropyStrengthB" type="Double"><default>0.01</default><min>0</min><max>0.1</max></entry>
     <entry name="RenderStyleB" type="String"><default>headroom</default></entry>
     <entry name="InvertInkB" type="Bool"><default>false</default></entry>
     <entry name="StructureDitherB" type="Double"><default>0.06</default><min>0</min><max>0.12</max></entry>

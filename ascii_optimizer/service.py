@@ -110,9 +110,10 @@ def _validated_request(raw: dict) -> dict:
         raise ValueError("Could not find the selected font")
     names = ("chars", "detail", "grayscale", "frames", "dither", "structure_dither",
              "transition_pace", "transition_field", "transition_spread", "gradient_loss_strength",
-             "glyph_luminance_bonus", "style", "invert_ink", "background", "crop", "steps",
-             "transition_steps", "candidates", "seed")
-    return dict({name: options[name] for name in names}, version=__version__, render_revision=render_revision(), images=images,
+             "glyph_luminance_bonus", "glyph_entropy_strength", "style", "invert_ink", "background", "crop", "steps",
+             "transition_steps", "seed")
+    return dict({name: options[name] for name in names}, glyph_search="all" if options["style"] == "headroom" else "structure",
+                version=__version__, render_revision=render_revision(), images=images,
                 image_hashes=[_file_hash(Path(path)) for path in images],
                 font=str(font.resolve()), font_hash=_file_hash(font), size=list(size))
 
@@ -326,8 +327,8 @@ class RenderQueue:
                    "--generation", job["generation"], "--still-cache", str(self.cache / "stills"),
                    "--size", f"{settings['size'][0]}x{settings['size'][1]}", "--progress-json"]
         for name in ("font", "chars", "detail", "frames", "transition_pace", "transition_field",
-                     "transition_spread", "dither", "gradient_loss_strength", "glyph_luminance_bonus",
-                     "style", "structure_dither", "background", "crop", "steps", "transition_steps", "candidates", "seed"):
+                     "transition_spread", "dither", "gradient_loss_strength", "glyph_luminance_bonus", "glyph_entropy_strength",
+                     "style", "structure_dither", "background", "crop", "steps", "transition_steps", "seed"):
             command.extend(("--" + name.replace("_", "-"), str(settings[name])))
         for name in ("invert_ink", "grayscale"):
             if settings[name]:

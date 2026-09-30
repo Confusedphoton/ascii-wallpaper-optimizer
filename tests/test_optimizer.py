@@ -91,6 +91,7 @@ def test_plasma_defaults_match_shared_options(suffix):
     for name, option in (("Detail", "detail"), ("Dither", "dither"),
                          ("GradientLossStrength", "gradient_loss_strength"),
                          ("GlyphLuminanceBonus", "glyph_luminance_bonus"),
+                         ("GlyphEntropyStrength", "glyph_entropy_strength"),
                          ("StructureDither", "structure_dither"),
                          ("TransitionFrames", "frames"), ("TransitionSpread", "transition_spread")):
         assert float(entries[name + suffix].find("k:default", namespace).text) == defaults[option]

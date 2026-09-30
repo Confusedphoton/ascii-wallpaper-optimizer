@@ -79,7 +79,11 @@ def test_report_records_hashes_effective_objectives_and_measurements(experiments
     assert run["seconds"] > 0
     assert run["process_peak_rss_bytes"] > 0
     assert run["effective_objectives"]["glyph_luminance_bonus"] == DEFAULT_GLYPH_LUMINANCE_BONUS
+    assert run["effective_objectives"]["glyph_entropy_strength"] == 0.01
     assert run["effective_objectives"]["saturation_loss_strength"] == 20
+    assert run["effective_objectives"]["use_shortlist"] is False
+    assert run["effective_objectives"]["glyphs_per_cell"] == len(masks)
+    assert "candidates" not in run["effective_objectives"]
 
 
 def test_red_detail_metric_handles_a_crop_without_red_pixels(experiments):
@@ -88,6 +92,19 @@ def test_red_detail_metric_handles_a_crop_without_red_pixels(experiments):
     assert metrics["red_belt_sample_pixels"] == 0
     assert metrics["red_belt_chroma_retention"] is None
     json.dumps(metrics, allow_nan=False)
+
+
+def test_entropy_review_tracks_clarified_glyphs_and_marks_absent_glyphs(experiments):
+    script = importlib.import_module("compare_glyph_entropy")
+    grid = Grid(np.array([[0, 0, 1, 2]], np.uint8), np.zeros((1, 4, 3), np.float32))
+    metrics = script.tracked_glyph_metrics(grid, "MW´")
+    assert metrics["requested_glyph_share"] == 1
+    assert metrics["tracked_glyph_shares"]["M"] == 0.5
+    assert metrics["tracked_glyph_shares"]["´"] == 0.25
+    assert metrics["tracked_glyph_shares"]["@"] is None
+    assert metrics["tracked_glyph_shares"]["`"] is None
+    assert metrics["requested_glyphs_present"] == ["M", "W", "´"]
+    assert len(script.SOURCES) == 4
 
 
 @pytest.mark.parametrize("name", [
@@ -142,3 +159,48 @@ def test_color_strategy_cli_runs_on_a_small_fixture(experiments, monkeypatch, tm
     report = json.loads((output / "comparison.json").read_text())
     assert len(report["variants"]) == 7
     assert len(report["reproducibility"]["runs"]) == 5
+
+
+def test_error_movement_comparison_runs_with_production_defaults(experiments, monkeypatch, tmp_path):
+    script = importlib.import_module("compare_error_movement")
+    path = tmp_path / "source.png"
+    Image.new("RGB", (12, 8), (120, 60, 170)).save(path)
+    output = tmp_path / "comparison"
+    monkeypatch.setattr(script, "SOURCES", (("tail", path, (0, 0, 960, 640)),))
+    monkeypatch.setattr(sys, "argv", [script.__file__, "--width", "12", "--cells", "3x4",
+                                      "--steps", "1", "--strengths", "4", "--output", str(output)])
+    script.main()
+    report = json.loads((output / "metrics.json").read_text())
+    variants = report["images"]["tail"]["grids"]["3x4"]
+    assert set(variants) == {"before", "movement_4"}
+    assert report["production_default"] == 0
+    assert variants["before"]["experiment"]["effective_objectives"]["glyph_error_movement_strength"] == 0
+    assert variants["movement_4"]["experiment"]["effective_objectives"]["glyph_error_movement_strength"] == 4
+    assert (output / "tail/3x4/focus_before_after_4.png").exists()
+
+
+@pytest.mark.parametrize("dither", [0.0, 0.005])
+def test_glyph_search_comparison_records_full_bank_and_shortlist(experiments, monkeypatch, tmp_path, dither):
+    script = importlib.import_module("compare_glyph_search")
+    path = tmp_path / "source.png"
+    Image.new("RGB", (12, 8), (120, 60, 170)).save(path)
+    output = tmp_path / "comparison"
+    monkeypatch.setattr(script, "SOURCES", (("blush", path, (0, 0, 960, 640)),))
+    monkeypatch.setattr(sys, "argv", [script.__file__, "--width", "12", "--cells", "3x4",
+                                      "--steps", "1", "--strengths", "4", "--dither", str(dither),
+                                      "--output", str(output)])
+    script.main()
+    report = json.loads((output / "metrics.json").read_text())
+    variants = report["images"]["blush"]["grids"]["3x4"]
+    assert len(variants) == 4
+    full = variants["all_movement_4"]
+    assert full["glyphs_per_cell"] == len(experiments.DEFAULT_CHARS)
+    assert full["experiment"]["effective_objectives"]["use_shortlist"] is False
+    assert variants["shortlist_movement_4"]["glyphs_per_cell"] == 6
+    assert report["production_use_shortlist"] is False
+    assert report["dither"] == dither
+    assert full["experiment"]["effective_objectives"]["dither"] == dither
+    assert 0 <= full["logit_noise"]["pre_refinement_winner_change_fraction"] <= 1
+    if dither == 0:
+        assert full["logit_noise"]["pre_refinement_winner_change_fraction"] == 0
+    assert (output / "blush/3x4/factorial_focus_4.png").exists()

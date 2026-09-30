@@ -96,7 +96,7 @@ def _html_report(results: dict) -> str:
         "th:first-child,td:first-child{text-align:left}section{margin:3rem 0}</style>",
         "<h1>Post-optimization logit noise comparison</h1>",
         f"<p>{WIDTH}px wide; {CELL[1]}×{CELL[0]} cells; {STEPS} optimizer steps; "
-        f"{CANDIDATES} shortlist candidates; seed {SEED}. The dither setting is "
+        f"all {len(DEFAULT_CHARS)} glyphs per cell; seed {SEED}. The dither setting is "
         f"multiplied by {DITHER_TO_LOGIT_SCALE:g}. Uniform panels use bounded "
         "blue-noise ranks. Gumbel panels use IID torch.rand samples transformed by "
         "-log(-log(u)). The amplitude sweep pairs each uniform panel with an IID "
@@ -136,7 +136,7 @@ def main() -> None:
         "width": WIDTH,
         "cell": list(CELL),
         "steps": STEPS,
-        "candidates": CANDIDATES,
+        "glyphs_per_cell": len(DEFAULT_CHARS),
         "seed": SEED,
         "glyphs": DEFAULT_CHARS,
         "dither_levels": list(DITHER_LEVELS),

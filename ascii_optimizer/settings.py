@@ -7,7 +7,8 @@ import re
 from collections.abc import Mapping
 
 from .defaults import (DEFAULT_CHARS, STRUCTURE_CHARS, DEFAULT_GLYPH_LUMINANCE_BONUS,
-                       DEFAULT_GRADIENT_LOSS_STRENGTH, MAX_GLYPH_LUMINANCE_BONUS)
+                       DEFAULT_GRADIENT_LOSS_STRENGTH, MAX_GLYPH_LUMINANCE_BONUS,
+                       DEFAULT_GLYPH_ENTROPY_STRENGTH, MAX_GLYPH_ENTROPY_STRENGTH)
 
 
 def finite_float(value, name: str, minimum: float | None = None,
@@ -46,6 +47,9 @@ def normalize_options(raw: Mapping) -> dict:
     if not isinstance(raw, Mapping):
         raise ValueError("Render settings must be an object")
     options = dict(raw)
+    # Legacy clients may still send a shortlist size. It no longer affects
+    # rendering, and must not create separate cache variants.
+    options.pop("candidates", None)
     style = options.setdefault("style", "headroom")
     if style not in ("headroom", "structure"):
         raise ValueError("Unknown render style")
@@ -67,7 +71,7 @@ def normalize_options(raw: Mapping) -> dict:
     for name, default, low, high in (
         ("detail", 1, 0, 4), ("frames", 16, 2, 120),
         ("steps", 36, 1, None), ("transition_steps", 16, 1, None),
-        ("candidates", 6, 1, 256), ("seed", 0, 0, None),
+        ("seed", 0, 0, None),
     ):
         options[name] = _integer(options.get(name, default), name, low, high)
     for name, default, high in (
@@ -76,11 +80,15 @@ def normalize_options(raw: Mapping) -> dict:
         ("gradient_loss_strength", DEFAULT_GRADIENT_LOSS_STRENGTH if style == "headroom" else 0.0, 4.0),
         ("glyph_luminance_bonus", DEFAULT_GLYPH_LUMINANCE_BONUS if style == "headroom" else 0.0,
          MAX_GLYPH_LUMINANCE_BONUS),
+        ("glyph_entropy_strength", DEFAULT_GLYPH_ENTROPY_STRENGTH if style == "headroom" else 0.0,
+         MAX_GLYPH_ENTROPY_STRENGTH),
     ):
         value = options.get(name)
         options[name] = finite_float(default if value is None else value, name, 0, high)
     if style == "structure" and (options["gradient_loss_strength"] or options["glyph_luminance_bonus"]):
         raise ValueError("Gradient loss and glyph luminance bonus are only available for headroom rendering")
+    if style == "structure" and options["glyph_entropy_strength"]:
+        raise ValueError("glyph_entropy_strength is only available for headroom rendering")
     for name, default, choices in (
         ("transition_pace", "ease-in-out", ("linear", "ease-in", "ease-out", "ease-in-out")),
         ("transition_field", "blue-noise", ("blue-noise", "ripple", "spiral", "directional", "edge", "salience")),
