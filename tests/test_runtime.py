@@ -41,4 +41,4 @@ def test_setup_selects_backend_without_recreating_existing_venv(tmp_path, monkey
     setup.main()
     assert len(commands) == 2
     assert commands[0][commands[0].index("--torch-backend") + 1] == backend
-    assert commands[1][:3] == [str(python), "-m", "ascii_optimizer.runtime"]
+    assert commands[1][:5] == [str(python), "-m", "ascii_optimizer.launcher", "-m", "ascii_optimizer.runtime"]

@@ -78,7 +78,8 @@ WallpaperItem {
             invertInk: !!setting("InvertInk"),
             backgroundMode: setting("BackgroundMode") !== undefined ? setting("BackgroundMode") : 0,
             backgroundColor: setting("BackgroundColor") || "#202028",
-            renderDirectory: b && !useBSettings ? "" : (setting("RenderDirectory") || "")
+            renderDirectory: b && !useBSettings ? "" : (setting("RenderDirectory") || ""),
+            renderedState: b && !useBSettings ? "" : (setting("RenderedState") || "")
         }
     }
     property var overrideRequest: null
@@ -88,12 +89,17 @@ WallpaperItem {
         requestSettings: RenderSettings.request(
             root.mode === "Slideshow" ? Array.from(root.configImages) : Array.from(root.configImages).slice(0, 1), root.activeSettings)
         cachedDirectory: root.activeSettings.renderDirectory
+        cachedState: root.activeSettings.renderedState
         playbackSettings: ({mode: root.mode, slideInterval: root.activeSettings.slideInterval,
             transitionDuration: root.activeSettings.transitionDuration})
         onAssetsReady: {
             const name = root.activeProfile === "B" ? "RenderDirectoryB" : "RenderDirectory"
             if (wallpaper.configuration[name] !== displayDirectory)
                 wallpaper.configuration[name] = displayDirectory
+            const stateName = root.activeProfile === "B" ? "RenderedStateB" : "RenderedState"
+            if (wallpaper.configuration[stateName] !== publishedState)
+                wallpaper.configuration[stateName] = publishedState
+            wallpaper.configuration.writeConfig()
         }
     }
 
@@ -172,7 +178,8 @@ WallpaperItem {
         height: statusColumn.implicitHeight + 24
         radius: 8
         color: "#b0000000"
-        visible: renderer.renderState !== "ready" || !shaderContainer.ready
+        visible: !shaderContainer.ready || renderer.renderState === "queued" || renderer.renderState === "running"
+            || (renderer.renderState === "error" && !renderer.retrying)
 
         Column {
             id: statusColumn

@@ -84,7 +84,7 @@ def main() -> None:
             "-e",
             ".",
         ],
-        [str(VENV / "bin/python"), "-m", "ascii_optimizer.runtime", "--backend",
+        [str(VENV / "bin/python"), "-m", "ascii_optimizer.launcher", "-m", "ascii_optimizer.runtime", "--backend",
          "rocm" if backend.startswith("rocm") else "cuda" if backend != "cpu" else "cpu"],
     ))
     try:

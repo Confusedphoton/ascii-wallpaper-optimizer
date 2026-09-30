@@ -8,6 +8,7 @@ Item {
     property var requestSettings: ({})
     property var playbackSettings: ({})
     property string cachedDirectory: ""
+    property string cachedState: ""
     property string screenName: Screen.name || ""
     property int physicalWidth: Math.round(Screen.width * Screen.devicePixelRatio)
     property int physicalHeight: Math.round(Screen.height * Screen.devicePixelRatio)
@@ -40,6 +41,12 @@ Item {
     property int retryAttempt: 0
     property var pendingSettings: ({})
     property var activeRequest: null
+    readonly property bool retrying: retry.running
+
+    readonly property string publishedState: JSON.stringify({directory: displayDirectory,
+        generation: displayGeneration, manifest: displayManifest, settings: displaySettings,
+        image_count: displayImageCount, frame_count: displayFrameCount,
+        playback: displayPlaybackSettings})
 
     signal assetsReady()
 
@@ -58,8 +65,12 @@ Item {
         if (autoStart) schedule.restart()
     }
     onCachedDirectoryChanged: Qt.callLater(restoreCachedAssets)
+    onCachedStateChanged: Qt.callLater(restoreCachedAssets)
     onPlaybackSettingsChanged: {
-        if (renderState === "ready") displayPlaybackSettings = Object.assign({}, playbackSettings)
+        if (renderState === "ready") {
+            displayPlaybackSettings = Object.assign({}, playbackSettings)
+            Qt.callLater(savePlaybackState)
+        }
     }
     onAutoStartChanged: {
         if (autoStart) schedule.restart()
@@ -107,12 +118,32 @@ Item {
     }
 
     function restoreCachedAssets() {
-        if (displayDirectory || !cachedDirectory) return
-        displaySettings = Object.assign({}, requestSettings)
-        displayPlaybackSettings = Object.assign({}, playbackSettings)
-        displayImageCount = (requestSettings.images || []).length
-        displayFrameCount = Number(requestSettings.frames) || 16
+        if (!cachedDirectory || displayDirectory === cachedDirectory) return
+        let saved = ({})
+        try { saved = JSON.parse(cachedState || "{}") || ({}) } catch (failure) { /* legacy cache */ }
+        if (saved.directory !== cachedDirectory) saved = ({})
+        // The saved generation owns these settings, even if new settings are
+        // being rendered. Restoring it never waits for an HTTP response.
+        if (displayDirectory && !saved.generation) return
+        displaySettings = Object.assign({}, saved.settings || requestSettings)
+        displayPlaybackSettings = Object.assign({}, saved.playback || playbackSettings)
+        displayManifest = saved.manifest || ({})
+        displayImageCount = Number(saved.image_count) || (displaySettings.images || []).length
+        displayFrameCount = Number(saved.frame_count) || Number(displaySettings.frames) || 16
+        displayGeneration = saved.generation || cachedDirectory
         displayDirectory = cachedDirectory
+        if (!jobId && !requestInFlight) {
+            renderState = "ready"
+            stage = "Ready"
+            progress = 1
+        }
+    }
+
+    function savePlaybackState() {
+        // Saving updates the settings object's bindings. Wait until their
+        // current evaluation has finished, and avoid saving identical state.
+        if (renderState === "ready" && displayDirectory && publishedState !== cachedState)
+            assetsReady()
     }
 
     function consume(job) {
@@ -130,8 +161,14 @@ Item {
             return
         }
         if (renderState !== "ready" || !directory) return
+        currentRequestForced = false
         const generation = String(job.generation || directory)
-        if (displayDirectory === directory && displayGeneration === generation) return
+        if (displayDirectory === directory && displayGeneration === generation) {
+            const changed = JSON.stringify(displayPlaybackSettings) !== JSON.stringify(playbackSettings)
+            displayPlaybackSettings = Object.assign({}, playbackSettings)
+            if (changed) assetsReady()
+            return
+        }
         displaySettings = Object.assign({}, job.settings || pendingSettings || requestSettings)
         displayPlaybackSettings = Object.assign({}, playbackSettings)
         displayImageCount = Math.max(1, Number(job.image_count)

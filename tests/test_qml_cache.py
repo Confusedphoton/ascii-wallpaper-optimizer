@@ -33,7 +33,7 @@ def test_qml_composed_frame_cache(tmp_path: Path, invert_ink: bool, device_pixel
         pytest.skip(str(error))
     wallpaper, _ = build(destination=tmp_path / "dist", qsb=compiler)
     ui = wallpaper / "contents/ui"
-    (ui / "qmldir").write_text("module Wallpaper\nAsciiShader 1.0 AsciiShader.qml\n")
+    (ui / "qmldir").write_text("module Wallpaper\nAsciiShader 1.0 AsciiShader.qml\nRenderClient 1.0 RenderClient.qml\n")
     (tmp_path / "Wallpaper").symlink_to(ui, target_is_directory=True)
     assets = tmp_path / "assets"
     assets.mkdir()

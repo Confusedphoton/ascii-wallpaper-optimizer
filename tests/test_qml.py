@@ -74,6 +74,8 @@ def test_qml_playback_and_client_lifecycle(tmp_path: Path) -> None:
             assert request["client_id"]
             name = Path(request["images"][0]).stem
             counts[name] = counts.get(name, 0) + 1
+            if name == "restart" and counts[name] == 2:
+                assert not request["force"], "Reconnecting must reuse the completed render"
             if name == "retry" and counts[name] == 1:
                 self.reply({"error": "temporarily unavailable"}, 503)
             elif name == "timeout" and counts[name] == 1:
@@ -90,6 +92,11 @@ def test_qml_playback_and_client_lifecycle(tmp_path: Path) -> None:
             assert query.get("client_id")
             assert "generation" in query
             name = parsed.path.rsplit("/", 1)[-1]
+            if name == "restart":
+                counts["restart-status"] = counts.get("restart-status", 0) + 1
+                if counts["restart-status"] == 1:
+                    self.reply({"error": "Unknown render job"}, 404)
+                    return
             if name == "slow-status":
                 time.sleep(0.2)
             self.reply(self.job(name, "refresh-new" if name == "refresh" else name + "-ready",
@@ -124,3 +131,4 @@ def test_qml_playback_and_client_lifecycle(tmp_path: Path) -> None:
     assert all(message not in output for message in ("Binding loop detected", "TypeError:", "ReferenceError:")), output
     assert counts["retry"] == 2
     assert counts["timeout"] == 2
+    assert counts["restart"] == 2

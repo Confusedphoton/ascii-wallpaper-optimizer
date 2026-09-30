@@ -322,7 +322,7 @@ class RenderQueue:
 
     def _command(self, job: dict) -> list[str]:
         settings = job["settings"]
-        command = [sys.executable, "-m", "ascii_optimizer.cli", "--output", job["directory"],
+        command = [sys.executable, "-m", "ascii_optimizer.launcher", "-m", "ascii_optimizer.cli", "--output", job["directory"],
                    "--generation", job["generation"], "--still-cache", str(self.cache / "stills"),
                    "--size", f"{settings['size'][0]}x{settings['size'][1]}", "--progress-json"]
         for name in ("font", "chars", "detail", "frames", "transition_pace", "transition_field",

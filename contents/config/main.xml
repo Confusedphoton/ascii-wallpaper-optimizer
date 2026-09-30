@@ -26,6 +26,8 @@
       <default></default>
     </entry>
     <entry name="RenderDirectoryB" type="String"><default></default></entry>
+    <entry name="RenderedState" type="String"><default></default></entry>
+    <entry name="RenderedStateB" type="String"><default></default></entry>
   </group>
 
   <group name="Options">

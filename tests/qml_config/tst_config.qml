@@ -117,6 +117,11 @@ TestCase {
         verify(pixels.green(x, y) > 50)
         verify(pixels.red(x, y) > pixels.blue(x, y))
         compare(pixels.alpha(x, y), 255)
+        compare(JSON.parse(item.cfg_RenderedState).generation, "preview")
+        const reopened = page(snapshot(item))
+        const restored = findChild(reopened, "renderClient")
+        compare(restored.displayGeneration, "preview")
+        compare(restored.displayManifest.atlas_count, 1)
         const point = preview.mapToItem(item, preview.width / 2, preview.height / 2)
         const pagePixels = grabImage(item)
         verify(pagePixels.red(Math.floor(point.x), Math.floor(point.y)) > 100,

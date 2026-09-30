@@ -44,6 +44,72 @@ TestCase {
         compare(renderer.displayPlaybackSettings.mode, "Slideshow")
     }
 
+    function test_saved_generation_restores_without_the_service() {
+        const directory = TestConfig.fixtureRoot + "/old"
+        const saved = {directory: directory, generation: "saved-generation",
+            settings: {images: ["/one.png", "/two.png"], frames: 4},
+            image_count: 2, frame_count: 4,
+            manifest: {image_count: 2, frame_count: 4, invert_ink: true},
+            playback: {mode: "Slideshow", slideInterval: 10}}
+        const renderer = createTemporaryObject(clientComponent, tests,
+            {requestSettings: {images: ["/pending.png"], frames: 8},
+                playbackSettings: {mode: "Image"}, cachedDirectory: directory,
+                cachedState: JSON.stringify(saved), serviceUrl: "http://127.0.0.1:1"})
+        compare(renderer.renderState, "ready")
+        compare(renderer.displayGeneration, "saved-generation")
+        compare(renderer.displayImageCount, 2)
+        compare(renderer.displayFrameCount, 4)
+        compare(renderer.displayPlaybackSettings.mode, "Slideshow")
+        verify(renderer.displayManifest.invert_ink)
+        const serial = renderer.requestSerial
+        wait(50)
+        compare(renderer.requestSerial, serial)
+        verify(!renderer.requestInFlight)
+    }
+
+    function test_corrupt_saved_state_uses_legacy_cache() {
+        const renderer = createTemporaryObject(clientComponent, tests,
+            {requestSettings: {images: ["/one.png"], frames: 4},
+                cachedDirectory: "/cached", cachedState: "invalid JSON"})
+        compare(renderer.renderState, "ready")
+        compare(renderer.displayDirectory, "/cached")
+        compare(renderer.displayImageCount, 1)
+    }
+
+    function test_playback_changes_are_included_in_saved_state() {
+        const renderer = client("/one.png")
+        completed.target = renderer
+        completed.clear()
+        renderer.consume({id: "job", state: "ready", directory: "/cached", generation: "saved",
+            settings: {images: ["/one.png"], frames: 4}, image_count: 1, frame_count: 4})
+        renderer.playbackSettings = {mode: "Slideshow", slideInterval: 25}
+        tryCompare(completed, "count", 2, 1000)
+        compare(JSON.parse(renderer.publishedState).playback.slideInterval, 25)
+        renderer.renderState = "connecting"
+        renderer.playbackSettings = {mode: "Slideshow", slideInterval: 30}
+        renderer.consume({id: "job", state: "ready", directory: "/cached", generation: "saved"})
+        compare(completed.count, 3)
+        compare(JSON.parse(renderer.publishedState).playback.slideInterval, 30)
+        renderer.consume({id: "job", state: "ready", directory: "/cached", generation: "saved"})
+        compare(completed.count, 3)
+    }
+
+    function test_ready_client_reconnects_after_service_restart() {
+        const renderer = client("/restart.png")
+        renderer.retryBaseInterval = 200
+        renderer.retryMaxInterval = 500
+        renderer.start(true)
+        tryCompare(renderer, "renderState", "ready", 3000)
+        verify(!renderer.currentRequestForced)
+        renderer.checkStatus()
+        tryCompare(renderer, "renderState", "error", 3000)
+        compare(renderer.jobId, "")
+        verify(renderer.displayDirectory.length > 0)
+        tryCompare(renderer, "renderState", "ready", 3000)
+        compare(renderer.error, "")
+        verify(!renderer.requestInFlight)
+    }
+
     function test_pending_settings_keep_published_assets() {
         const renderer = client("/one.png")
         completed.target = renderer

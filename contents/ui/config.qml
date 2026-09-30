@@ -44,6 +44,7 @@ Item {
     readonly property var editImages: editProfile === 0 ? cfg_Images : cfg_ImagesB
     property string cfg_FontFamily: "Monospace"
     property string cfg_RenderDirectory: ""
+    property string cfg_RenderedState: ""
     property int cfg_TransitionFrames: 16
     property int cfg_TransitionDuration: 1500
     property string cfg_TransitionPace: "ease-in-out"
@@ -54,6 +55,7 @@ Item {
     property string cfg_RenderStyle: "headroom"
     property string cfg_FontFamilyB: "Monospace"
     property string cfg_RenderDirectoryB: ""
+    property string cfg_RenderedStateB: ""
     property int cfg_TransitionFramesB: 16
     property int cfg_TransitionDurationB: 1500
     property string cfg_TransitionPaceB: "ease-in-out"
@@ -131,6 +133,7 @@ Item {
         return {
             FontFamily: root["cfg_FontFamily" + suffix],
             RenderDirectory: root["cfg_RenderDirectory" + suffix],
+            RenderedState: root["cfg_RenderedState" + suffix],
             TransitionFrames: root["cfg_TransitionFrames" + suffix],
             TransitionDuration: root["cfg_TransitionDuration" + suffix],
             TransitionPace: root["cfg_TransitionPace" + suffix],
@@ -400,11 +403,14 @@ Item {
         requestSettings: RenderSettings.request(
             root.editMode === "Slideshow" ? Array.from(root.editImages) : Array.from(root.editImages).slice(0, 1), root.activeSettings)
         cachedDirectory: root.activeSettings.RenderDirectory
+        cachedState: root.activeSettings.RenderedState
         playbackSettings: ({mode: root.editMode, slideInterval: root.activeSettings.SlideInterval,
             transitionDuration: root.activeSettings.TransitionDuration})
         onAssetsReady: {
             if (root.controlsReady && root.activeSettings.RenderDirectory !== displayDirectory)
                 root.setProfileSetting("RenderDirectory", displayDirectory)
+            if (root.controlsReady && root.activeSettings.RenderedState !== publishedState)
+                root.setProfileSetting("RenderedState", publishedState)
         }
     }
 

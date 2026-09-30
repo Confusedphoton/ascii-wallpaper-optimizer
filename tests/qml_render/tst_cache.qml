@@ -14,6 +14,7 @@ TestCase {
     Rectangle { anchors.fill: parent; color: "black"; z: -1 }
 
     Component { id: shaderComponent; AsciiShader { width: 16; height: 8 } }
+    Component { id: clientComponent; RenderClient { autoStart: false; serviceUrl: "http://127.0.0.1:1" } }
     Component { id: spyComponent; SignalSpy { signalName: "scheduledUpdateCompleted" } }
     Component {
         id: neighborComponent
@@ -77,6 +78,30 @@ TestCase {
         checkPixels(item, "transitions/0000-0001/0001", 1)
         wait(200)
         compare(rendered.count, 1)
+    }
+
+    function test_saved_state_renders_correct_pixels_without_a_service() {
+        const renderer = createTemporaryObject(clientComponent, tests, {
+            requestSettings: {images: ["/pending.png"], frames: 8},
+            playbackSettings: {mode: "Image"}, cachedDirectory: TestConfig.fixtureRoot,
+            cachedState: JSON.stringify({directory: TestConfig.fixtureRoot, generation: "offline",
+                manifest: TestConfig.manifest, settings: {images: ["/one.png", "/two.png"], frames: 4},
+                image_count: 2, frame_count: 4, playback: {mode: "Slideshow"}})
+        })
+        const item = createTemporaryObject(shaderComponent, tests, {
+            renderDirectory: renderer.displayDirectory, generation: renderer.displayGeneration,
+            manifest: renderer.displayManifest, imageCount: renderer.displayImageCount,
+            transitionFrames: renderer.displayFrameCount
+        })
+        tryCompare(item, "ready", true, 2000)
+        tryCompare(item, "loading", false, 2000)
+        compare(renderer.renderState, "ready")
+        compare(renderer.jobId, "")
+        verify(!renderer.requestInFlight)
+        compare(item.displayGeneration, "offline")
+        compare(item.displayImageCount, 2)
+        compare(item.displayFrameCount, 4)
+        checkPixels(item, "stills/0000", 1)
     }
 
     function test_resize_and_generation_refresh_the_output() {

@@ -26,7 +26,7 @@ def main() -> None:
         python = Path(sys.executable)
     if not (ROOT / "ascii_optimizer/service.py").is_file():
         raise SystemExit("Renderer source is missing.")
-    run(str(python), "-c", "import numpy, PIL, torch")
+    run(str(python), "-m", "ascii_optimizer.launcher", "-c", "import numpy, PIL, torch")
     run(str(python), str(ROOT / "scripts/build_plasma_package.py"))
     installed = Path.home() / ".local/share/plasma/wallpapers" / PACKAGE_ID
     action = "--upgrade" if installed.exists() else "--install"

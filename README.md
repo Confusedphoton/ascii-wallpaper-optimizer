@@ -10,6 +10,8 @@ Install the Python renderer in a virtual environment, then install the Plasma pa
 
 Packaging requires the Qt 6 Shader Tools `qsb` compiler. The builder finds it through `PATH`, Qt's installation directory, or common Linux Qt locations; set `QSB=/path/to/qsb` to override discovery. Every build compiles the current shader sources before replacing the staged package. Compiled shaders are generated in `dist/`, rather than stored alongside the sources.
 
+On Linux systems with `/dev/accel` NPU devices, install `bubblewrap` as well. The numerical launcher hides those devices from each optimizer process while preserving GPU access through `/dev/dri` and `/dev/kfd`. This avoids ROCm initialization hanging in the unrelated AMD NPU driver. The service, setup verification, and `ascii-wallpaper-render` command use the launcher automatically; for direct module calls, use `.venv/bin/python -m ascii_optimizer.launcher -m ascii_optimizer.cli ...`.
+
 ```sh
 python3 scripts/setup_environment.py
 .venv/bin/python scripts/install.py
@@ -40,7 +42,7 @@ Then install the project and Plasma package:
 
 Installing PyTorch first prevents pip from choosing its default CUDA build on an AMD system.
 
-In Plasma's wallpaper settings, select **ASCII Wallpaper Optimizer** and choose an image or slideshow. Rendering starts automatically. A progress bar and status message appear in the settings and on the desktop while the last saved ASCII render remains visible. The generated asset directory is recorded in **Render Cache** and shown on startup while the renderer checks or rebuilds the current render. **Render now** retries a failed render or rebuilds completed assets. Clients retry automatically when the service is temporarily unavailable and check completed jobs for new generations, so a forced render also refreshes an already running wallpaper. Adjust render style, ink polarity, and grayscale under **Style**; choose a font, characters, detail, dithering, and background under **Appearance**. Monospaced fonts installed on the system are discovered for the font picker. Slideshow profiles also show a **Transition** section for slide interval and transition settings. Each render setting schedules another render. A nonzero glyph luminosity bonus automatically enables chrominance correction.
+In Plasma's wallpaper settings, select **ASCII Wallpaper Optimizer** and choose an image or slideshow. Rendering starts automatically. A progress bar and status message appear in the settings and on the desktop while the last saved ASCII render remains visible. The generated asset directory is recorded in **Render Cache**. Each profile also saves the completed generation’s manifest and playback settings, so startup restores its frames immediately without waiting for the render service or loading PyTorch. The service checks the current settings in the background; the cached wallpaper remains visible while it reconnects or renders a replacement. **Render now** retries a failed render or rebuilds completed assets. Clients retry automatically when the service is temporarily unavailable and check completed jobs for new generations, so a forced render also refreshes an already running wallpaper. Adjust render style, ink polarity, and grayscale under **Style**; choose a font, characters, detail, dithering, and background under **Appearance**. Monospaced fonts installed on the system are discovered for the font picker. Slideshow profiles also show a **Transition** section for slide interval and transition settings. Each render setting schedules another render. A nonzero glyph luminosity bonus automatically enables chrominance correction.
 
 Use **Editing Profile** to set an independent image or slideshow and appearance settings for profiles A and B. The editor remembers the last profile you opened, even when you close without applying; **Source** appears directly below the profile controls. Apply or OK saves each profile’s source list and render settings. Edit the complete character set in one text field, including any literal space, or choose **Restore defaults**. The **Profile Mode** section controls automatic time-of-day switching or a manual choice. Turn on **Switch profiles automatically** and set the two `HH:MM` start times to follow local time of day. When it is off, choose **Manual Profile** A or B. Add **ASCII Wallpaper Profile** to a Plasma panel or dock after installation: click its compact button to pin A or B, then hold it to open the choices. In the menu, click A or B to force that profile; click the selected profile again, or select **Follow schedule**, to clear the override. The override is shared by wallpapers using this plugin and persists across renderer restarts. A newly selected profile may need time to render its assets.
 
@@ -90,7 +92,7 @@ Install the development dependency group into the existing hardware-configured e
 
 ```sh
 uv pip install --python .venv/bin/python --group dev
-.venv/bin/python -m pytest -q
+.venv/bin/python -m ascii_optimizer.launcher -m pytest -q
 .venv/bin/python scripts/build_plasma_package.py
 ```
 
