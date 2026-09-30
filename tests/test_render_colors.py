@@ -72,6 +72,99 @@ def test_chrominance_correction_rejects_unrelated_hues_with_sufficient_saturatio
     assert shifted_loss > 0.001
 
 
+def test_light_ink_reward_boosts_shadows_and_tapers_at_white():
+    colors = torch.zeros((5, 3))
+    colors[:, 0] = torch.tensor([0.01, 0.1, 0.5, 0.9, 1])
+    colors.requires_grad_()
+    rewards = optimizer._ink_lightness_reward(colors, torch.ones(5))
+    rewards.sum().backward()
+    slopes = colors.grad[:, 0]
+    assert (rewards[1:] > rewards[:-1]).all()
+    assert (slopes[:-1] > slopes[1:]).all()
+    assert slopes[1] > 0.5  # useful shadow lift
+    assert slopes[-2] < 0.02  # little incentive to bleach highlights
+    assert slopes[-1].abs() < 1e-6
+    assert optimizer._ink_lightness_reward(colors, torch.zeros(5)).count_nonzero() == 0
+
+
+@pytest.mark.parametrize("lift", [1.1, 1.8])
+def test_chrominance_correction_preserves_saturation_when_lightness_increases(lift):
+    target = torch.tensor([0.4, 0.04, -0.03]).reshape(1, 3, 1, 1)
+    preserving_saturation = target * lift
+    holding_chroma = target.clone()
+    holding_chroma[:, :1] *= lift
+    # Absolute chroma alone cannot distinguish these two brighter colors.
+    # The correction must accept constant C/L and reject the washed-out color.
+    assert _saturation_loss(target, target, displayed_lab=preserving_saturation) < 1e-10
+    assert _saturation_loss(target, target, displayed_lab=holding_chroma) > 1e-5
+
+
+@pytest.mark.parametrize("color", [[0.65, 0.15, 0.03], [0.6, -0.1, -0.15]])
+def test_display_saturation_gradient_tracks_gamut_compression(color):
+    lab = np.array(color, dtype=np.float32).reshape(1, 1, 3)
+    tensor = _image_tensor(lab).requires_grad_()
+    displayed = _display_headroom_lab(tensor)
+    saturation = displayed[:, 1:].norm(dim=1) / displayed[:, 0]
+    saturation.sum().backward()
+
+    def playback_saturation(lightness_delta):
+        shifted = lab.copy()
+        shifted[..., 0] += lightness_delta
+        visible = srgb_to_oklab(oklab_to_srgb(display_tone_lab(shifted)))
+        return (np.linalg.norm(visible[..., 1:], axis=-1) / visible[..., 0]).item()
+
+    epsilon = 0.005  # larger than playback's twelve-step gamut-map tolerance
+    difference = (playback_saturation(epsilon) - playback_saturation(-epsilon)) / (2 * epsilon)
+    assert tensor.grad[:, 0].item() == pytest.approx(difference, abs=0.015)
+
+
+@pytest.mark.parametrize("invert_ink", [False, True])
+def test_display_gradient_is_finite_at_black_white_and_primary_boundaries(invert_ink):
+    srgb = torch.tensor([[[[0, 0, 0], [1, 1, 1], [1, 0, 0], [0, 1, 0], [0, 0, 1]]]],
+                        dtype=torch.float32, requires_grad=True)
+    displayed = _display_headroom_lab(_playback_color(srgb).permute(0, 3, 1, 2),
+                                     invert_ink=invert_ink)
+    displayed.square().sum().backward()
+    assert torch.isfinite(srgb.grad).all()
+
+
+@pytest.mark.parametrize("fixed_glyphs", [False, True])
+@pytest.mark.parametrize("bonus", [0.12, 0.5])
+def test_light_ink_bonus_preserves_highlight_saturation_and_lifts_shadows(fixed_glyphs, bonus):
+    # Include pastel highlights and the hue-specific brightness limits of all
+    # three RGB primaries, plus a shadow whose brightness should still improve.
+    swatches = np.array([[0.12, 0.05, 0.08], [0.3, 0.15, 0.22],
+                         [1, 0.5, 0.7], [1, 0.85, 0.9],
+                         [0.6, 0.8, 1], [0.85, 0.93, 1],
+                         [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32)
+    source_lab = srgb_to_oklab(np.repeat(np.repeat(swatches[None], 4, 0), 4, 1))
+    target = encode_headroom_lab(source_lab)
+    masks = np.stack((np.zeros((4, 4)), np.eye(4), np.full((4, 4), 0.5),
+                      np.ones((4, 4)))).astype(np.float32)
+    settings = dict(input_oklab=True, steps=36, saturation_loss_strength=20,
+                    saturation_target_oklab=source_lab, gradient_loss_strength=0)
+
+    def displayed_cells(strength):
+        if fixed_glyphs:
+            grid = fit_fixed_glyphs(target, masks, np.full((1, len(swatches)), 3, dtype=np.uint8),
+                                    background_oklab=np.zeros(3, dtype=np.float32),
+                                    glyph_luminance_bonus=strength, **settings)
+        else:
+            grid = solve(target, masks, candidates=4, dither=0, background="#000000",
+                         glyph_luminance_bonus=strength, **settings)
+        displayed = srgb_to_oklab(oklab_to_srgb(display_tone_lab(render_grid(grid, masks))))
+        return displayed.reshape(1, 4, len(swatches), 4, 3).mean((0, 1, 3))
+
+    baseline, boosted = displayed_cells(0), displayed_cells(bonus)
+    source = srgb_to_oklab(swatches)
+    saturation = np.linalg.norm(boosted[2:, 1:], axis=-1) / boosted[2:, 0]
+    expected = np.linalg.norm(source[2:, 1:], axis=-1) / source[2:, 0]
+    np.testing.assert_allclose(saturation, expected, rtol=0.05, atol=0)
+    # Empty glyphs must not collect the bonus and erase the deepest shadow.
+    assert boosted[0, 0] > 0.05
+    assert boosted[1, 0] > baseline[1, 0] + 0.015
+
+
 def _sparse_masks():
     masks = np.zeros((4, 4, 4), dtype=np.float32)
     masks[1] = np.eye(4)

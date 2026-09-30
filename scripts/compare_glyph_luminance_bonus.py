@@ -3,9 +3,10 @@
 Run from the repository root with:
     .venv/bin/python scripts/compare_glyph_luminance_bonus.py
 
-Each bonus subtracts ``strength * mean(OKLab_L(ink color))`` from the current
-full-frame objective. Zero removes the lighter-ink reward. This sweep disables
-the saturation objective to isolate the reward; production enables both.
+Each bonus subtracts ``strength * mean(L - L² + L³/3)`` for nonempty glyphs
+from the current full-frame objective, tapering the incentive as ink lightness
+approaches white. Zero removes the lighter-ink reward. This sweep disables the
+saturation objective to isolate the reward; production enables both.
 """
 
 from __future__ import annotations
@@ -58,7 +59,7 @@ def main() -> None:
             "seed": SEED,
             "dither": DITHER,
             "glyphs": chars,
-            "objective": "current full-frame OKLab objective minus bonus * mean OKLab lightness of fitted ink colors",
+            "objective": "current full-frame OKLab objective minus bonus * mean(L - L² + L³/3) for nonempty glyphs",
             "bonus_strengths": BONUSES,
         },
         "images": {},
