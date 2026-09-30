@@ -17,7 +17,8 @@ from PIL import Image
 
 from . import __version__
 from .assets import cell_for_display, glyph_masks, load_target, resolve_font, save_atlas, save_metadata
-from .defaults import DEFAULT_CHARS, DEFAULT_GRADIENT_LOSS_STRENGTH
+from .defaults import (DEFAULT_CHARS, DEFAULT_GRADIENT_LOSS_STRENGTH,
+                       DEFAULT_GLYPH_LUMINANCE_BONUS, MAX_GLYPH_LUMINANCE_BONUS)
 from .optimizer import Grid, _choose_background, fit_fixed_glyphs, render_grid, solve
 from .settings import normalize_options, validate_size
 from .structure import STRUCTURE_CHARS, fit_structure_colors, solve_structure
@@ -443,7 +444,9 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gradient-loss-strength", type=float, default=None,
                         help="Weight for displayed OKLab Sobel gradients (default: 1.5 for headroom)")
     parser.add_argument("--glyph-luminance-bonus", type=float, default=None,
-                        help="Bonus for lighter glyph ink with automatic chrominance correction (default: 0.12 for headroom)")
+                        help=("Bonus for lighter glyph ink with automatic chrominance correction "
+                              f"(default: {DEFAULT_GLYPH_LUMINANCE_BONUS:g}, "
+                              f"max: {MAX_GLYPH_LUMINANCE_BONUS:g})"))
     parser.add_argument("--style", choices=("headroom", "structure"), default=defaults["style"])
     parser.add_argument("--invert-ink", action="store_true", help="Dark ink on a light canvas")
     parser.add_argument("--structure-dither", type=float, default=defaults["structure_dither"],

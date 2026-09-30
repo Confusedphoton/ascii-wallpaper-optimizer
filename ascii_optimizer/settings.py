@@ -6,7 +6,8 @@ import math
 import re
 from collections.abc import Mapping
 
-from .defaults import DEFAULT_CHARS, STRUCTURE_CHARS, DEFAULT_GLYPH_LUMINANCE_BONUS, DEFAULT_GRADIENT_LOSS_STRENGTH
+from .defaults import (DEFAULT_CHARS, STRUCTURE_CHARS, DEFAULT_GLYPH_LUMINANCE_BONUS,
+                       DEFAULT_GRADIENT_LOSS_STRENGTH, MAX_GLYPH_LUMINANCE_BONUS)
 
 
 def finite_float(value, name: str, minimum: float | None = None,
@@ -74,7 +75,7 @@ def normalize_options(raw: Mapping) -> dict:
         ("transition_spread", 0.65, 0.9),
         ("gradient_loss_strength", DEFAULT_GRADIENT_LOSS_STRENGTH if style == "headroom" else 0.0, 4.0),
         ("glyph_luminance_bonus", DEFAULT_GLYPH_LUMINANCE_BONUS if style == "headroom" else 0.0,
-         DEFAULT_GLYPH_LUMINANCE_BONUS),
+         MAX_GLYPH_LUMINANCE_BONUS),
     ):
         value = options.get(name)
         options[name] = finite_float(default if value is None else value, name, 0, high)

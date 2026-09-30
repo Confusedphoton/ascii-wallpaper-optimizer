@@ -9,7 +9,7 @@ function request(images, settings) {
         return fallback
     }
     const style = setting("renderStyle", "RenderStyle", "headroom")
-    const characters = setting("characters", "AsciiChars", " .´:rszunvcxLOGDQ0KNMW&@\\/=^|[]{}")
+    const characters = setting("characters", "AsciiChars", " .´:rszunvcxLOGDQ0KNMW&#\\/=^|[]{}")
     return {
         images: Array.from(images || []),
         font: setting("fontFamily", "FontFamily", "Monospace"),

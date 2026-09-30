@@ -40,10 +40,26 @@ WallpaperItem {
         const b = activeProfile === "B"
         const useBSettings = b && !!config.ProfileSettingsInitialized
         const setting = name => config[name + (useBSettings ? "B" : "")]
-        const chars = setting("AsciiChars") || [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@", "\\", "/", "=", "^", "|", "[", "]", "{", "}"]
+        let chars = Array.from(setting("AsciiChars") || [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "@", "#", "\\", "/", "=", "^", "|", "[", "]", "{", "}"])
+        if (chars.length && chars[0] === "\\s") chars[0] = " "
+        const style = setting("RenderStyle") || "headroom"
+        const currentChars = chars.join("")
+        const standardChars = " .´:rszunvcxLOGDQ0KNMW&#\\/=^|[]{}"
+        const structureChars = " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&#[]{}"
+        const previousDefaults = [
+            " .´:rszunvcxLOGDQ0KNMW&@\\/=^|[]{}",
+            " .´:rszunvcxLOGDQ0KNMW&@\\=^|[]{}",
+            " .´:rszunvcxLOGDQ0KNMW&@",
+            " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&@[]{}",
+            " .´:-_/|+rszunvcxLOGDQ0KNMW&@[]{}"
+        ]
+        if (previousDefaults.includes(currentChars)
+                || (style === "structure" && currentChars === standardChars)
+                || (style === "headroom" && currentChars === structureChars))
+            chars = Array.from(style === "structure" ? structureChars : standardChars)
         return {
             fontFamily: setting("FontFamily") || "Monospace",
-            characters: Array.from(chars).map((glyph, index) => index === 0 && glyph === "\\s" ? " " : glyph).join(""),
+            characters: chars.map((glyph, index) => index === 0 && glyph === "\\s" ? " " : glyph).join(""),
             detail: setting("Detail") !== undefined ? setting("Detail") : 1,
             grayscale: !!setting("Grayscale"),
             slideInterval: Math.max(5, setting("SlideInterval") !== undefined ? setting("SlideInterval") : 10),
@@ -56,7 +72,7 @@ WallpaperItem {
             gradientLossStrength: setting("GradientLossStrength") !== undefined ? setting("GradientLossStrength") : 1.5,
             glyphLuminanceBonus: setting("GlyphLuminanceBonus") !== undefined ? setting("GlyphLuminanceBonus") : 0.12,
             structureDither: setting("StructureDither") !== undefined ? setting("StructureDither") : 0.06,
-            renderStyle: setting("RenderStyle") || "headroom",
+            renderStyle: style,
             invertInk: !!setting("InvertInk"),
             backgroundMode: setting("BackgroundMode") !== undefined ? setting("BackgroundMode") : 0,
             backgroundColor: setting("BackgroundColor") || "#202028",
