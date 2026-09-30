@@ -40,11 +40,11 @@ Item {
     }
     onReadyChanged: reportReady()
 
-    Image { id: glyphMap; visible: false; smooth: false; cache: true; layer.enabled: true; asynchronous: true }
-    Image { id: colorMap; visible: false; smooth: false; cache: true; layer.enabled: true; asynchronous: true }
-    Image { id: backgroundMap; visible: false; smooth: false; cache: true; layer.enabled: true; asynchronous: true }
-    Image { id: atlasImage; visible: false; smooth: false; cache: true; layer.enabled: true; asynchronous: true }
-    Image { id: metadataImage; visible: false; smooth: false; cache: true; layer.enabled: true; asynchronous: true }
+    Image { id: glyphMap; visible: false; smooth: false; cache: true; asynchronous: true }
+    Image { id: colorMap; visible: false; smooth: false; cache: true; asynchronous: true }
+    Image { id: backgroundMap; visible: false; smooth: false; cache: true; asynchronous: true }
+    Image { id: atlasImage; visible: false; smooth: false; cache: true; asynchronous: true }
+    Image { id: metadataImage; visible: false; smooth: false; cache: true; asynchronous: true }
 
     ShaderEffect {
         anchors.fill: parent

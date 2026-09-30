@@ -85,6 +85,7 @@ WallpaperItem {
         loading: shaderContainer.loading
         enabled: renderer.displayPlaybackSettings.mode === "Slideshow"
         imageCount: renderer.displayImageCount
+        frameCount: renderer.displayFrameCount
         generation: renderer.displayGeneration
         slideInterval: (renderer.displayPlaybackSettings.slideInterval || 10) * 1000
         transitionDuration: renderer.displayPlaybackSettings.transitionDuration || 1500
@@ -141,6 +142,7 @@ WallpaperItem {
         currentIndex: slideshow.currentIndex
         nextIndex: slideshow.nextIndex
         transitionProgress: slideshow.transitionProgress
+        transitionFrame: slideshow.transitionFrame
         transitionFrames: renderer.displayFrameCount
     }
 

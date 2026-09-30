@@ -8,6 +8,7 @@ TestCase {
     id: tests
     name: "Playback"
     when: windowShown
+    visible: true
     width: 32
     height: 32
 
@@ -62,6 +63,50 @@ TestCase {
         compare(player.nextIndex, 0)
         compare(player.transitionProgress, 0)
         verify(!player.animating)
+    }
+
+    function test_transition_presents_every_discrete_frame() {
+        const player = createTemporaryObject(playerComponent, tests,
+            {ready: true, imageCount: 2, frameCount: 4, slideInterval: 10000, transitionDuration: 240})
+        const frames = []
+        player.transitionFrameChanged.connect(function() { frames.push(player.transitionFrame) })
+        player.advance()
+        wait(40)
+        compare(player.transitionFrame, 0)
+        compare(player.transitionProgress, 0)
+        tryCompare(player, "currentIndex", 1, 1000)
+        compare(frames, [1, 2, 3, 0])
+        verify(!player.animating)
+    }
+
+    function test_ten_second_frame_hold_does_not_update_between_boundaries() {
+        const player = createTemporaryObject(playerComponent, tests,
+            {ready: true, imageCount: 2, frameCount: 4, slideInterval: 60000, transitionDuration: 30000})
+        const frames = []
+        player.transitionFrameChanged.connect(function() { frames.push(player.transitionFrame) })
+        player.advance()
+        wait(1000)
+        compare(player.transitionFrame, 0)
+        compare(frames, [])
+        tryCompare(player, "transitionFrame", 1, 11000)
+        compare(frames, [1])
+        wait(100)
+        compare(player.transitionFrame, 1)
+        compare(frames, [1])
+        player.reset()
+    }
+
+    function test_loading_preserves_the_remaining_frame_hold() {
+        const player = createTemporaryObject(playerComponent, tests,
+            {ready: true, imageCount: 2, frameCount: 3, slideInterval: 10000, transitionDuration: 2000})
+        player.advance()
+        wait(600)
+        player.loading = true
+        wait(500)
+        compare(player.transitionFrame, 0)
+        player.loading = false
+        tryCompare(player, "transitionFrame", 1, 700)
+        player.reset()
     }
 
     function test_legacy_metadata_fallback_loads_cached_assets() {

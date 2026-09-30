@@ -464,6 +464,7 @@ Item {
                     loading: previewShader.loading
                     enabled: renderer.displayPlaybackSettings.mode === "Slideshow"
                     imageCount: renderer.displayImageCount
+                    frameCount: renderer.displayFrameCount
                     generation: renderer.displayGeneration
                     slideInterval: (renderer.displayPlaybackSettings.slideInterval || 10) * 1000
                     transitionDuration: renderer.displayPlaybackSettings.transitionDuration || 1500
@@ -487,6 +488,7 @@ Item {
                         currentIndex: previewPlayback.currentIndex
                         nextIndex: previewPlayback.nextIndex
                         transitionProgress: previewPlayback.transitionProgress
+                        transitionFrame: previewPlayback.transitionFrame
                         transitionFrames: renderer.displayFrameCount
                     }
                 }

@@ -59,6 +59,8 @@ List slideshow images in order. The CLI skips work when its full input signature
 
 The rendered directory contains `atlas.png`, `metadata.png`, still grids, transition frame grids, still PNG previews, and `manifest.json`. It can be moved as a unit. The preview PNGs are exports; Plasma displays the compact glyph/color maps through a small shader. Each transition includes both exact still endpoints and optimized intermediate frames. The last slideshow image also transitions to the first. Playback loads a complete replacement frame into a second buffer and keeps the current frame visible until its replacement is ready; transition timing pauses if a needed frame is still loading.
 
+Playback advances only at prepared-frame boundaries, including when a frame is held for several seconds. Each complete frame is composed once into a GPU texture, which stays frozen between frame changes and can be reused when other desktop items redraw. Display-size changes and graphics-context recovery refresh that texture. The RGBA output texture uses four bytes per physical display pixel (about 28 MiB at 3414×2134), plus Qt's render-target buffers and the compact input maps; it does not load the PNG previews for playback.
+
 The service publishes complete renders in immutable generation directories and maintains a separate content-based still cache. Changing transition settings reuses matching stills without overwriting another variant. `--still-cache PATH` enables the same reuse for CLI exports. A forced render publishes a new generation and refreshes the still cache atomically. Requests superseded by the same client are removed from the queue or stopped when no other client needs them. Source-image memory stays bounded to a single still or a pair of slideshow images.
 
 ## Quality controls
@@ -92,5 +94,7 @@ uv pip install --python .venv/bin/python --group dev
 ```
 
 The suite covers saved-color parity, transition paths and color fitting, immutable cache generations, service requests and recovery, and packaging. Qt Quick lifecycle tests run when `qmltestrunner` and the Qt Quick Test module are available. The comparison scripts share playback preview and metric helpers; their reports record input/font hashes, renderer revision, effective options, and measured solve costs.
+
+The GPU output-cache checks use Qt's offscreen backend. Additional 2× display-scale cases require an exposed X11 window and can be enabled with `ASCII_WALLPAPER_TEST_NATIVE_QML=1`; leave this unset for headless runs.
 
 The project remains licensed under [AGPL-3.0-or-later](LICENSE.md).
