@@ -192,7 +192,8 @@ WallpaperItem {
                 wrapMode: Text.WordWrap
                 color: "white"
                 text: renderer.renderState === "error" ? renderer.error
-                    : renderer.renderState === "idle" ? "Select an image in wallpaper settings"
+                    : renderer.renderState === "idle" ? (root.configImages.length
+                        ? "Select Render now in wallpaper settings" : "Select an image in wallpaper settings")
                     : renderer.stage || "Preparing ASCII wallpaper"
             }
             Controls.ProgressBar {

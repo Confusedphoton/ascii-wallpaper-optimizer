@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
+from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import lru_cache
-import re
+from math import gcd
 from typing import Callable
 
 import numpy as np
@@ -12,7 +14,16 @@ import torch
 import torch.nn.functional as F
 
 from .assets import blue_noise, linear_to_srgb, srgb_to_linear
-from .defaults import DEFAULT_USE_SHORTLIST, DEFAULT_GLYPH_ENTROPY_STRENGTH
+from .defaults import (
+    DEFAULT_GLYPH_ENTROPY_STRENGTH,
+    DEFAULT_PERCEPTUAL_LOSS,
+    DEFAULT_POLISH_STEPS,
+    DEFAULT_REFINEMENT_SWEEPS,
+    DEFAULT_USE_SHORTLIST,
+    PERCEPTUAL_WEIGHTS,
+)
+from .diagnostics import SolverTrace
+from .perceptual import SpatialMetrics, ppd_for_width
 from .settings import finite_float
 from .tone import quantize_playback_lab, srgb_to_oklab
 
@@ -30,11 +41,12 @@ def _cells(image: torch.Tensor, rows: int, cols: int, height: int, width: int) -
 
 def _render(mask: torch.Tensor, color: torch.Tensor, rows: int, cols: int,
             height: int, width: int, background: torch.Tensor | None = None) -> torch.Tensor:
-    coverage = mask.reshape(rows, cols, height, width).permute(0, 2, 1, 3).reshape(rows * height, cols * width)
-    foreground = color.reshape(rows, cols, 3).repeat_interleave(height, 0).repeat_interleave(width, 1)
-    pixels = coverage[..., None] * foreground
+    # Compose before rearranging cells: expanding foreground colors over the
+    # whole image needlessly copied them twice, including in every backward pass.
+    pixels = mask[..., None] * color[:, None, :]
     if background is not None:
-        pixels = pixels + (1 - coverage[..., None]) * background.reshape(3)
+        pixels = pixels + (1 - mask[..., None]) * background.reshape(3)
+    pixels = pixels.reshape(rows, cols, height, width, 3).permute(0, 2, 1, 3, 4).reshape(rows * height, cols * width, 3)
     return pixels.permute(2, 0, 1).unsqueeze(0)
 
 
@@ -72,8 +84,58 @@ def _negative_glyph_entropy(probabilities: torch.Tensor) -> torch.Tensor:
     return (probabilities * probabilities.clamp_min(1e-12).log()).sum()
 
 
+def _glyph_counts(glyph: torch.Tensor, glyph_count: int, dtype: torch.dtype) -> torch.Tensor:
+    """Fixed-size histogram; bincount synchronizes to infer its output size."""
+    return torch.zeros(glyph_count, device=glyph.device, dtype=dtype).scatter_add_(
+        0, glyph, torch.ones(glyph.shape, device=glyph.device, dtype=dtype))
+
+
+def _hard_weights(logits: torch.Tensor, temperature: float) -> torch.Tensor:
+    """One glyph in the forward pass, softmax derivatives in the backward pass."""
+    soft = torch.softmax(logits / temperature, dim=1)
+    hard = F.one_hot(soft.argmax(1), soft.shape[1]).to(soft.dtype)
+    return hard + (soft - soft.detach())
+
+
+_HARD_WEIGHTS_IMPLEMENTATION = _hard_weights
+
+
+def _layout_error(rendered: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Cell-aligned subpatch color errors; never pool away the entire glyph."""
+    shape = (min(4, rendered.shape[-2]), min(2, rendered.shape[-1]))
+    return (F.adaptive_avg_pool2d(rendered, shape)
+            - F.adaptive_avg_pool2d(target, shape)).square().sum(1).mean((-2, -1))
+
+
+@torch.no_grad()
+def _accept_discrete_proposals(glyph: torch.Tensor, color: torch.Tensor,
+                               bank: torch.Tensor, cell_ids: torch.Tensor,
+                               proposed_glyph: torch.Tensor, proposed_color: torch.Tensor,
+                               score: Callable, diagnostics: SolverTrace | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Validate batches against the whole objective, splitting rejected batches."""
+    pending = [cell_ids] if len(cell_ids) else []
+    current_score = score(bank[glyph], color, glyph).detach()
+    while pending:
+        ids = pending.pop()
+        trial_glyph, trial_color = glyph.clone(), color.clone()
+        trial_glyph[ids] = proposed_glyph[ids]
+        trial_color[ids] = proposed_color[ids]
+        trial_score = score(bank[trial_glyph], trial_color, trial_glyph).detach()
+        if diagnostics is not None:
+            diagnostics.counters["acceptance_trials"] = diagnostics.counters.get("acceptance_trials", 0) + 1
+        if trial_score < current_score:
+            glyph, color, current_score = trial_glyph, trial_color, trial_score
+            if diagnostics is not None:
+                diagnostics.counters["accepted_cells"] = diagnostics.counters.get("accepted_cells", 0) + len(ids)
+        elif len(ids) > 1:
+            midpoint = len(ids) // 2
+            pending.extend((ids[midpoint:], ids[:midpoint]))
+    return glyph, color
+
+
 def _glyph_entropy_move_cost(glyph: torch.Tensor, indices: torch.Tensor,
-                             counts: torch.Tensor) -> torch.Tensor:
+                             counts: torch.Tensor,
+                             cell_ids: torch.Tensor | None = None) -> torch.Tensor:
     """Exact entropy change for each individual proposed glyph replacement.
 
     Proposals are ranked individually; simultaneous changes must still pass
@@ -86,8 +148,9 @@ def _glyph_entropy_move_cost(glyph: torch.Tensor, indices: torch.Tensor,
     current = contribution(counts)
     removal = contribution((counts - 1).clamp_min(0)) - current
     addition = contribution(counts + 1) - current
-    cost = removal[glyph, None] + addition[indices]
-    return torch.where(indices == glyph[:, None], 0, cost)
+    current_glyph = glyph if cell_ids is None else glyph[cell_ids]
+    cost = removal[current_glyph, None] + addition[indices]
+    return torch.where(indices == current_glyph[:, None], 0, cost)
 
 
 def _ink_lightness_reward(color: torch.Tensor, ink_presence: torch.Tensor) -> torch.Tensor:
@@ -126,10 +189,16 @@ def _oklab_to_rgb(color: torch.Tensor) -> torch.Tensor:
 
 def _rgb_to_oklab(color: torch.Tensor) -> torch.Tensor:
     _, _, rgb_lms, lms_lab = _color_matrices(color.device, color.dtype)
-    lms = (color @ rgb_lms).clamp_min(0)
+    linear_lms = color @ rgb_lms
+    lms = linear_lms + (linear_lms.clamp_min(0) - linear_lms).detach()
     # The cube-root derivative is infinite at black. Keep exact forward values
     # with a finite derivative for colors fitted at the RGB gamut boundary.
-    roots = lms.clamp_min(1e-12).pow(1 / 3)
+    # RGB8's first nonzero linear channel is about 3e-4. A finite surrogate
+    # slope below that scale lets rounded black ink recover during fitting,
+    # instead of becoming an absorbing state through clamp's zero derivative.
+    safe = lms.clamp_min(1e-4)
+    safe = lms + (safe - lms).detach()
+    roots = safe.pow(1 / 3)
     roots = roots + (lms.pow(1 / 3) - roots).detach()
     return roots @ lms_lab
 
@@ -141,9 +210,13 @@ def _color_parameter(lab: torch.Tensor) -> torch.nn.Parameter:
         return torch.nn.Parameter(linear_to_srgb(rgb))
 
 
-def _playback_color(srgb: torch.Tensor) -> torch.Tensor:
+def _playback_color(srgb: torch.Tensor, *, neutral_ink: bool = False) -> torch.Tensor:
     """Decode RGB8 ink with gradients through RGB, except for byte rounding."""
-    srgb = srgb.clamp(0, 1)
+    # Parameters are projected after every update. Preserve a derivative at
+    # RGB boundaries so a channel that reaches zero can move back into gamut.
+    if neutral_ink:
+        srgb = srgb.mean(-1, keepdim=True).expand_as(srgb)
+    srgb = srgb + (srgb.clamp(0, 1) - srgb).detach()
     quantized = (srgb * 255).round() / 255
     srgb = srgb + (quantized - srgb).detach()
     return _rgb_to_oklab(srgb_to_linear(srgb))
@@ -204,30 +277,24 @@ def _saturation_loss(rendered: torch.Tensor, target_lab: torch.Tensor,
                     invert_ink: bool = False, displayed_lab: torch.Tensor | None = None,
                     source_chroma: torch.Tensor | None = None,
                     source_weight: torch.Tensor | None = None) -> torch.Tensor:
-    """Preserve source saturation and hue after the OKLab display tone transform.
+    """Symmetrically preserve source C/L and hue in squared OKLab units.
 
-    A magnitude-only deficit also rewards unrelated hues. Measure the deficit
-    along the source hue and penalize perpendicular chroma. Allow stronger ink
-    in that hue so sparse glyphs can compensate for their background gaps.
+    Compare displayed a,b with source a/L,b/L times displayed L. This avoids
+    dividing by rendered lightness and gives black/neutral sources no invented
+    chroma. Both excess and missing chroma are errors, including on dark pixels.
+    Pixel/structure losses, rather than a chroma floor, constrain glyph gaps.
     """
     if displayed_lab is None:
         displayed_lab = _display_headroom_lab(rendered, invert_ink=invert_ink)
     if source_chroma is None:
-        source_chroma = (target_lab[:, 1:].square().sum(1, keepdim=True) + 1e-8).sqrt()
+        source_chroma = target_lab[:, 1:].norm(dim=1, keepdim=True)
     scale = (torch.quantile(source_chroma.detach().flatten(), 0.95).clamp_min(0.02)
              if chroma_scale is None else chroma_scale)
     weight = (1 + 4 * (source_chroma / scale).clamp(max=1).square()
               if source_weight is None else source_weight)
-    direction = target_lab[:, 1:] / source_chroma
-    aligned_chroma = (displayed_lab[:, 1:] * direction).sum(1, keepdim=True)
-    perpendicular = displayed_lab[:, 1:] - aligned_chroma * direction
-    # Holding absolute chroma constant while lifting lightness washes out ink.
-    # Preserve C/L on brighter pixels; retain the source chroma floor on darker
-    # pixels so glyph gaps cannot satisfy the correction by turning black.
-    lightness_ratio = (displayed_lab[:, :1] / target_lab[:, :1].clamp_min(1e-6)).clamp_min(1)
-    required_chroma = source_chroma * lightness_ratio
-    chroma_error = (torch.relu(required_chroma - aligned_chroma).square()
-                    + perpendicular.square().sum(1, keepdim=True))
+    source_chromaticity = target_lab[:, 1:] / target_lab[:, :1].clamp_min(1e-6)
+    required_chroma = source_chromaticity * displayed_lab[:, :1]
+    chroma_error = (displayed_lab[:, 1:] - required_chroma).square().sum(1, keepdim=True)
     return (weight * chroma_error).mean((1, 2, 3))
 
 
@@ -283,13 +350,14 @@ def _display_gamut_projection(color: torch.Tensor) -> torch.Tensor:
     return result
 
 
+def _sobel_filters(image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    horizontal = image.new_tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]).reshape(1, 1, 3, 3) / 8
+    return (horizontal.expand(image.shape[1], 1, 3, 3),
+            horizontal.transpose(-1, -2).expand(image.shape[1], 1, 3, 3))
+
+
 def _sobel_gradients(image_lab: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    horizontal = image_lab.new_tensor([
-        [-1, 0, 1], [-2, 0, 2], [-1, 0, 1],
-    ]).reshape(1, 1, 3, 3) / 8
-    vertical = horizontal.transpose(-1, -2)
-    horizontal = horizontal.expand(image_lab.shape[1], 1, 3, 3)
-    vertical = vertical.expand(image_lab.shape[1], 1, 3, 3)
+    horizontal, vertical = _sobel_filters(image_lab)
     padded = F.pad(image_lab, (1, 1, 1, 1), mode="replicate")
     gx = F.conv2d(padded, horizontal, groups=image_lab.shape[1])
     gy = F.conv2d(padded, vertical, groups=image_lab.shape[1])
@@ -349,7 +417,8 @@ def _loss(rendered: torch.Tensor, target: torch.Tensor, *,
           gradient_target_lab: torch.Tensor | None = None,
           gradient_target_gradients: tuple[torch.Tensor, torch.Tensor] | None = None,
           gradient_loss_strength: float = 0.0,
-          invert_ink: bool = False, displayed_lab: torch.Tensor | None = None) -> torch.Tensor:
+          invert_ink: bool = False, displayed_lab: torch.Tensor | None = None,
+          components: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
     if target_lab is None:
         target_lab = target
     residual = rendered - target_lab
@@ -357,22 +426,36 @@ def _loss(rendered: torch.Tensor, target: torch.Tensor, *,
     # Pixel color, low-frequency color, and edge/structure differences.
     loss = ((local_weight * pixel_error).mean() if detail_loss == "local_color"
             else pixel_error.mean())
+    if components is not None:
+        components["pixel"] = loss
     if target_pyramid is None:
         target_pyramid = tuple((factor, weight, F.avg_pool2d(target_lab, factor))
                                for factor, weight in ((2, 1.0), (4, 1.5), (8, 2.0))
                                if min(rendered.shape[-2:]) >= factor)
     for factor, weight, pooled_target in target_pyramid:
         pooled = (F.avg_pool2d(rendered, factor) - pooled_target).square()
-        loss = loss + weight * pooled.sum(1, keepdim=True).mean()
+        term = weight * pooled.sum(1, keepdim=True).mean()
+        loss = loss + term
+        if components is not None:
+            components[f"pool_{factor}"] = term
     difference = residual[:, :1]
     if difference.shape[-1] > 1:
-        loss = loss + 0.35 * (difference[..., 1:] - difference[..., :-1]).square().mean()
+        term = 0.35 * (difference[..., 1:] - difference[..., :-1]).square().mean()
+        loss = loss + term
+        if components is not None:
+            components["luminance_horizontal"] = term
     if difference.shape[-2] > 1:
-        loss = loss + 0.35 * (difference[..., 1:, :] - difference[..., :-1, :]).square().mean()
+        term = 0.35 * (difference[..., 1:, :] - difference[..., :-1, :]).square().mean()
+        loss = loss + term
+        if components is not None:
+            components["luminance_vertical"] = term
     if detail_loss == "chroma_contrast":
         chroma_difference = residual[:, 1:]
         local_mean = F.avg_pool2d(F.pad(chroma_difference, (4, 4, 4, 4), mode="replicate"), 9, stride=1)
-        loss = loss + 2.0 * (chroma_difference - local_mean).square().mean()
+        term = 2.0 * (chroma_difference - local_mean).square().mean()
+        loss = loss + term
+        if components is not None:
+            components["chroma_contrast"] = term
     elif detail_loss == "color_tail":
         if cell is None:
             raise ValueError("color_tail requires a cell size")
@@ -381,14 +464,20 @@ def _loss(rendered: torch.Tensor, target: torch.Tensor, *,
         chroma_error = chroma.square().mean(1).squeeze(0)
         rows, cols = chroma_error.shape[0] // height, chroma_error.shape[1] // width
         patches = chroma_error.reshape(rows, height, cols, width).permute(0, 2, 1, 3).reshape(-1, height * width)
-        loss = loss + 0.75 * patches.topk(max(1, height * width // 10), dim=1).values.mean()
+        term = 0.75 * patches.topk(max(1, height * width // 10), dim=1).values.mean()
+        loss = loss + term
+        if components is not None:
+            components["color_tail"] = term
     if gradient_loss_strength:
         if gradient_target_lab is None:
             gradient_target_lab = target_lab
         if displayed_lab is None:
             displayed_lab = _display_headroom_lab(rendered, invert_ink=invert_ink)
-        loss = loss + gradient_loss_strength * _gradient_loss(
+        term = gradient_loss_strength * _gradient_loss(
             displayed_lab, gradient_target_lab, gradient_target_gradients)
+        loss = loss + term
+        if components is not None:
+            components["displayed_sobel"] = term
     return loss
 
 
@@ -421,6 +510,8 @@ class _FrameObjective:
     saturation_target: torch.Tensor | None = None
     glyph_error_movement_strength: float = 0.0
     error_movement_target: torch.Tensor | None = None
+    layout_loss_strength: float = 0.0
+    spatial_metrics: SpatialMetrics | None = None
 
     def __post_init__(self) -> None:
         self.error_movement_directions = self.error_movement_samples = None
@@ -449,34 +540,387 @@ class _FrameObjective:
         self.saturation_scale = None
         self.saturation_chroma = self.saturation_weight = None
         if self.saturation_strength:
-            self.saturation_chroma = (self.saturation_target[:, 1:].square().sum(1, keepdim=True) + 1e-8).sqrt()
+            self.saturation_chroma = self.saturation_target[:, 1:].norm(dim=1, keepdim=True)
             self.saturation_scale = torch.quantile(self.saturation_chroma.flatten(), 0.95).clamp_min(0.02)
             self.saturation_weight = 1 + 4 * (
                 self.saturation_chroma / self.saturation_scale).clamp(max=1).square()
 
-    def __call__(self, rendered: torch.Tensor) -> torch.Tensor:
-        displayed = (_display_headroom_lab(rendered, invert_ink=self.invert_ink)
-                     if self.gradient_strength or self.saturation_strength or self.glyph_error_movement_strength else None)
+    def __call__(self, rendered: torch.Tensor, *,
+                 components: dict[str, torch.Tensor] | None = None,
+                 displayed_lab: torch.Tensor | None = None) -> torch.Tensor:
+        displayed = displayed_lab
+        if displayed is None and (self.gradient_strength or self.saturation_strength or self.glyph_error_movement_strength or self.spatial_metrics is not None):
+            displayed = _display_headroom_lab(rendered, invert_ink=self.invert_ink)
         loss = _loss(rendered, self.target, detail_loss=self.detail_loss,
                      local_weight=self.local_weight, cell=self.cell,
                      target_pyramid=self.target_pyramid,
                      gradient_target_lab=self.gradient_target,
                      gradient_target_gradients=self.gradient_target_gradients,
                      gradient_loss_strength=self.gradient_strength,
-                     invert_ink=self.invert_ink, displayed_lab=displayed)
+                     invert_ink=self.invert_ink, displayed_lab=displayed, components=components)
         if self.saturation_strength:
-            loss = loss + self.saturation_strength * _saturation_loss(
+            term = self.saturation_strength * _saturation_loss(
                 rendered, self.saturation_target, self.saturation_scale,
                 invert_ink=self.invert_ink, displayed_lab=displayed,
                 source_chroma=self.saturation_chroma,
                 source_weight=self.saturation_weight).mean()
+            loss = loss + term
+            if components is not None:
+                components["saturation"] = term
         if self.glyph_error_movement_strength:
             samples = _error_movement_samples(displayed, self.cell, self.error_movement_directions)
             # Projection directions have covariance I/3; multiply by three
             # to keep the scale comparable to squared OKLab pixel distance.
-            loss = loss + self.glyph_error_movement_strength * 3 * (
+            term = self.glyph_error_movement_strength * 3 * (
                 samples - self.error_movement_samples).square().mean()
+            loss = loss + term
+            if components is not None:
+                components["error_movement"] = term
+        if self.layout_loss_strength:
+            height, width = self.cell
+            rows, cols = self.target.shape[-2] // height, self.target.shape[-1] // width
+            def cell_images(image):
+                return _cells(image.squeeze(0), rows, cols, height, width).reshape(
+                    -1, height, width, 3).permute(0, 3, 1, 2)
+            term = self.layout_loss_strength * _layout_error(
+                cell_images(rendered), cell_images(self.target)).mean()
+            loss = loss + term
+            if components is not None:
+                components["layout"] = term
+        if self.spatial_metrics is not None:
+            rgb = _oklab_to_rgb(displayed.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+            terms, _ = self.spatial_metrics.terms(rgb, selected=PERCEPTUAL_WEIGHTS)
+            for name, weight in PERCEPTUAL_WEIGHTS.items():
+                term = weight * terms[name]
+                loss = loss + term
+                if components is not None:
+                    components[name] = term
         return loss
+
+
+def _replicate_padding_adjoint(padded: torch.Tensor, padding: int) -> torch.Tensor:
+    """Fold a padded gradient back through replicate padding, including corners."""
+    horizontal = padded[..., :, padding:-padding].clone()
+    horizontal[..., 0] += padded[..., :, :padding].sum(-1)
+    horizontal[..., -1] += padded[..., :, -padding:].sum(-1)
+    result = horizontal[..., padding:-padding, :].clone()
+    result[..., 0, :] += horizontal[..., :padding, :].sum(-2)
+    result[..., -1, :] += horizontal[..., -padding:, :].sum(-2)
+    return result
+
+
+def _display_ink_table(color: torch.Tensor, background: torch.Tensor,
+                       coverage: torch.Tensor, *, invert_ink: bool) -> torch.Tensor:
+    """Map each actual atlas coverage value once for a cell's current ink.
+
+    Glyphs share the same ink/background in a cell. Looking up their repeated
+    coverage values is exact, and avoids tone/gamut mapping the same composed
+    color separately for every occurrence in every candidate glyph.
+    """
+    alpha = coverage[None, None, None]
+    pixels = alpha * color[:, :, None, None] + (1 - alpha) * background[None, :, None, None]
+    return _display_headroom_lab(pixels, invert_ink=invert_ink).squeeze(2)
+
+
+class _ReplacementState:
+    """Frame-wide residual/adjoint fields shared by all replacement batches.
+
+    For every quadratic term ||A*x-target||², the exact replacement delta is
+    <gradient, delta> + ||A*delta||². Convolutions and pooling adjoints prepare
+    the gradient once. Nonlinear display mapping supplies a separate pixel
+    delta in displayed OKLab; its Sobel loss is then quadratic in that delta.
+    """
+
+    @torch.no_grad()
+    def __init__(self, objective: _FrameObjective, rendered: torch.Tensor):
+        if objective.spatial_metrics is not None:
+            raise ValueError("Exact replacement scoring does not support the perceptual losses")
+        self.objective = objective
+        self.rendered = rendered.detach()
+        self.height, self.width = objective.cell
+        self.frame_height, self.frame_width = rendered.shape[-2:]
+        self.rows = self.frame_height // self.height
+        self.cols = self.frame_width // self.width
+        self.count = self.rows * self.cols
+        self.area = self.frame_height * self.frame_width
+        self.base = self.cells(self.rendered)
+        self.target = self.cells(objective.target)
+        residual = self.rendered - objective.target
+        weight = objective.local_weight if objective.detail_loss == "local_color" else None
+        self.pixel_weight = self.cells(weight) if weight is not None else None
+        gradient = 2 * residual / self.area
+        if weight is not None:
+            gradient = gradient * weight
+        for factor, strength, target in objective.target_pyramid:
+            pooled = F.avg_pool2d(self.rendered, factor) - target
+            adjoint = pooled.repeat_interleave(factor, -2).repeat_interleave(factor, -1)
+            adjoint = F.pad(adjoint, (0, self.frame_width - adjoint.shape[-1],
+                                     0, self.frame_height - adjoint.shape[-2]))
+            gradient += (2 * strength / (target.shape[-2] * target.shape[-1] * factor ** 2)) * adjoint
+        lightness = residual[:, :1]
+        if self.frame_width > 1:
+            difference = (0.7 / (self.frame_height * (self.frame_width - 1))) * (
+                lightness[..., 1:] - lightness[..., :-1])
+            gradient[:, :1, :, :-1] -= difference
+            gradient[:, :1, :, 1:] += difference
+        if self.frame_height > 1:
+            difference = (0.7 / ((self.frame_height - 1) * self.frame_width)) * (
+                lightness[..., 1:, :] - lightness[..., :-1, :])
+            gradient[:, :1, :-1, :] -= difference
+            gradient[:, :1, 1:, :] += difference
+        if objective.detail_loss == "chroma_contrast":
+            chroma = residual[:, 1:]
+            contrast = chroma - F.avg_pool2d(F.pad(chroma, (4, 4, 4, 4), mode="replicate"), 9, stride=1)
+            kernel = chroma.new_ones((2, 1, 9, 9)) / 81
+            adjoint = _replicate_padding_adjoint(F.conv_transpose2d(contrast, kernel, groups=2), 4)
+            gradient[:, 1:] += 2 * (contrast - adjoint) / self.area
+        if objective.layout_loss_strength:
+            with torch.enable_grad():
+                cells = self.base.detach().requires_grad_()
+                layout = objective.layout_loss_strength * _layout_error(cells, self.target).mean()
+                cell_gradient = torch.autograd.grad(layout, cells)[0]
+            gradient += cell_gradient.reshape(self.rows, self.cols, 3, self.height, self.width).permute(
+                2, 0, 3, 1, 4).reshape_as(gradient)
+        self.gradient = self.cells(gradient)
+        self.displayed = self.displayed_cells = self.display_gradient = None
+        self.sobel_kernels = _sobel_filters(rendered)
+        self.delta_sobel_kernels = torch.stack((self.sobel_kernels[0][0], self.sobel_kernels[1][0]))
+        if objective.gradient_strength or objective.saturation_strength or objective.glyph_error_movement_strength:
+            self.displayed = _display_headroom_lab(self.rendered, invert_ink=objective.invert_ink)
+            self.displayed_cells = self.cells(self.displayed)
+        if objective.gradient_strength:
+            gx, gy = _sobel_gradients(self.displayed)
+            tx, ty = objective.gradient_target_gradients
+            horizontal, vertical = self.sobel_kernels
+            adjoint = (F.conv_transpose2d(gx - tx, horizontal, groups=3)
+                       + F.conv_transpose2d(gy - ty, vertical, groups=3))
+            self.display_gradient = self.cells(_replicate_padding_adjoint(adjoint, 1)) * (
+                2 * objective.gradient_strength / self.area)
+        self.saturation_target = self.saturation_chroma = self.saturation_weight = self.saturation_before = None
+        if objective.saturation_strength:
+            self.saturation_target = self.cells(objective.saturation_target)
+            self.saturation_chroma = self.cells(objective.saturation_chroma)
+            self.saturation_weight = self.cells(objective.saturation_weight)
+            self.saturation_before = _saturation_loss(
+                self.base, self.saturation_target, objective.saturation_scale,
+                invert_ink=objective.invert_ink, displayed_lab=self.displayed_cells,
+                source_chroma=self.saturation_chroma, source_weight=self.saturation_weight)
+        self.tail_before = None
+        if objective.detail_loss == "color_tail":
+            self.tail_before = self.tail_error(self.base, self.target)
+        self.transport_before = None
+        if objective.glyph_error_movement_strength:
+            samples = _error_movement_samples(self.displayed, objective.cell, objective.error_movement_directions)
+            self.transport_before = (samples - objective.error_movement_samples).square().sum((1, 4))
+
+    def cells(self, image: torch.Tensor) -> torch.Tensor:
+        channels = image.shape[1]
+        return image[0].reshape(channels, self.rows, self.height, self.cols, self.width).permute(
+            1, 3, 0, 2, 4).reshape(self.count, channels, self.height, self.width)
+
+    def tail_error(self, pixels: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        error = (pixels[:, 1:] - targets[:, 1:]).square().mean(1).flatten(1)
+        return error.topk(max(1, self.height * self.width // 10), dim=1).values.mean(1)
+
+
+class _ReplacementBatchScorer:
+    """Full-frame batch checks without remapping unchanged pixels each time.
+
+    Acceptance only combines the unchanged cells and their fixed proposals.
+    Display mapping is pixel-local, so both choices can be prepared once. Each
+    check still evaluates the complete image objective, including interactions
+    between simultaneous changes; no approximate acceptance delta is used.
+    """
+
+    @torch.no_grad()
+    def __init__(self, state: _ReplacementState, bank: torch.Tensor,
+                 glyph: torch.Tensor, color: torch.Tensor,
+                 proposed_glyph: torch.Tensor, proposed_color: torch.Tensor,
+                 cell_ids: torch.Tensor, background: torch.Tensor):
+        self.state = state
+        self.glyph, self.color = glyph, color
+        self.pixels = state.base.clone()
+        mask = bank[proposed_glyph[cell_ids]][:, None].reshape(-1, 1, state.height, state.width)
+        pixels = mask * proposed_color[cell_ids, :, None, None] + (1 - mask) * background[None, :, None, None]
+        self.pixels[cell_ids] = pixels
+        self.displayed = None
+        if state.displayed_cells is not None:
+            self.displayed = state.displayed_cells.clone()
+            self.displayed[cell_ids] = _display_headroom_lab(pixels, invert_ink=state.objective.invert_ink)
+
+    def image(self, cells: torch.Tensor) -> torch.Tensor:
+        state = self.state
+        return cells.permute(0, 2, 3, 1).reshape(state.rows, state.cols, state.height, state.width, 3).permute(
+            0, 2, 1, 3, 4).reshape(state.frame_height, state.frame_width, 3).permute(2, 0, 1)[None]
+
+    @torch.no_grad()
+    def __call__(self, glyph: torch.Tensor, color: torch.Tensor) -> torch.Tensor:
+        changed = ((glyph != self.glyph) | (color != self.color).any(1))[:, None, None, None]
+        rendered = self.image(torch.where(changed, self.pixels, self.state.base))
+        displayed = (self.image(torch.where(changed, self.displayed, self.state.displayed_cells))
+                     if self.displayed is not None else None)
+        return self.state.objective(rendered, displayed_lab=displayed)
+
+
+class _ReplacementContext:
+    """Exact candidate deltas using cell pixels and cached frame adjoint fields.
+
+    No candidate copies a surrounding rendered image. Only the change itself
+    enters pooling and edge kernels. Small zero/replicate halos account for
+    affected outputs at neighboring pixels and the actual frame boundaries.
+    """
+
+    def __init__(self, objective: _FrameObjective, rendered: torch.Tensor,
+                 cell_ids: torch.Tensor, state: _ReplacementState | None = None):
+        self.state = _ReplacementState(objective, rendered) if state is None else state
+        self.objective = objective
+        self.rendered = self.state.rendered
+        self.cell_ids = cell_ids
+        self.height, self.width = objective.cell
+        self.frame_height, self.frame_width = rendered.shape[-2:]
+        self.rows, self.cols = self.state.rows, self.state.cols
+        self.cell_y = cell_ids // self.cols * self.height
+        self.cell_x = cell_ids % self.cols * self.width
+        self.base = self.state.base[cell_ids]
+        self.target = self.state.target[cell_ids]
+        self.gradient = self.state.gradient[cell_ids]
+        self.pixel_weight = self.state.pixel_weight[cell_ids] if self.state.pixel_weight is not None else None
+        self.halos = {}
+        self.pool_indices = None
+        self.pool_valid = {}
+        if any(self.height % factor or self.width % factor for factor, _, _ in objective.target_pyramid):
+            # Worst phase for a cell lattice is 8-gcd(cell_dimension, 8).
+            self.pool_height = ((self.height + 8 - gcd(self.height, 8) + 7) // 8) * 8
+            self.pool_width = ((self.width + 8 - gcd(self.width, 8) + 7) // 8) * 8
+            origin_y, origin_x = self.cell_y // 8 * 8, self.cell_x // 8 * 8
+            device = rendered.device
+            self.pool_indices = (
+                (self.cell_y - origin_y)[:, None, None] * self.pool_width
+                + (self.cell_x - origin_x)[:, None, None]
+                + torch.arange(self.height, device=device)[None, :, None] * self.pool_width
+                + torch.arange(self.width, device=device)[None, None, :]).flatten(1)
+            for factor, _, target in objective.target_pyramid:
+                yy = origin_y[:, None, None] // factor + torch.arange(self.pool_height // factor, device=device)[None, :, None]
+                xx = origin_x[:, None, None] // factor + torch.arange(self.pool_width // factor, device=device)[None, None, :]
+                self.pool_valid[factor] = ((yy < target.shape[-2]) & (xx < target.shape[-1]))[:, None]
+
+    @staticmethod
+    def reduce(value: torch.Tensor) -> torch.Tensor:
+        return value.sum((-3, -2, -1), dtype=torch.float64)
+
+    def halo(self, delta: torch.Tensor, padding: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pad only the pixel change, replicating it at physical frame edges."""
+        batch, count, channels = delta.shape[:3]
+        if padding not in self.halos:
+            device = delta.device
+            yy = torch.arange(-padding, self.height + padding, device=device)[None, :, None]
+            xx = torch.arange(-padding, self.width + padding, device=device)[None, None, :]
+            frame_y = self.cell_y[:, None, None] + yy
+            frame_x = self.cell_x[:, None, None] + xx
+            local_y = frame_y.clamp(0, self.frame_height - 1) - self.cell_y[:, None, None] + padding
+            local_x = frame_x.clamp(0, self.frame_width - 1) - self.cell_x[:, None, None] + padding
+            indices = (local_y * (self.width + 2 * padding) + local_x).flatten(1)
+            valid = ((frame_y >= 0) & (frame_y < self.frame_height)
+                     & (frame_x >= 0) & (frame_x < self.frame_width))[:, None]
+            self.halos[padding] = indices, valid
+        indices, valid = self.halos[padding]
+        padded = F.pad(delta, (padding, padding, padding, padding)).flatten(-2)
+        padded = padded.gather(-1, indices[:, None, None].expand(batch, count, channels, -1))
+        return (padded.reshape(batch * count, channels, self.height + 2 * padding, self.width + 2 * padding),
+                valid[:, None].expand(-1, count, -1, -1, -1).flatten(0, 1))
+
+    def quadratic_energy(self, delta: torch.Tensor) -> torch.Tensor:
+        state = self.state
+        objective = self.objective
+        batch, count = delta.shape[:2]
+        square = delta.square()
+        energy = self.reduce(square if self.pixel_weight is None else square * self.pixel_weight[:, None]) / state.area
+        aligned = None
+        for factor, strength, target in objective.target_pyramid:
+            if self.height % factor == 0 and self.width % factor == 0:
+                pooled = F.avg_pool2d(delta.flatten(0, 1), factor).reshape(batch, count, 3, self.height // factor, self.width // factor)
+                norm = self.reduce(pooled.square())
+            else:
+                if aligned is None:
+                    aligned = delta.new_zeros((batch, count, 3, self.pool_height * self.pool_width)).scatter(
+                        -1, self.pool_indices[:, None, None].expand(batch, count, 3, -1), delta.flatten(-2))
+                    aligned = aligned.reshape(batch * count, 3, self.pool_height, self.pool_width)
+                pooled = F.avg_pool2d(aligned, factor).reshape(batch, count, 3, self.pool_height // factor, self.pool_width // factor)
+                norm = self.reduce(pooled.square() * self.pool_valid[factor][:, None])
+            energy += strength * norm / (target.shape[-2] * target.shape[-1])
+        lightness = delta[:, :, 0]
+        if self.frame_width > 1:
+            norm = (lightness[..., 1:] - lightness[..., :-1]).square().sum((-2, -1), dtype=torch.float64)
+            norm += lightness[..., 0].square().sum(-1) * (self.cell_x > 0)[:, None]
+            norm += lightness[..., -1].square().sum(-1) * (self.cell_x + self.width < self.frame_width)[:, None]
+            energy += 0.35 * norm / (self.frame_height * (self.frame_width - 1))
+        if self.frame_height > 1:
+            norm = (lightness[..., 1:, :] - lightness[..., :-1, :]).square().sum((-2, -1), dtype=torch.float64)
+            norm += lightness[..., 0, :].square().sum(-1) * (self.cell_y > 0)[:, None]
+            norm += lightness[..., -1, :].square().sum(-1) * (self.cell_y + self.height < self.frame_height)[:, None]
+            energy += 0.35 * norm / ((self.frame_height - 1) * self.frame_width)
+        if objective.detail_loss == "chroma_contrast":
+            padded, valid = self.halo(delta[:, :, 1:], 8)
+            contrast = padded[..., 4:-4, 4:-4] - F.avg_pool2d(padded, 9, stride=1)
+            norm = self.reduce(contrast.square() * valid[..., 4:-4, 4:-4]).reshape(batch, count)
+            energy += norm / state.area
+        if objective.layout_loss_strength:
+            cells = delta.flatten(0, 1)
+            energy += objective.layout_loss_strength * _layout_error(cells, torch.zeros_like(cells)).reshape(batch, count) / state.count
+        return energy
+
+    def scores(self, replacements: torch.Tensor,
+               displayed_replacements: torch.Tensor | None = None) -> torch.Tensor:
+        """Exact full-objective change for each independent cell replacement."""
+        state, objective = self.state, self.objective
+        batch, count = replacements.shape[:2]
+        delta = replacements - self.base[:, None]
+        result = self.reduce(delta * self.gradient[:, None]) + self.quadratic_energy(delta)
+        pixels = replacements.flatten(0, 1)
+        def expand(values):
+            return values[self.cell_ids, None].expand(-1, count, -1, -1, -1).flatten(0, 1)
+        displayed = None
+        if objective.gradient_strength or objective.saturation_strength or objective.glyph_error_movement_strength:
+            displayed = (_display_headroom_lab(pixels, invert_ink=objective.invert_ink)
+                         if displayed_replacements is None else displayed_replacements.flatten(0, 1))
+        if objective.gradient_strength:
+            display_delta = displayed.reshape_as(replacements) - state.displayed_cells[self.cell_ids, None]
+            result += self.reduce(display_delta * state.display_gradient[self.cell_ids, None])
+            padded, valid = self.halo(display_delta, 2)
+            # Compute both Sobel directions in one convolution. Treat color
+            # channels as batch entries to avoid tiny grouped convolutions.
+            response = F.conv2d(padded.reshape(-1, 1, self.height + 4, self.width + 4),
+                                state.delta_sobel_kernels)
+            response = response.reshape(batch * count, 6, self.height + 2, self.width + 2)
+            norm = self.reduce(response.square() * valid[..., 1:-1, 1:-1]).reshape(batch, count)
+            result += objective.gradient_strength * norm / state.area
+        if objective.saturation_strength:
+            error = _saturation_loss(pixels, expand(state.saturation_target), objective.saturation_scale,
+                invert_ink=objective.invert_ink, displayed_lab=displayed,
+                source_chroma=expand(state.saturation_chroma), source_weight=expand(state.saturation_weight))
+            result += objective.saturation_strength * (
+                error.reshape(batch, count).double() - state.saturation_before[self.cell_ids, None].double()) / state.count
+        if objective.detail_loss == "color_tail":
+            error = state.tail_error(pixels, self.target[:, None].expand_as(replacements).flatten(0, 1))
+            result += 0.75 * (error.reshape(batch, count) - state.tail_before[self.cell_ids, None]) / state.count
+        if objective.glyph_error_movement_strength:
+            display_cells = displayed.reshape_as(replacements)
+            for i, cell_id in enumerate(self.cell_ids.tolist()):
+                row, col = divmod(cell_id, self.cols)
+                for wy in range(max(0, row - 1), min(row, max(0, self.rows - 2)) + 1):
+                    for wx in range(max(0, col - 1), min(col, max(0, self.cols - 2)) + 1):
+                        y, x = wy * self.height, wx * self.width
+                        window = state.displayed[:, :, y:y + 2 * self.height, x:x + 2 * self.width]
+                        trial = window.expand(count, -1, -1, -1).clone()
+                        dy, dx = row * self.height - y, col * self.width - x
+                        trial[:, :, dy:dy + self.height, dx:dx + self.width] = display_cells[i]
+                        samples = _error_movement_samples(trial, objective.cell, objective.error_movement_directions)
+                        target = objective.error_movement_samples[:, :, wy:wy + 1, wx:wx + 1]
+                        error = (samples - target).square().sum((1, 2, 3, 4))
+                        difference = error - state.transport_before[:, wy, wx]
+                        result[i] = result[i] + (objective.glyph_error_movement_strength * 3
+                                                / objective.error_movement_samples.numel()) * difference
+        return result
 
 
 def _candidate_fit(cells: torch.Tensor, masks: torch.Tensor, count: int,
@@ -567,6 +1011,27 @@ def render_grid(grid: Grid, masks: np.ndarray, device: str = "cpu") -> np.ndarra
     return image.squeeze(0).permute(1, 2, 0).cpu().numpy()
 
 
+def _make_spatial_metrics(image_srgb, *, source_srgb, source_oklab, input_oklab,
+                          pad, cell_height, device, viewing_ppd):
+    """Prepare the unencoded source once, preserving the experiment's RGB path."""
+    if source_srgb is not None:
+        if source_srgb.shape != image_srgb.shape:
+            raise ValueError("Perceptual target must match the source image shape")
+        source = torch.as_tensor(source_srgb, dtype=torch.float32, device=device).permute(2, 0, 1)[None]
+        rgb = srgb_to_linear(source)
+    elif source_oklab is not None or input_oklab:
+        lab = source_oklab if source_oklab is not None else image_srgb
+        if lab.shape != image_srgb.shape:
+            raise ValueError("Perceptual target must match the source image shape")
+        source = torch.as_tensor(lab, dtype=torch.float32, device=device)
+        rgb = _oklab_to_rgb(source).permute(2, 0, 1)[None]
+    else:
+        source = torch.as_tensor(image_srgb, dtype=torch.float32, device=device).permute(2, 0, 1)[None]
+        rgb = srgb_to_linear(source)
+    ppd = ppd_for_width(image_srgb.shape[1]) if viewing_ppd is None else viewing_ppd
+    return SpatialMetrics(F.pad(rgb, pad, mode="replicate"), ppd=ppd, cell_height=cell_height)
+
+
 def fit_fixed_glyphs(image_srgb: np.ndarray, masks_np: np.ndarray, glyphs: np.ndarray, *,
                      background_oklab: np.ndarray, steps: int = 24, device: str = "cpu",
                      previous: Grid | None = None, destination: Grid | None = None,
@@ -579,6 +1044,9 @@ def fit_fixed_glyphs(image_srgb: np.ndarray, masks_np: np.ndarray, glyphs: np.nd
                      gradient_loss_strength: float = 1.5,
                      gradient_target_srgb: np.ndarray | None = None,
                      gradient_target_oklab: np.ndarray | None = None,
+                     perceptual_loss: bool = DEFAULT_PERCEPTUAL_LOSS,
+                     perceptual_target_srgb: np.ndarray | None = None,
+                     viewing_ppd: float | None = None,
                      invert_ink: bool = False, input_oklab: bool = False) -> Grid:
     """Fit playback ink colors for already selected glyphs without a glyph solve."""
     if detail_loss not in DETAIL_LOSSES:
@@ -590,6 +1058,10 @@ def fit_fixed_glyphs(image_srgb: np.ndarray, masks_np: np.ndarray, glyphs: np.nd
         saturation_loss_strength = 20.0 if glyph_luminance_bonus > 0 else 0.0
     saturation_loss_strength = finite_float(saturation_loss_strength, "saturation_loss_strength", minimum=0)
     gradient_loss_strength = finite_float(gradient_loss_strength, "gradient_loss_strength", minimum=0)
+    if not isinstance(perceptual_loss, bool):
+        raise ValueError("perceptual_loss must be a boolean")
+    if viewing_ppd is not None:
+        viewing_ppd = finite_float(viewing_ppd, "viewing_ppd", minimum=1, maximum=1024)
     if len(masks_np) > 256:
         raise ValueError("The glyph map supports at most 256 characters")
     height, width = masks_np.shape[1:]
@@ -627,9 +1099,20 @@ def fit_fixed_glyphs(image_srgb: np.ndarray, masks_np: np.ndarray, glyphs: np.nd
         saturation_target = target_tensor(saturation_source)
     objective = _FrameObjective(target, detail_loss, (height, width), invert_ink,
                                 gradient_loss_strength, saturation_loss_strength,
-                                gradient_target, saturation_target)
+                                gradient_target, saturation_target,
+                                spatial_metrics=_make_spatial_metrics(
+                                    image_srgb, source_srgb=perceptual_target_srgb
+                                    if perceptual_target_srgb is not None else gradient_target_srgb
+                                    if gradient_target_srgb is not None else saturation_target_srgb,
+                                    source_oklab=gradient_target_oklab
+                                    if gradient_target_oklab is not None else saturation_target_oklab,
+                                    input_oklab=input_oklab,
+                                    pad=pad, cell_height=height, device=device, viewing_ppd=viewing_ppd)
+                                if perceptual_loss else None)
     background = _project_oklab_colors(torch.as_tensor(
         background_oklab, dtype=torch.float32, device=device).reshape(3))
+    neutral_ink = (perceptual_loss and objective.spatial_metrics.neutral_source
+                   and bool(background[1:].abs().amax() < 1e-6))
     bank = torch.as_tensor(masks_np, dtype=torch.float32, device=device).flatten(1)
     mask = bank[torch.as_tensor(glyphs.astype(np.int64), device=device).flatten()]
     ink_presence = mask.gt(0).any(1)
@@ -663,12 +1146,12 @@ def fit_fixed_glyphs(image_srgb: np.ndarray, masks_np: np.ndarray, glyphs: np.nd
 
     # Preserve the best representable fit. Color objectives may disagree at a
     # gamut boundary, and the final Adam step need not be the best one.
-    best_color = _playback_color(color_parameter.detach())
+    best_color = _playback_color(color_parameter.detach(), neutral_ink=neutral_ink)
     best_loss = color_loss(best_color).detach()
     optimizer = torch.optim.Adam((color_parameter,), lr=0.01)
     for step in range(steps):
         optimizer.zero_grad(set_to_none=True)
-        color = _playback_color(color_parameter)
+        color = _playback_color(color_parameter, neutral_ink=neutral_ink)
         loss = color_loss(color)
         best_color = torch.where(loss.detach() < best_loss, color.detach(), best_color)
         best_loss = torch.minimum(loss.detach(), best_loss)
@@ -679,7 +1162,7 @@ def fit_fixed_glyphs(image_srgb: np.ndarray, masks_np: np.ndarray, glyphs: np.nd
         if on_progress is not None:
             on_progress((step + 1) / max(steps, 1), "Fitting path glyph colors")
     with torch.no_grad():
-        color = _playback_color(color_parameter)
+        color = _playback_color(color_parameter, neutral_ink=neutral_ink)
         best_color = torch.where(color_loss(color) < best_loss, color, best_color)
     if on_progress is not None and steps == 0:
         on_progress(1.0, "Fitting path glyph colors")
@@ -709,21 +1192,41 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
           glyph_error_movement_strength: float = 0.0,
           glyph_entropy_strength: float = DEFAULT_GLYPH_ENTROPY_STRENGTH,
           error_movement_target_oklab: np.ndarray | None = None,
+          layout_loss_strength: float = 0.0,
+          refinement_sweeps: int = DEFAULT_REFINEMENT_SWEEPS,
+          polish_steps: int = DEFAULT_POLISH_STEPS,
+          perceptual_loss: bool = DEFAULT_PERCEPTUAL_LOSS,
+          perceptual_target_srgb: np.ndarray | None = None,
+          viewing_ppd: float | None = None,
+          diagnostics: SolverTrace | None = None,
           invert_ink: bool = False,
           input_oklab: bool = False) -> Grid:
     """Optimize every font glyph per cell with OKLab scoring and bounded RGB ink.
 
     Shortlisting is retained only as an explicit comparison mode. The candidate
     cap and shortlist gradient strength have no effect on the normal solve.
+    Spatial brightness and circular contour preservation participate in Adam,
+    frame retention and final color polish. The exact refinement cache supports
+    only the previous objective, available with perceptual_loss=False.
     """
     if masks_np.shape[0] > 256:
         raise ValueError("The glyph map supports at most 256 characters")
     if not isinstance(use_shortlist, bool):
         raise ValueError("use_shortlist must be a boolean")
+    if not isinstance(perceptual_loss, bool):
+        raise ValueError("perceptual_loss must be a boolean")
+    if viewing_ppd is not None:
+        viewing_ppd = finite_float(viewing_ppd, "viewing_ppd", minimum=1, maximum=1024)
     if detail_loss not in DETAIL_LOSSES:
         raise ValueError(f"Unknown detail loss: {detail_loss}")
     if objective_space != "oklab":
         raise ValueError("The optimizer operates only in OKLab.")
+    for name, value in (("steps", steps), ("refinement_sweeps", refinement_sweeps),
+                        ("polish_steps", polish_steps)):
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 0:
+            raise ValueError(f"{name} must be a nonnegative integer")
+    if perceptual_loss and refinement_sweeps:
+        raise ValueError("Refinement does not support the perceptual losses; use perceptual_loss=False for legacy comparisons")
     glyph_luminance_bonus = finite_float(glyph_luminance_bonus, "glyph_luminance_bonus", minimum=0)
     if saturation_loss_strength is None:
         saturation_loss_strength = 20.0 if glyph_luminance_bonus > 0 else 0.0
@@ -732,6 +1235,7 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
     glyph_error_movement_strength = finite_float(
         glyph_error_movement_strength, "glyph_error_movement_strength", minimum=0)
     glyph_entropy_strength = finite_float(glyph_entropy_strength, "glyph_entropy_strength", minimum=0)
+    layout_loss_strength = finite_float(layout_loss_strength, "layout_loss_strength", minimum=0)
     if (glyph_error_movement_strength and error_movement_target_oklab is not None
             and error_movement_target_oklab.shape != image_srgb.shape):
         raise ValueError("Error movement target must match the source image shape")
@@ -748,6 +1252,13 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
     original_height, original_width = image_srgb.shape[:2]
     rows = (original_height + cell_height - 1) // cell_height
     cols = (original_width + cell_width - 1) // cell_width
+    if diagnostics is not None:
+        diagnostics.start(device, rows=rows, cols=cols, steps=steps, seed=seed,
+                          dither=dither, cell=[cell_width, cell_height],
+                          glyph_count=len(masks_np), use_shortlist=use_shortlist,
+                          refinement_sweeps=int(refinement_sweeps), polish_steps=int(polish_steps))
+    def section(name, **metadata):
+        return diagnostics.section(name, **metadata) if diagnostics is not None else nullcontext()
     pad_height = rows * cell_height - original_height
     pad_width = cols * cell_width - original_width
     image_lab_np = (np.asarray(image_srgb, dtype=np.float32) if input_oklab
@@ -779,8 +1290,7 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         else:
             source_lab = image_lab_np
         saturation_target_lab = target_tensor(source_lab).unsqueeze(0).detach()
-        saturation_chroma = (saturation_target_lab[:, 1:].square().sum(1, keepdim=True)
-                             + 1e-8).sqrt()
+        saturation_chroma = saturation_target_lab[:, 1:].norm(dim=1, keepdim=True)
         saturation_chroma_scale = torch.quantile(saturation_chroma.flatten(), 0.95).clamp_min(0.02)
         saturation_target_cells = _cells(saturation_target_lab.squeeze(0), rows, cols,
                                          cell_height, cell_width)
@@ -806,7 +1316,40 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
                                      glyph_error_movement_strength,
                                      target_tensor(error_movement_target_oklab).unsqueeze(0).detach()
                                      if glyph_error_movement_strength and error_movement_target_oklab is not None
-                                     else None)
+                                     else None, layout_loss_strength,
+                                     spatial_metrics=_make_spatial_metrics(
+                                         image_srgb, source_srgb=perceptual_target_srgb
+                                         if perceptual_target_srgb is not None else gradient_target_srgb
+                                         if gradient_target_srgb is not None else saturation_target_srgb,
+                                         source_oklab=gradient_target_oklab
+                                         if gradient_target_oklab is not None else saturation_target_oklab,
+                                         input_oklab=input_oklab,
+                                         pad=(0, pad_width, 0, pad_height), cell_height=cell_height,
+                                         device=device, viewing_ppd=viewing_ppd)
+                                     if perceptual_loss else None)
+    neutral_ink = (perceptual_loss and frame_objective.spatial_metrics.neutral_source
+                   and bool(background_color[1:].abs().amax() < 1e-6))
+    if diagnostics is not None:
+        diagnostics.metadata.update(coefficients={
+            "pixel": 1.0, "pool_2": 1.0, "pool_4": 1.5, "pool_8": 2.0,
+            "luminance_horizontal": .35, "luminance_vertical": .35,
+            "chroma_contrast": 2.0, "color_tail": .75,
+            "displayed_sobel": gradient_loss_strength, "saturation": saturation_loss_strength,
+            "error_movement": 3 * glyph_error_movement_strength, "layout": layout_loss_strength,
+            "glyph_entropy": glyph_entropy_strength, "ink_reward": -glyph_luminance_bonus,
+            "transition_mask": .025, "transition_color": .010, "transition_schedule": .008,
+            **(PERCEPTUAL_WEIGHTS if perceptual_loss else {})},
+            perceptual_loss=perceptual_loss,
+            neutral_ink=neutral_ink,
+            viewing_ppd=frame_objective.spatial_metrics.ppd if perceptual_loss else None,
+            replacement_diagnostics="Disabled for nonlinear perceptual losses" if perceptual_loss else "Exact",
+            saturation_definition="Symmetric displayed a,b - source (a/L,b/L) times displayed L; "
+                                  "squared OKLab error, source chroma weights 1..5. Black source chroma is zero.",
+            visual_definition="Probability-weighted variance of composed encoded-OKLab glyph pixels and "
+                              "oriented Sobel changes including a zero halo, at current ink/background. "
+                              "These linear diagnostics exclude display tone/gamut mapping.",
+            gradient_definition="RMS derivatives of weighted training terms in logits and bounded RGB ink parameters; "
+                                "includes the straight-through and scheduled-temperature derivatives.")
     local_weight = frame_objective.local_weight
     target_lab = target.detach()
     target_lab_cells = _cells(target_lab.squeeze(0), rows, cols, cell_height, cell_width)
@@ -859,7 +1402,8 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
                 extra.append(torch.as_tensor(grid.color, dtype=torch.float32, device=device).reshape(-1, 1, 3))
             fitted = torch.cat((fitted, *extra), dim=1)
 
-    sample_masks = bank[indices]
+    sample_masks = (bank[indices] if use_shortlist else
+                    bank[None].expand(len(cells), -1, -1))
     candidate_ink_presence = sample_masks.gt(0).any(2)
     fitting_weight = pixel_weight if detail_loss == "local_color" else None
     mask_den = (sample_masks.square().sum(2).clamp_min(1e-8) if fitting_weight is None
@@ -900,7 +1444,7 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
                              torch.as_tensor(destination.glyph.astype(np.int64), device=device).flatten(),
                              torch.as_tensor(previous.glyph.astype(np.int64), device=device).flatten())
         initial_errors = initial_errors + 0.015 * (indices != chosen[:, None]).float()
-    logits = torch.nn.Parameter((-initial_errors / 0.02).clamp(-20, 0).detach())
+    logits = torch.nn.Parameter((-(initial_errors - initial_errors.amin(1, keepdim=True)) / 0.02).clamp(-20, 0).detach())
     first = initial_errors.argmin(1)
     initial_color = _project_oklab_colors(fitted[torch.arange(len(fitted), device=device), first])
     color_parameter = _color_parameter(initial_color)
@@ -915,38 +1459,142 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
             torch.as_tensor(previous.glyph.astype(np.int64), device=device).flatten())
         scheduled_masks = bank[scheduled]
 
-    polish_steps = max(4, steps // 4)
-    total_work = steps + 4 + polish_steps
-    def frame_loss(rendered: torch.Tensor) -> torch.Tensor:
-        return frame_objective(rendered)
+    coverage_values = coverage_indices = candidate_displayed = None
+    if refinement_sweeps and (gradient_loss_strength or saturation_loss_strength or glyph_error_movement_strength):
+        # The atlas usually has at most 256 coverage values. Skip the lookup
+        # for arbitrary masks whose unique values would provide little reuse.
+        values, inverse = torch.unique(bank, sorted=True, return_inverse=True)
+        if len(values) * 2 < bank.numel():
+            coverage_values, coverage_indices = values, inverse
+        # Analytic candidate inks never change. Retain their display mapping
+        # only for smaller frames, keeping the additional cache below 64 MiB.
+        if (coverage_values is not None
+                and candidate_render.numel() * candidate_render.element_size() <= 64 * 1024 ** 2):
+            with torch.no_grad():
+                candidate_images = candidate_render.reshape(
+                    -1, cell_height, cell_width, 3).permute(0, 3, 1, 2)
+                candidate_displayed = _display_headroom_lab(candidate_images, invert_ink=invert_ink).reshape(
+                    len(cells), indices.shape[1], 3, cell_height, cell_width)
 
-    for step in range(steps):
-        optimizer.zero_grad(set_to_none=True)
-        temperature = max(0.3, 1.0 - 0.7 * step / max(1, steps - 1))
-        weights = torch.softmax(logits / temperature, dim=1)
-        mask = (weights[..., None] * sample_masks).sum(1)
-        color = _playback_color(color_parameter)
-        rendered = _render(mask, color, rows, cols, cell_height, cell_width, background_color)
-        loss = frame_loss(rendered)
-        if glyph_luminance_bonus:
-            ink_presence = (weights * candidate_ink_presence).sum(1)
-            loss = loss - glyph_luminance_bonus * _ink_lightness_reward(color, ink_presence).mean()
-        loss = loss + 0.006 * (-(weights * weights.clamp_min(1e-9).log()).sum(1)).mean()
+    total_work = steps + 6 * refinement_sweeps + polish_steps
+    def frame_loss(rendered: torch.Tensor, components=None) -> torch.Tensor:
+        return (frame_objective(rendered) if components is None
+                else frame_objective(rendered, components=components))
+
+    def score_terms(frame_value, chosen_masks, chosen_color, chosen_glyph, components=None):
+        score = frame_value.double()
+        def add(name, value):
+            nonlocal score
+            score = score + value
+            if components is not None:
+                components[name] = value
         if glyph_entropy_strength:
-            loss = loss + glyph_entropy_strength * _negative_glyph_entropy(
-                _glyph_distribution(weights, indices, len(bank)))
+            counts = _glyph_counts(chosen_glyph, len(bank), chosen_color.dtype)
+            add("glyph_entropy", glyph_entropy_strength * _negative_glyph_entropy(counts / len(chosen_glyph)))
+        if glyph_luminance_bonus:
+            add("ink_reward", -glyph_luminance_bonus * _ink_lightness_reward(
+                chosen_color, chosen_masks.gt(0).any(1)).mean())
         if prev_masks is not None:
-            loss = loss + 0.025 * (mask - prev_masks).square().mean()
-            loss = loss + 0.010 * (color - prev_colors).square().mean()
-            loss = loss + 0.008 * (mask - scheduled_masks).square().mean()
-        loss.backward()
-        optimizer.step()
-        with torch.no_grad():
-            color_parameter.clamp_(0, 1)
-        if on_progress is not None:
-            on_progress((step + 1) / total_work, "Optimizing glyphs and colors")
+            add("transition_mask", 0.025 * (chosen_masks - prev_masks).square().mean())
+            add("transition_color", 0.010 * (chosen_color - prev_colors).square().mean())
+            add("transition_schedule", 0.008 * (chosen_masks - scheduled_masks).square().mean())
+        return score
+
+    def hard_score(chosen_masks: torch.Tensor, chosen_color: torch.Tensor,
+                   chosen_glyph: torch.Tensor, components=None) -> torch.Tensor:
+        value = frame_loss(_render(chosen_masks, chosen_color, rows, cols, cell_height, cell_width, background_color), components)
+        return score_terms(value, chosen_masks, chosen_color, chosen_glyph, components)
+
+    @torch.no_grad()
+    def observe(stage, chosen_glyph, chosen_color, *, logged_logits=None, temperature=None,
+                score=None, components=None, **metadata):
+        if diagnostics is None:
+            return
+        if score is None:
+            components = {}
+            score = hard_score(bank[chosen_glyph], chosen_color, chosen_glyph, components)
+        diagnostics.record(stage, loss=score, components=components,
+                           glyph=chosen_glyph, color=chosen_color, logits=logged_logits,
+                           temperature=temperature, **metadata)
 
     with torch.no_grad():
+        best_glyph = indices.gather(1, logits.argmax(1)[:, None]).squeeze(1)
+        best_discrete_color = _playback_color(color_parameter.detach(), neutral_ink=neutral_ink).clone()
+        best_discrete_score = hard_score(bank[best_glyph], best_discrete_color, best_glyph)
+    if diagnostics is not None:
+        diagnostics.register(candidate_indices=indices, background=background_color,
+                             selection_noise=torch.zeros_like(logits))
+        diagnostics.register_geometry(masks, *_sobel_filters(masks[:, None]))
+        observe("initial", best_glyph, best_discrete_color, logged_logits=logits, temperature=1., step=0)
+
+    for step in range(steps):
+        with section("adam_step", step=step):
+            optimizer.zero_grad(set_to_none=True)
+            temperature = max(0.3, 1.0 - 0.7 * step / max(1, steps - 1))
+            weights = _hard_weights(logits, temperature)
+            # Contract directly instead of materializing cell × glyph × pixel
+            # products on every Adam step. The full bank is shared by cells.
+            mask = (weights @ bank if not use_shortlist else
+                    torch.bmm(weights[:, None], sample_masks).squeeze(1))
+            actual_glyph = indices.gather(1, weights.argmax(1)[:, None]).squeeze(1)
+            if _hard_weights is _HARD_WEIGHTS_IMPLEMENTATION:
+                # Keep atlas pixels exact even when the caller enables TF32
+                # or another reduced-precision matrix backend. Contraction
+                # supplies only the surrogate gradient of the hard selection.
+                mask = bank[actual_glyph] + (mask - mask.detach())
+            color = _playback_color(color_parameter, neutral_ink=neutral_ink)
+            rendered = _render(mask, color, rows, cols, cell_height, cell_width, background_color)
+            components = {} if diagnostics is not None else None
+            frame_value = frame_loss(rendered, components)
+            loss = frame_value
+            training_terms = dict(components) if diagnostics is not None else None
+            def training_term(name, value):
+                nonlocal loss
+                loss = loss + value
+                if training_terms is not None:
+                    training_terms[name] = value
+            if glyph_luminance_bonus:
+                ink_presence = (weights * candidate_ink_presence).sum(1)
+                training_term("ink_reward", -glyph_luminance_bonus * _ink_lightness_reward(color, ink_presence).mean())
+            if glyph_entropy_strength:
+                training_term("glyph_entropy", glyph_entropy_strength * _negative_glyph_entropy(
+                    _glyph_distribution(weights, indices, len(bank))))
+            if prev_masks is not None:
+                training_term("transition_mask", 0.025 * (mask - prev_masks).square().mean())
+                training_term("transition_color", 0.010 * (color - prev_colors).square().mean())
+                training_term("transition_schedule", 0.008 * (mask - scheduled_masks).square().mean())
+            gradients = None
+            if diagnostics is not None and (step % diagnostics.gradient_sample_every == 0 or step == steps - 1):
+                gradients = diagnostics.sample_gradients({**training_terms, "total": loss},
+                                                         {"logits": logits, "ink_rgb": color_parameter})
+            with torch.no_grad():
+                # Hard forward already evaluated these exact pixels. Reuse that
+                # frame loss instead of rendering and tone-mapping the frame twice.
+                if _hard_weights is _HARD_WEIGHTS_IMPLEMENTATION:
+                    score = score_terms(frame_value.detach(), mask.detach(), color.detach(), actual_glyph, components)
+                else:
+                    # Comparison scripts can replace hard forward with blending.
+                    components = {} if diagnostics is not None else None
+                    score = hard_score(bank[actual_glyph], color.detach(), actual_glyph, components)
+                better = score < best_discrete_score
+                best_glyph = torch.where(better, actual_glyph, best_glyph)
+                best_discrete_color = torch.where(better, color.detach(), best_discrete_color)
+                best_discrete_score = torch.minimum(score, best_discrete_score)
+                observe("adam_step", actual_glyph, color, logged_logits=logits, temperature=temperature,
+                        score=score, components=components, step=step, gradients=gradients)
+            loss.backward()
+            optimizer.step()
+            with torch.no_grad():
+                color_parameter.clamp_(0, 1)
+            if on_progress is not None:
+                on_progress((step + 1) / total_work, "Optimizing glyphs and colors")
+
+    with torch.no_grad():
+        if diagnostics is not None:
+            final_glyph = indices.gather(1, logits.argmax(1)[:, None]).squeeze(1)
+            observe("solver_final", final_glyph, _playback_color(color_parameter.detach(), neutral_ink=neutral_ink),
+                    logged_logits=logits, temperature=0.3 if steps > 1 else 1., step=steps)
+            observe("solver_best", best_glyph, best_discrete_color)
         selection_logits = logits
         if logit_noise_multiplier:
             candidate_noise = _post_logit_noise(
@@ -954,91 +1602,230 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
                 logit_noise_distribution, device=device, dtype=logits.dtype,
             )
             selection_logits = logits + logit_noise_multiplier * candidate_noise
+            if diagnostics is not None:
+                diagnostics.register(selection_noise=logit_noise_multiplier * candidate_noise)
         selected = selection_logits.argmax(1)
         glyph = indices.gather(1, selected[:, None]).squeeze(1)
         hard_masks = bank[glyph]
-        hard_color = _playback_color(color_parameter.detach())
-
-    def hard_score(chosen_masks: torch.Tensor, chosen_color: torch.Tensor,
-                   chosen_glyph: torch.Tensor) -> torch.Tensor:
-        score = frame_loss(_render(chosen_masks, chosen_color, rows, cols, cell_height, cell_width, background_color))
-        if glyph_entropy_strength:
-            counts = torch.bincount(chosen_glyph, minlength=len(bank)).to(chosen_color.dtype)
-            score = score + glyph_entropy_strength * _negative_glyph_entropy(counts / len(chosen_glyph))
-        if glyph_luminance_bonus:
-            score = score - glyph_luminance_bonus * _ink_lightness_reward(
-                chosen_color, chosen_masks.gt(0).any(1)).mean()
-        if prev_masks is not None:
-            score = score + 0.025 * (chosen_masks - prev_masks).square().mean()
-            score = score + 0.010 * (chosen_color - prev_colors).square().mean()
-            score = score + 0.008 * (chosen_masks - scheduled_masks).square().mean()
-        return score
-
-    # Make actual discrete changes in four separated cell groups. Each proposal
-    # is accepted only if the complete-frame rendered objective improves.
-    row_ids = torch.arange(rows, device=device).repeat_interleave(cols)
-    col_ids = torch.arange(cols, device=device).repeat(rows)
-    for parity in range(4):
-        rendered = _render(hard_masks, hard_color, rows, cols, cell_height, cell_width, background_color).detach().requires_grad_()
-        gradient = torch.autograd.grad(frame_loss(rendered), rendered)[0]
-        gradient_cells = _cells(gradient.squeeze(0), rows, cols, cell_height, cell_width)
-        with torch.no_grad():
-            current_pixels = (hard_masks[..., None] * hard_color[:, None, :]
-                              + (1 - hard_masks[..., None]) * background_cells)
-            delta = candidate_render - current_pixels[:, None]
-            gain = (gradient_cells[:, None] * delta).sum((2, 3))
-            gain = gain + delta.square().sum((2, 3)) / (len(glyph) * cell_height * cell_width * 3)
-            if glyph_entropy_strength:
-                counts = torch.bincount(glyph, minlength=len(bank)).to(gain.dtype)
-                gain = gain + glyph_entropy_strength * _glyph_entropy_move_cost(glyph, indices, counts)
-            if glyph_luminance_bonus:
-                gain = gain - glyph_luminance_bonus * (
-                    _ink_lightness_reward(candidate_colors, candidate_ink_presence)
-                    - _ink_lightness_reward(hard_color, hard_masks.gt(0).any(1))[:, None]
-                ) / len(glyph)
-            if prev_masks is not None:
-                gain = gain + 0.025 * ((sample_masks - prev_masks[:, None]).square().mean(2)
-                                       - (hard_masks - prev_masks).square().mean(1)[:, None]) / len(glyph)
-                gain = gain + 0.008 * ((sample_masks - scheduled_masks[:, None]).square().mean(2)
-                                       - (hard_masks - scheduled_masks).square().mean(1)[:, None]) / len(glyph)
-            best = gain.argmin(1)
-            group = (row_ids % 2) * 2 + col_ids % 2 == parity
-            changes = group & (gain.gather(1, best[:, None]).squeeze(1) < -1e-10)
-            if bool(changes.any()):
-                trial_glyph = glyph.clone()
-                trial_color = hard_color.clone()
-                trial_glyph[changes] = indices[changes, best[changes]]
-                trial_color[changes] = candidate_colors[changes, best[changes]]
-                trial_masks = bank[trial_glyph]
-                if hard_score(trial_masks, trial_color, trial_glyph) < hard_score(hard_masks, hard_color, glyph):
-                    glyph, hard_color, hard_masks = trial_glyph, trial_color, trial_masks
-        if on_progress is not None:
-            on_progress((steps + parity + 1) / total_work, "Refining character boundaries")
-
-    # Final colors are optimized against the actual discrete glyphs.
-    color_parameter = _color_parameter(hard_color)
-    color_optimizer = torch.optim.Adam((color_parameter,), lr=0.01)
-    best_color = hard_color.detach().clone()
-    best_loss = hard_score(hard_masks, best_color, glyph).detach()
-    for polish_step in range(polish_steps):
-        color_optimizer.zero_grad(set_to_none=True)
-        color = _playback_color(color_parameter)
-        loss = hard_score(hard_masks, color, glyph)
-        # Retain the best persisted fit, including the pre-polish colors.
-        score = loss.detach()
-        best_color = torch.where(score < best_loss, color.detach(), best_color)
-        best_loss = torch.minimum(score, best_loss)
-        loss.backward()
-        color_optimizer.step()
-        with torch.no_grad():
-            color_parameter.clamp_(0, 1)
-        if on_progress is not None:
-            on_progress((steps + 4 + polish_step + 1) / total_work, "Polishing colors")
+        hard_color = _playback_color(color_parameter.detach(), neutral_ink=neutral_ink)
+        observe("after_dither", glyph, hard_color)
 
     with torch.no_grad():
-        color = _playback_color(color_parameter)
-        best_color = torch.where(hard_score(hard_masks, color, glyph) < best_loss, color, best_color)
+        if hard_score(hard_masks, hard_color, glyph) > best_discrete_score:
+            glyph = best_glyph
+            hard_masks = bank[glyph]
+            hard_color = best_discrete_color
+    observe("pre_refinement", glyph, hard_color)
+
+    # Geometry is known on the CPU; avoid GPU nonzero and its shape sync for
+    # the identical parity groups on every sweep.
+    parity_map = (np.arange(rows)[:, None] % 2) * 2 + np.arange(cols)[None, :] % 2
+    parity_groups = [torch.as_tensor(np.flatnonzero(parity_map == parity), device=device)
+                     for parity in range(4)]
+    completed_work = steps
+
+    def move_penalty(cell_ids, proposed_glyph, proposed_masks, proposed_color):
+        """Exact changes to terms not represented by the rendered pixel image."""
+        penalty = proposed_color.new_zeros(proposed_glyph.shape, dtype=torch.float64)
+        if glyph_entropy_strength:
+            penalty = penalty + glyph_entropy_strength * _glyph_entropy_move_cost(
+                glyph, proposed_glyph, current_counts, cell_ids)
+        if glyph_luminance_bonus:
+            penalty = penalty - glyph_luminance_bonus * (
+                _ink_lightness_reward(proposed_color, proposed_masks.gt(0).any(2))
+                - _ink_lightness_reward(hard_color[cell_ids], hard_masks[cell_ids].gt(0).any(1))[:, None]
+            ) / len(glyph)
+        if prev_masks is not None:
+            penalty = penalty + 0.025 * (
+                (proposed_masks - prev_masks[cell_ids, None]).square().mean(2)
+                - (hard_masks[cell_ids] - prev_masks[cell_ids]).square().mean(1)[:, None]) / len(glyph)
+            penalty = penalty + 0.008 * (
+                (proposed_masks - scheduled_masks[cell_ids, None]).square().mean(2)
+                - (hard_masks[cell_ids] - scheduled_masks[cell_ids]).square().mean(1)[:, None]) / len(glyph)
+            penalty = penalty + 0.010 * (
+                (proposed_color - prev_colors[cell_ids, None]).square().mean(2)
+                - (hard_color[cell_ids] - prev_colors[cell_ids]).square().mean(1)[:, None]) / len(glyph)
+        return penalty
+
+    def replacement_pixels(masks, colors):
+        return (masks[..., None] * colors[:, :, None]
+                + (1 - masks[..., None]) * background_color).reshape(
+                    len(masks), -1, cell_height, cell_width, 3).permute(0, 1, 4, 2, 3)
+
+    @torch.no_grad()
+    def log_replacements(stage):
+        if diagnostics is None or perceptual_loss or not getattr(diagnostics, "include_replacements", True):
+            return
+        nonlocal current_counts
+        current_counts = _glyph_counts(glyph, len(bank), hard_color.dtype) if glyph_entropy_strength else None
+        rendered = _render(hard_masks, hard_color, rows, cols, cell_height, cell_width, background_color)
+        state = _ReplacementState(frame_objective, rendered)
+        deltas = hard_color.new_empty(indices.shape, dtype=torch.float64)
+        cell_area = (cell_height + 16) * (cell_width + 16)
+        chunk_size = max(1, min(256, 1_000_000 // (indices.shape[1] * cell_area)))
+        for ids in torch.arange(len(glyph), device=device).split(chunk_size):
+            context = _ReplacementContext(frame_objective, rendered, ids, state)
+            colors = hard_color[ids, None].expand(-1, indices.shape[1], -1)
+            pixels = replacement_pixels(sample_masks[ids], colors)
+            deltas[ids] = context.scores(pixels) + move_penalty(ids, indices[ids], sample_masks[ids], colors)
+        diagnostics.record_replacements(stage, deltas, glyph)
+
+    current_counts = None
+    log_replacements("pre_refinement")
+
+    def polish_colors(count, report_progress=False, phase="sweep_polish"):
+        nonlocal hard_color
+        if count == 0:
+            return
+        with section("color_polish", phase=phase, count=count):
+            parameter = _color_parameter(hard_color)
+            color_optimizer = torch.optim.Adam((parameter,), lr=0.01)
+            best_color = hard_color.detach().clone()
+            best_score = hard_score(hard_masks, best_color, glyph).detach()
+            for polish_step in range(count):
+                color_optimizer.zero_grad(set_to_none=True)
+                color = _playback_color(parameter, neutral_ink=neutral_ink)
+                components = {} if diagnostics is not None else None
+                loss = hard_score(hard_masks, color, glyph, components)
+                better = loss.detach() < best_score
+                best_color = torch.where(better, color.detach(), best_color)
+                best_score = torch.minimum(best_score, loss.detach())
+                observe(phase, glyph, color, score=loss, components=components, color_step=polish_step)
+                loss.backward()
+                color_optimizer.step()
+                with torch.no_grad():
+                    parameter.clamp_(0, 1)
+                if report_progress and on_progress is not None:
+                    on_progress((completed_work + polish_step + 1) / total_work, "Polishing colors")
+            with torch.no_grad():
+                color = _playback_color(parameter, neutral_ink=neutral_ink)
+                score = hard_score(hard_masks, color, glyph)
+                best_color = torch.where(score < best_score, color, best_color)
+            hard_color = best_color
+
+    for sweep in range(refinement_sweeps):
+        sweep_score = hard_score(hard_masks, hard_color, glyph).detach()
+        for parity in range(4):
+            with section("prepare_responses", sweep=sweep, parity=parity):
+                group_ids = parity_groups[parity]
+                current_counts = _glyph_counts(glyph, len(bank), hard_color.dtype) if glyph_entropy_strength else None
+                rendered = _render(hard_masks, hard_color, rows, cols, cell_height, cell_width, background_color).detach()
+                state = _ReplacementState(frame_objective, rendered)
+                with torch.no_grad():
+                    ink_table = (_display_ink_table(hard_color, background_color, coverage_values, invert_ink=invert_ink)
+                                 if coverage_values is not None else None)
+                proposed_glyph, proposed_color = glyph.clone(), hard_color.clone()
+                improving_ids = []
+                proposed_gain = hard_color.new_full((len(glyph),), float("inf"), dtype=torch.float64)
+            # Include both the pixel-fitted ink and the current context-fitted
+            # ink for every glyph, without restricting the glyph bank.
+            halo = 16 if detail_loss == "chroma_contrast" else 4
+            cell_area = (cell_height + halo) * (cell_width + halo)
+            chunk_size = max(1, min(256, 1_000_000 // (2 * indices.shape[1] * cell_area)))
+            for cell_ids in group_ids.split(chunk_size):
+                with section("candidate_ranking", sweep=sweep, parity=parity):
+                    if not len(cell_ids):
+                        continue
+                    context = _ReplacementContext(frame_objective, rendered, cell_ids, state)
+                    with torch.no_grad():
+                        proposal_indices = indices[cell_ids].repeat(1, 2)
+                        proposal_masks = sample_masks[cell_ids].repeat(1, 2, 1)
+                        colors = torch.cat((candidate_colors[cell_ids],
+                                            hard_color[cell_ids, None].expand(-1, indices.shape[1], -1)), dim=1)
+                        pixels = replacement_pixels(proposal_masks, colors)
+                        displayed_pixels = None
+                        if ink_table is not None:
+                            count = indices.shape[1]
+                            fitted_display = (candidate_displayed[cell_ids] if candidate_displayed is not None
+                                else _display_headroom_lab(pixels[:, :count].flatten(0, 1), invert_ink=invert_ink).reshape(
+                                    len(cell_ids), count, 3, cell_height, cell_width))
+                            lookup_indices = coverage_indices[indices[cell_ids]].flatten(2)
+                            current_display = ink_table[cell_ids, None].expand(-1, count, -1, -1).gather(
+                                -1, lookup_indices[:, :, None].expand(-1, -1, 3, -1)).reshape(
+                                    len(cell_ids), count, 3, cell_height, cell_width)
+                            displayed_pixels = torch.cat((fitted_display, current_display), dim=1)
+                        gains = context.scores(pixels, displayed_pixels)
+                        gains = gains + move_penalty(cell_ids, proposal_indices, proposal_masks, colors)
+                        selected = gains.argmin(1)
+                        batch_ids = torch.arange(len(cell_ids), device=device)
+                        proposed_glyph[cell_ids] = proposal_indices[batch_ids, selected]
+                        proposed_color[cell_ids] = colors[batch_ids, selected]
+                        proposed_gain[cell_ids] = gains[batch_ids, selected]
+            # Rank every glyph in bounded batches, then fit the selected inks
+            # together. Tiny per-ranking-batch Adam/gradient passes would repeat
+            # display mapping and dispatch hundreds of small kernels.
+            fit_chunk_size = max(1, min(4096, 2_000_000 // cell_area))
+            for cell_ids in group_ids.split(fit_chunk_size):
+                with section("candidate_color_fit", sweep=sweep, parity=parity):
+                    if not len(cell_ids):
+                        continue
+                    context = _ReplacementContext(frame_objective, rendered, cell_ids, state)
+                    selected_glyph = proposed_glyph[cell_ids, None]
+                    selected_mask = bank[selected_glyph]
+                    selected_color = proposed_color[cell_ids, None].clone()
+                    selected_gain = proposed_gain[cell_ids].clone()
+                    parameter = _color_parameter(selected_color)
+                    fitter = torch.optim.Adam((parameter,), lr=0.01)
+                    for _ in range(2):
+                        fitter.zero_grad(set_to_none=True)
+                        color = _playback_color(parameter, neutral_ink=neutral_ink)
+                        gain = (context.scores(replacement_pixels(selected_mask, color))
+                                + move_penalty(cell_ids, selected_glyph, selected_mask, color)).squeeze(1)
+                        with torch.no_grad():
+                            better = gain < selected_gain
+                            selected_color = torch.where(better[:, None, None], color.detach(), selected_color)
+                            selected_gain = torch.minimum(selected_gain, gain.detach())
+                        (gain.sum() * len(glyph)).backward()
+                        fitter.step()
+                        with torch.no_grad():
+                            parameter.clamp_(0, 1)
+                    with torch.no_grad():
+                        color = _playback_color(parameter, neutral_ink=neutral_ink)
+                        gain = (context.scores(replacement_pixels(selected_mask, color))
+                                + move_penalty(cell_ids, selected_glyph, selected_mask, color)).squeeze(1)
+                        better = gain < selected_gain
+                        selected_color = torch.where(better[:, None, None], color, selected_color)
+                        selected_gain = torch.minimum(selected_gain, gain)
+                        changes = selected_gain < -1e-10
+                        ids = cell_ids[changes]
+                        proposed_color[cell_ids] = selected_color[:, 0]
+                        improving_ids.append(ids)
+            with torch.no_grad():
+                if improving_ids:
+                    with section("acceptance", sweep=sweep, parity=parity):
+                        changes = torch.cat(improving_ids)
+                        if len(changes):
+                            cached_score = _ReplacementBatchScorer(
+                                state, bank, glyph, hard_color, proposed_glyph, proposed_color, changes, background_color)
+                            def acceptance_score(chosen_masks, chosen_color, chosen_glyph):
+                                return score_terms(cached_score(chosen_glyph, chosen_color),
+                                                   chosen_masks, chosen_color, chosen_glyph)
+                            glyph, hard_color = _accept_discrete_proposals(
+                                glyph, hard_color, bank, changes, proposed_glyph, proposed_color, acceptance_score,
+                                diagnostics=diagnostics)
+                            hard_masks = bank[glyph]
+            observe("refinement_group", glyph, hard_color, sweep=sweep, parity=parity)
+            completed_work += 1
+            if on_progress is not None:
+                on_progress(completed_work / total_work, "Scoring glyphs with neighboring pixels")
+        polish_colors(2)
+        observe("refinement_sweep", glyph, hard_color, sweep=sweep)
+        completed_work += 2
+        if on_progress is not None:
+            on_progress(completed_work / total_work, "Refitting ink with discrete glyphs")
+        if hard_score(hard_masks, hard_color, glyph).detach() >= sweep_score - 1e-10:
+            break
+    # Account for skipped sweeps without making progress move backward.
+    completed_work = steps + 6 * refinement_sweeps
+    observe("post_refinement", glyph, hard_color)
+    log_replacements("post_refinement")
+
+    # Retain the best RGB8 colors, including the pre-polish fit.
+    polish_colors(polish_steps, report_progress=True, phase="final_polish")
+    observe("final", glyph, hard_color)
+    if on_progress is not None:
+        on_progress(1.0, "Finished optimizing glyphs and colors")
 
     return Grid(glyph.detach().cpu().numpy().reshape(rows, cols).astype(np.uint8),
-                quantize_playback_lab(best_color.cpu().numpy().reshape(rows, cols, 3)),
+                quantize_playback_lab(hard_color.cpu().numpy().reshape(rows, cols, 3)),
                 quantize_playback_lab(background_color.detach().cpu().numpy()))

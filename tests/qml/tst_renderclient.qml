@@ -12,9 +12,7 @@ TestCase {
     Component {
         id: clientComponent
         Wallpaper.RenderClient {
-            autoStart: false
             serviceUrl: TestConfig.serviceUrl
-            requestDelay: 20
             requestTimeout: 1000
             retryBaseInterval: 40
             retryMaxInterval: 80
@@ -27,6 +25,68 @@ TestCase {
     function client(image) {
         return createTemporaryObject(clientComponent, tests,
             {requestSettings: {images: [image], frames: 4}, playbackSettings: {mode: "Image"}})
+    }
+
+    function test_startup_and_settings_changes_never_submit_a_render() {
+        const renderer = client("/manual-only.png")
+        const serial = renderer.requestSerial
+        wait(100)
+        compare(renderer.requestSerial, serial)
+        compare(renderer.renderState, "idle")
+        verify(!renderer.requestInFlight)
+        renderer.requestSettings = {images: ["/manual-only-updated.png"], frames: 8}
+        const changedSerial = renderer.requestSerial
+        wait(100)
+        compare(renderer.requestSerial, changedSerial)
+        compare(renderer.jobId, "")
+        verify(!renderer.submissionPending)
+        renderer.start(true)
+        tryCompare(renderer, "renderState", "ready", 3000)
+        compare(renderer.displayGeneration, "manual-only-updated-ready")
+    }
+
+    function test_superseded_job_requires_an_explicit_retry() {
+        const renderer = client("/superseded.png")
+        renderer.consume({id: "superseded", state: "superseded"})
+        const serial = renderer.requestSerial
+        wait(100)
+        compare(renderer.requestSerial, serial)
+        compare(renderer.jobId, "")
+        compare(renderer.renderState, "idle")
+    }
+
+    function test_saved_cache_reconnects_with_read_only_status() {
+        const key = "0123456789abcdef01234567"
+        const directory = TestConfig.fixtureRoot + "/variants/" + key + "/0123456789abcdef0123456789abcdef"
+        const renderer = createTemporaryObject(clientComponent, tests, {
+            requestSettings: {images: ["/saved-monitor.png"], frames: 4},
+            cachedDirectory: directory,
+            cachedState: JSON.stringify({directory: directory, generation: "saved",
+                settings: {images: ["/saved-monitor.png"], frames: 4}}),
+            readyStatusInterval: 40
+        })
+        compare(renderer.displayDirectory, directory)
+        compare(renderer.jobId, key)
+        tryCompare(renderer, "displayGeneration", key + "-ready", 3000)
+        verify(!renderer.submissionPending)
+    }
+
+    function test_switching_saved_profiles_updates_the_observed_job() {
+        const first = TestConfig.fixtureRoot + "/variants/0123456789abcdef01234567/0123456789abcdef0123456789abcdef"
+        const second = TestConfig.fixtureRoot + "/variants/fedcba9876543210fedcba98/fedcba9876543210fedcba9876543210"
+        const renderer = createTemporaryObject(clientComponent, tests, {
+            requestSettings: {images: ["/profiles.png"], frames: 4}, cachedDirectory: first,
+            cachedState: JSON.stringify({directory: first, generation: "first",
+                settings: {images: ["/profiles.png"], frames: 4}})
+        })
+        compare(renderer.jobId, "0123456789abcdef01234567")
+        renderer.cachedState = JSON.stringify({directory: second, generation: "second",
+            settings: {images: ["/profiles.png"], frames: 4}})
+        renderer.cachedDirectory = second
+        tryCompare(renderer, "displayDirectory", second, 1000)
+        compare(renderer.jobId, "fedcba9876543210fedcba98")
+        compare(renderer.renderState, "ready")
+        verify(!renderer.submissionPending)
     }
 
     function test_cached_assets_survive_pending_settings() {
@@ -94,7 +154,7 @@ TestCase {
         compare(completed.count, 3)
     }
 
-    function test_ready_client_reconnects_after_service_restart() {
+    function test_missing_status_retains_saved_assets_without_resubmitting() {
         const renderer = client("/restart.png")
         renderer.retryBaseInterval = 200
         renderer.retryMaxInterval = 500
@@ -102,12 +162,14 @@ TestCase {
         tryCompare(renderer, "renderState", "ready", 3000)
         verify(!renderer.currentRequestForced)
         renderer.checkStatus()
-        tryCompare(renderer, "renderState", "error", 3000)
-        compare(renderer.jobId, "")
+        tryCompare(renderer, "jobId", "", 3000)
         verify(renderer.displayDirectory.length > 0)
         tryCompare(renderer, "renderState", "ready", 3000)
         compare(renderer.error, "")
         verify(!renderer.requestInFlight)
+        const serial = renderer.requestSerial
+        wait(600)
+        compare(renderer.requestSerial, serial)
     }
 
     function test_pending_settings_keep_published_assets() {

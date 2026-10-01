@@ -76,8 +76,10 @@ def test_zero_entropy_strength_skips_histogram_work_and_is_deterministic(monkeyp
 def test_discrete_refinement_uses_entropy_even_without_soft_optimization():
     source = np.full((16, 16, 3), 0.5, np.float32)
     masks = np.ones((2, 4, 4), np.float32)
-    baseline = optimizer.solve(source, masks, steps=0, dither=0, glyph_entropy_strength=0)
-    regularized = optimizer.solve(source, masks, steps=0, dither=0, glyph_entropy_strength=0.02)
+    baseline = optimizer.solve(source, masks, steps=0, dither=0, glyph_entropy_strength=0, refinement_sweeps=2,
+                               perceptual_loss=False)
+    regularized = optimizer.solve(source, masks, steps=0, dither=0, glyph_entropy_strength=0.02, refinement_sweeps=2,
+                                  perceptual_loss=False)
     assert np.unique(baseline.glyph).size == 1
     assert np.unique(regularized.glyph).size == 2
     assert (regularized.glyph == 0).mean() == pytest.approx(0.5)

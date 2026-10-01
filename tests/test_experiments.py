@@ -13,6 +13,7 @@ from PIL import Image
 from ascii_optimizer import cli
 from ascii_optimizer.defaults import DEFAULT_GLYPH_LUMINANCE_BONUS
 from ascii_optimizer.optimizer import Grid
+from ascii_optimizer import optimizer
 
 
 @pytest.fixture
@@ -56,6 +57,66 @@ def test_glyph_ink_lightness_is_the_stored_oklab_l_component(experiments):
     expected = experiments.playback_grid(grid).color[..., 0]
     assert metrics["mean_ink_oklab_lightness"] == pytest.approx(expected.mean())
     assert metrics["ink_oklab_lightness_std"] == pytest.approx(expected.std())
+
+
+@pytest.mark.parametrize("entropy_strength", [0, .01])
+def test_solver_trace_script_exports_stage_comparisons_and_raw_logits(experiments, monkeypatch, tmp_path, entropy_strength):
+    script = importlib.import_module("trace_solver")
+    source = tmp_path / "source.png"
+    Image.new("RGB", (12, 8), (90, 130, 150)).save(source)
+    masks = np.stack((np.zeros((2, 3)), np.ones((2, 3)), np.eye(2, 3))).astype(np.float32)
+    monkeypatch.setattr(script, "SOURCES", [("fixture", source, (0, 0, 960, 640))])
+    monkeypatch.setattr(script, "glyph_masks", lambda *args: masks)
+    monkeypatch.setattr(experiments, "DEFAULT_CHARS", " #/")
+    output = tmp_path / "trace"
+    monkeypatch.setattr(sys, "argv", ["trace_solver.py", "--output", str(output), "--width", "12",
+                                     "--cell", "3x2", "--steps", "2", "--step-budgets", "2", "--no-plots",
+                                     "--timing-repeats", "1", "--refinement-budgets", "0", "1", "--no-matched-time",
+                                     "--glyph-entropy-strength", str(entropy_strength)])
+    script.main()
+    report = json.loads((output / "metrics.json").read_text())
+    run = report["images"]["fixture"]
+    assert run["budgets"][0]["matches_traced_output"] is True
+    stages = run["analysis"]["stages"]
+    adam = run["analysis"]["adam_stages"]
+    assert adam["adam_step_0"] == stages["initial"]
+    assert adam["solver_final"] == stages["solver_final"]
+    assert run["budgets"][0]["loss"] == pytest.approx(stages["final"]["loss"], rel=1e-5, abs=1e-7)
+    assert report["glyph_entropy_strength"] == entropy_strength
+    assert stages["final"]["loss_terms"].get("glyph_entropy", {}).get("coefficient", 0) == entropy_strength
+    assert stages["final"]["loss"] <= stages["pre_refinement"]["loss"]
+    assert stages["final"]["regions"]["uniform"]["cells"] > 0
+    data = np.load(output / "fixture" / "logits.npz")
+    assert data["logits"].shape == (4, 16, 3)
+    assert (output / "fixture" / "stage_comparison.png").is_file()
+    assert (output / "fixture" / "adam_comparison.png").is_file()
+    assert (output / "fixture" / "adam_focus.png").is_file()
+    assert (output / "fixture" / "focus_comparison.png").is_file()
+    assert (output / "fixture" / "visual.npz").is_file()
+    assert (output / "fixture" / "replacements_pre_refinement.npz").is_file()
+    assert [run["refinement_sweeps"] for run in run["refinement_budgets"]] == [0, 1]
+    assert all(run["polish_steps"] == 9 for run in run["refinement_budgets"])
+
+
+@pytest.mark.parametrize("fixed_time", [None, 2.])
+def test_matched_compute_calibration_reports_actual_tolerance(experiments, monkeypatch, fixed_time):
+    script = importlib.import_module("trace_solver")
+    calls = []
+    def run(target, masks, kwargs, *, steps, sweeps, polish_steps, repeats):
+        calls.append((steps, sweeps, polish_steps, repeats))
+        seconds = .2 + steps * .02 if fixed_time is None else fixed_time
+        return {"seconds": seconds, "steps": steps}, None, None
+    monkeypatch.setattr(script, "ordinary_run", run)
+    baseline = [{"seconds": .2, "steps": 0}, {"seconds": .56, "steps": 36}]
+    budget = {"seconds": 1.2, "refinement_sweeps": 2}
+    result, _, _ = script.matched_adam(None, None, {}, baseline, budget, 9, 3)
+    assert all(sweeps == 0 and polish == 9 and repeats == 3 for _, sweeps, polish, repeats in calls)
+    assert result["within_10_percent"] is (fixed_time is None)
+    assert result["time_ratio"] == pytest.approx(result["seconds"] / 1.2)
+    if fixed_time is None:
+        assert result["steps"] == 50
+    else:
+        assert len(calls) == 3
 
 
 def test_report_records_hashes_effective_objectives_and_measurements(experiments, tmp_path):
@@ -177,6 +238,40 @@ def test_error_movement_comparison_runs_with_production_defaults(experiments, mo
     assert variants["before"]["experiment"]["effective_objectives"]["glyph_error_movement_strength"] == 0
     assert variants["movement_4"]["experiment"]["effective_objectives"]["glyph_error_movement_strength"] == 4
     assert (output / "tail/3x4/focus_before_after_4.png").exists()
+
+
+@pytest.mark.parametrize("with_reference", [False, True])
+def test_discrete_layout_comparison_records_actual_objectives_and_source_snapshots(experiments, monkeypatch, tmp_path, with_reference):
+    script = importlib.import_module("compare_discrete_layout")
+    path = tmp_path / "source.png"
+    Image.new("RGB", (12, 8), (120, 60, 170)).save(path)
+    baseline = tmp_path / "baseline.py"
+    baseline.write_bytes(Path(optimizer.__file__).read_bytes())
+    output = tmp_path / "comparison"
+    monkeypatch.setattr(script, "SOURCES", (("fixture", path, (0, 0, 960, 640)),))
+    monkeypatch.setattr(experiments, "DEFAULT_CHARS", " .#")
+    arguments = [script.__file__, "--width", "12", "--cells", "3x4",
+                 "--steps", "1", "--baseline-file", str(baseline), "--output", str(output)]
+    if with_reference:
+        arguments.extend(["--reference-file", str(baseline)])
+    monkeypatch.setattr(sys, "argv", arguments)
+    script.main()
+    report = json.loads((output / "metrics.json").read_text())
+    variants = report["images"]["fixture"]["grids"]["3x4"]
+    expected = {"before", "soft_exact", "hard_exact", "hard_layout"}
+    if with_reference:
+        expected.add("reference")
+        assert report["reference_sha256"] == hashlib.sha256((output / "optimizer_reference.py").read_bytes()).hexdigest()
+    assert set(variants) == expected
+    assert variants["hard_exact"]["hard_forward"]
+    assert not variants["soft_exact"]["hard_forward"]
+    assert variants["hard_exact"]["layout_loss_strength"] == 0
+    assert variants["hard_layout"]["layout_loss_strength"] == 0.5
+    assert all(np.isfinite(value["common_discrete_objective"]) for value in variants.values())
+    assert report["renderer_sha256"] == hashlib.sha256((output / "optimizer_after.py").read_bytes()).hexdigest()
+    assert report["baseline_sha256"] == hashlib.sha256((output / "optimizer_before.py").read_bytes()).hexdigest()
+    assert (output / "fixture/3x4/focus_comparison.png").exists()
+    assert (output / "review.md").exists()
 
 
 @pytest.mark.parametrize("dither", [0.0, 0.005])

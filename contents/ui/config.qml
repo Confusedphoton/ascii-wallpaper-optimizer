@@ -402,7 +402,6 @@ Item {
     RenderClient {
         id: renderer
         objectName: "renderClient"
-        autoStart: root.controlsReady
         requestSettings: RenderSettings.request(
             root.editMode === "Slideshow" ? Array.from(root.editImages) : Array.from(root.editImages).slice(0, 1), root.activeSettings)
         cachedDirectory: root.activeSettings.RenderDirectory
@@ -614,12 +613,13 @@ Item {
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
                     text: renderer.renderState === "error" ? renderer.error
-                        : renderer.renderState === "ready" ? "Render complete"
+                        : renderer.renderState === "ready" ? (renderer.settingsPending
+                            ? "Settings changed. Select Render now to apply." : "Render complete")
                         : renderer.stage
                 }
                 Controls.Button {
                     text: renderer.renderState === "error" ? "Retry" : "Render now"
-                    onClicked: renderer.start(renderer.renderState === "ready")
+                    onClicked: renderer.start(true)
                     enabled: root.editImages.length > 0
                 }
             }
@@ -927,7 +927,7 @@ Item {
             Controls.Label {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                text: "Changes render in the background. The last saved ASCII render stays visible until replacement assets are ready."
+                text: "Select Render now to apply your changes. The last saved ASCII render stays visible until replacement assets are ready."
             }
 
             Controls.ComboBox {

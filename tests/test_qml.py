@@ -131,4 +131,8 @@ def test_qml_playback_and_client_lifecycle(tmp_path: Path) -> None:
     assert all(message not in output for message in ("Binding loop detected", "TypeError:", "ReferenceError:")), output
     assert counts["retry"] == 2
     assert counts["timeout"] == 2
-    assert counts["restart"] == 2
+    assert counts["restart"] == 1
+    assert "manual-only" not in counts
+    assert counts["manual-only-updated"] == 1
+    assert "superseded" not in counts
+    assert "saved-monitor" not in counts

@@ -17,6 +17,24 @@ from ascii_optimizer import service
 from ascii_optimizer.settings import normalize_options
 
 
+def test_screen_size_without_display_environment_uses_hint_without_starting_qt(monkeypatch):
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    def unexpected(*args, **kwargs):
+        raise AssertionError("A headless service must not start kscreen-doctor")
+    monkeypatch.setattr(service.subprocess, "run", unexpected)
+    assert service._screen_size("DP-1", [3414, 2134]) == (3414, 2134)
+
+
+def test_screen_size_with_display_environment_selects_physical_mode(monkeypatch):
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    output = {"outputs": [{"name": "DP-1", "enabled": True, "currentModeId": "native",
+                            "modes": [{"id": "native", "size": {"width": 3840, "height": 2160}}]}]}
+    monkeypatch.setattr(service.subprocess, "run", lambda *args, **kwargs:
+                        subprocess.CompletedProcess(args[0], 0, json.dumps(output)))
+    assert service._screen_size("DP-1", [1920, 1080]) == (3840, 2160)
+
+
 @pytest.fixture
 def request_settings(tmp_path, monkeypatch):
     image = tmp_path / "source.png"
@@ -119,6 +137,36 @@ def test_deleted_cache_assets_are_regenerated(tmp_path, request_settings):
     publish(render_queue, first)
     (Path(first["directory"]) / "stills/0000/color.png").unlink()
     assert render_queue.submit(request_settings)["state"] == "queued"
+
+
+def test_read_only_status_restores_saved_assets_after_source_changes(tmp_path, request_settings, monkeypatch):
+    queue = service.RenderQueue(tmp_path / "cache", start_worker=False)
+    first = queue.submit(request_settings)
+    publish(queue, first)
+    restarted = service.RenderQueue(queue.cache, start_worker=False)
+    # A status query must not validate against current renderer or input files.
+    monkeypatch.setattr(service, "render_revision", lambda: "new-source-revision")
+    Path(request_settings["images"][0]).unlink()
+    Path(request_settings["font"]).unlink()
+    result = restarted.status(first["id"], "wallpaper", first["generation"])
+    assert result["state"] == "ready"
+    assert result["directory"] == first["directory"]
+    assert result["settings"] == first["settings"]
+    assert restarted.pending.empty()
+    assert restarted.jobs[first["id"]]["clients"] == {"wallpaper"}
+    assert restarted.status("../missing") is None
+    assert restarted.pending.empty()
+
+
+def test_explicit_render_still_uses_current_source_revision(tmp_path, request_settings, monkeypatch):
+    queue = service.RenderQueue(tmp_path / "cache", start_worker=False)
+    first = queue.submit(request_settings)
+    publish(queue, first)
+    monkeypatch.setattr(service, "render_revision", lambda: "new-source-revision")
+    assert queue.status(first["id"])["generation"] == first["generation"]
+    updated = queue.submit(dict(request_settings, force=True))
+    assert updated["id"] != first["id"]
+    assert updated["settings"]["render_revision"] == "new-source-revision"
 
 
 def test_content_and_font_changes_invalidate_service_keys(tmp_path, request_settings):

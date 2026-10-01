@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
+from .defaults import DEFAULT_PERCEPTUAL_LOSS, PERCEPTUAL_WEIGHTS, ppd_for_width
 from .revision import render_revision
 from .settings import normalize_options, validate_size
 
@@ -75,6 +76,11 @@ def set_override(profile: str) -> str:
 
 def _screen_size(name: str, fallback: list[int]) -> tuple[int, int]:
     """Get the active physical mode; Plasma's QML sizes are logical pixels."""
+    # The user service can start before Plasma imports its display environment.
+    # In that state kscreen-doctor's Qt initialization crashes and dumps core;
+    # QML already sends physical dimensions as its validated size hint.
+    if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
+        return int(fallback[0]), int(fallback[1])
     try:
         result = subprocess.run(["kscreen-doctor", "-j"], capture_output=True,
                                 text=True, check=True, timeout=3)
@@ -113,6 +119,9 @@ def _validated_request(raw: dict) -> dict:
              "glyph_luminance_bonus", "glyph_entropy_strength", "style", "invert_ink", "background", "crop", "steps",
              "transition_steps", "seed")
     return dict({name: options[name] for name in names}, glyph_search="all" if options["style"] == "headroom" else "structure",
+                perceptual_loss=DEFAULT_PERCEPTUAL_LOSS and options["style"] == "headroom",
+                perceptual_weights=PERCEPTUAL_WEIGHTS if options["style"] == "headroom" else {},
+                viewing_ppd=ppd_for_width(size[0]) if options["style"] == "headroom" else None,
                 version=__version__, render_revision=render_revision(), images=images,
                 image_hashes=[_file_hash(Path(path)) for path in images],
                 font=str(font.resolve()), font_hash=_file_hash(font), size=list(size))
@@ -194,17 +203,23 @@ class RenderQueue:
         except (OSError, ValueError, KeyError, TypeError):
             return None
 
-    def _cached_job(self, key: str, settings: dict) -> dict | None:
+    def _cached_job(self, key: str, settings: dict | None = None) -> dict | None:
         try:
+            if not re.fullmatch(r"[a-f0-9]{24}", key):
+                return None
             saved = json.loads((self.cache / "variants" / key / "current.json").read_text())
             directory = Path(saved["directory"])
+            if settings is None:
+                # Read-only reconnection to a saved generation uses its own
+                # signature, even when renderer source or input files changed.
+                settings = json.loads((directory / "manifest.json").read_text())["signature"]
             manifest = self._manifest(directory, settings)
             if manifest is None:
                 return None
             return dict(id=key, state="ready", progress=1.0, stage="Ready", error="",
                         settings=settings, directory=str(directory), generation=str(manifest["generation"]),
                         manifest=manifest, force=False, clients=set())
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
             return None
 
     def submit(self, raw: dict) -> dict:
@@ -253,6 +268,14 @@ class RenderQueue:
                 self.consumers[client] = (key, time.monotonic())
             self._expire()
             job = self.jobs.get(key)
+            if job is None:
+                job = self._cached_job(key)
+                if job is not None:
+                    self.jobs[key] = job
+            if job is not None and client and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", client):
+                if self.consumers.get(client, (None,))[0] != key:
+                    self._detach(client)
+                self._attach(job, client)
             return self._public(job, generation) if job else None
 
     @staticmethod

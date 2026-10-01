@@ -12,10 +12,8 @@ Item {
     property string screenName: Screen.name || ""
     property int physicalWidth: Math.round(Screen.width * Screen.devicePixelRatio)
     property int physicalHeight: Math.round(Screen.height * Screen.devicePixelRatio)
-    property bool autoStart: true
     property string serviceUrl: "http://127.0.0.1:48741"
     property string clientId: "qml-" + Date.now() + "-" + Math.random().toString(16).slice(2)
-    property int requestDelay: 800
     property int requestTimeout: 10000
     property int retryBaseInterval: 1000
     property int retryMaxInterval: 30000
@@ -32,11 +30,14 @@ Item {
     property int displayImageCount: 0
     property int displayFrameCount: 16
     property var displaySettings: ({})
+    property var displayRequestSettings: ({})
     property var displayPlaybackSettings: ({})
     property var displayManifest: ({})
     property string jobId: ""
     property int requestSerial: 0
     property bool currentRequestForced: false
+    property bool submissionPending: false
+    property bool settingsPending: false
     property bool requestInFlight: false
     property int retryAttempt: 0
     property var pendingSettings: ({})
@@ -45,6 +46,7 @@ Item {
 
     readonly property string publishedState: JSON.stringify({directory: displayDirectory,
         generation: displayGeneration, manifest: displayManifest, settings: displaySettings,
+        request: displayRequestSettings,
         image_count: displayImageCount, frame_count: displayFrameCount,
         playback: displayPlaybackSettings})
 
@@ -57,36 +59,27 @@ Item {
     onSettingsKeyChanged: {
         cancelRequest()
         currentRequestForced = false
+        submissionPending = false
+        settingsPending = true
+        pendingSettings = ({})
         retryAttempt = 0
         retry.stop()
         jobId = ""
         directory = ""
-        renderState = "idle"
-        if (autoStart) schedule.restart()
+        renderState = displayDirectory ? "ready" : "idle"
+        stage = "Select Render now to apply these settings"
+        resumeSavedStatus()
     }
     onCachedDirectoryChanged: Qt.callLater(restoreCachedAssets)
     onCachedStateChanged: Qt.callLater(restoreCachedAssets)
     onPlaybackSettingsChanged: {
-        if (renderState === "ready") {
+        if (renderState === "ready" && !settingsPending) {
             displayPlaybackSettings = Object.assign({}, playbackSettings)
             Qt.callLater(savePlaybackState)
         }
     }
-    onAutoStartChanged: {
-        if (autoStart) schedule.restart()
-        else schedule.stop()
-    }
-    Component.onCompleted: {
-        restoreCachedAssets()
-        if (autoStart) schedule.restart()
-    }
+    Component.onCompleted: restoreCachedAssets()
     Component.onDestruction: cancelRequest()
-
-    Timer {
-        id: schedule
-        interval: client.requestDelay
-        onTriggered: client.start(false)
-    }
 
     Timer {
         id: poll
@@ -104,7 +97,7 @@ Item {
         onTriggered: {
             client.retryAttempt++
             if (client.jobId) client.checkStatus()
-            else client.start(client.currentRequestForced)
+            else if (client.submissionPending) client.submitRequest()
         }
     }
 
@@ -126,17 +119,36 @@ Item {
         // being rendered. Restoring it never waits for an HTTP response.
         if (displayDirectory && !saved.generation) return
         displaySettings = Object.assign({}, saved.settings || requestSettings)
+        displayRequestSettings = Object.assign({}, saved.request || saved.settings || requestSettings)
         displayPlaybackSettings = Object.assign({}, saved.playback || playbackSettings)
         displayManifest = saved.manifest || ({})
         displayImageCount = Number(saved.image_count) || (displaySettings.images || []).length
         displayFrameCount = Number(saved.frame_count) || Number(displaySettings.frames) || 16
         displayGeneration = saved.generation || cachedDirectory
         displayDirectory = cachedDirectory
-        if (!jobId && !requestInFlight) {
+        settingsPending = !displayMatchesRequest()
+        if (!submissionPending && renderState !== "queued" && renderState !== "running") {
+            cancelRequest()
+            retry.stop()
+            jobId = ""
             renderState = "ready"
             stage = "Ready"
             progress = 1
+            resumeSavedStatus()
         }
+    }
+
+    function resumeSavedStatus() {
+        // Observe saved generations without submitting a render or consulting
+        // the current source revision. Imported/legacy paths need no service.
+        const match = displayDirectory.match(/\/variants\/([a-f0-9]{24})\/[a-f0-9]{32}\/?$/)
+        if (match && !jobId) jobId = match[1]
+    }
+
+    function displayMatchesRequest() {
+        return Object.keys(requestSettings).every(function(key) {
+            return JSON.stringify(requestSettings[key]) === JSON.stringify(displayRequestSettings[key])
+        })
     }
 
     function savePlaybackState() {
@@ -147,6 +159,7 @@ Item {
     }
 
     function consume(job) {
+        submissionPending = false
         stage = job.stage || ""
         error = job.error || ""
         progress = Math.max(0, Math.min(1, Number(job.progress) || 0))
@@ -157,20 +170,27 @@ Item {
         retry.stop()
         if (renderState === "superseded") {
             jobId = ""
-            schedule.restart()
+            renderState = displayDirectory ? "ready" : "idle"
+            stage = "Render replaced. Select Render now to retry"
             return
         }
         if (renderState !== "ready" || !directory) return
         currentRequestForced = false
         const generation = String(job.generation || directory)
         if (displayDirectory === directory && displayGeneration === generation) {
-            const changed = JSON.stringify(displayPlaybackSettings) !== JSON.stringify(playbackSettings)
-            displayPlaybackSettings = Object.assign({}, playbackSettings)
+            settingsPending = !displayMatchesRequest()
+            const changed = !settingsPending
+                && JSON.stringify(displayPlaybackSettings) !== JSON.stringify(playbackSettings)
+            if (!settingsPending) displayPlaybackSettings = Object.assign({}, playbackSettings)
             if (changed) assetsReady()
             return
         }
         displaySettings = Object.assign({}, job.settings || pendingSettings || requestSettings)
-        displayPlaybackSettings = Object.assign({}, playbackSettings)
+        displayRequestSettings = Object.assign({}, Object.keys(pendingSettings).length
+            ? pendingSettings : (job.settings || requestSettings))
+        settingsPending = !displayMatchesRequest()
+        if (!settingsPending || !displayDirectory)
+            displayPlaybackSettings = Object.assign({}, playbackSettings)
         displayImageCount = Math.max(1, Number(job.image_count)
             || (displaySettings.images || []).length || 1)
         displayFrameCount = Math.max(2, Number(job.frame_count) || Number(displaySettings.frames) || 16)
@@ -229,9 +249,10 @@ Item {
     }
 
     function start(force) {
-        schedule.stop()
         retry.stop()
         cancelRequest()
+        jobId = ""
+        submissionPending = false
         const request = JSON.parse(settingsKey)
         request.images = (request.images || []).map(path => String(path).trim()).filter(path => path.length)
         currentRequestForced = !!force
@@ -246,6 +267,13 @@ Item {
             return
         }
         pendingSettings = Object.assign({}, request)
+        submissionPending = true
+        submitRequest()
+    }
+
+    function submitRequest() {
+        if (!submissionPending) return
+        const request = Object.assign({}, pendingSettings)
         request.force = currentRequestForced
         request.client_id = clientId
         renderState = "connecting"
@@ -267,7 +295,11 @@ Item {
             if (status === 200) client.consume(reply)
             else if (status === 404) {
                 client.jobId = ""
-                client.connectionFailed("Renderer restarted. Reconnecting automatically.")
+                client.submissionPending = false
+                retry.stop()
+                client.renderState = client.displayDirectory ? "ready" : "idle"
+                client.stage = "Saved render retained. Select Render now to update"
+                client.error = ""
             } else client.connectionFailed(reply.error || "Lost contact with renderer service.")
         })
     }

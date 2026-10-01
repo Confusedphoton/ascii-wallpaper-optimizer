@@ -18,7 +18,6 @@ TestCase {
         const item = createTemporaryObject(configComponent, tests, properties || {})
         verify(item)
         tryCompare(item, "controlsReady", true)
-        findChild(item, "renderClient").autoStart = false
         return item
     }
 

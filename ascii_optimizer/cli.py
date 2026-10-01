@@ -20,20 +20,58 @@ import torch
 from PIL import Image
 
 from . import __version__
+from .assets import (
+    cell_for_display,
+    glyph_masks,
+    load_target,
+    resolve_font,
+    save_atlas,
+    save_metadata,
+)
+from .defaults import (
+    DEFAULT_CHARS,
+    DEFAULT_GLYPH_ENTROPY_STRENGTH,
+    DEFAULT_GLYPH_LUMINANCE_BONUS,
+    DEFAULT_GRADIENT_LOSS_STRENGTH,
+    DEFAULT_PERCEPTUAL_LOSS,
+    DEFAULT_POLISH_STEPS,
+    DEFAULT_REFINEMENT_SWEEPS,
+    DEFAULT_USE_SHORTLIST,
+    MAX_GLYPH_ENTROPY_STRENGTH,
+    MAX_GLYPH_LUMINANCE_BONUS,
+    PERCEPTUAL_WEIGHTS,
+    ppd_for_width,
+)
+from .optimizer import (
+    Grid,
+    _choose_background,
+    _color_matrices,
+    fit_fixed_glyphs,
+    render_grid,
+    solve,
+)
 from .revision import render_revision
-from .assets import cell_for_display, glyph_masks, load_target, resolve_font, save_atlas, save_metadata
-from .defaults import (DEFAULT_CHARS, DEFAULT_GRADIENT_LOSS_STRENGTH,
-                       DEFAULT_GLYPH_LUMINANCE_BONUS, MAX_GLYPH_LUMINANCE_BONUS,
-                       DEFAULT_USE_SHORTLIST, DEFAULT_GLYPH_ENTROPY_STRENGTH,
-                       MAX_GLYPH_ENTROPY_STRENGTH)
-from .optimizer import Grid, _choose_background, _color_matrices, fit_fixed_glyphs, render_grid, solve
 from .runtime import select_device
 from .settings import normalize_options, validate_size
 from .structure import STRUCTURE_CHARS, fit_structure_colors, solve_structure
-from .tone import (display_tone_lab, encode_headroom_lab,
-                   invert_source, oklab_to_srgb, playback_rgb8, quantize_playback_lab, srgb_to_oklab)
-from .transition import FIELDS, PACES, ease, glyph_paths, local_progress, path_glyphs, phase_offsets
-
+from .tone import (
+    display_tone_lab,
+    encode_headroom_lab,
+    invert_source,
+    oklab_to_srgb,
+    playback_rgb8,
+    quantize_playback_lab,
+    srgb_to_oklab,
+)
+from .transition import (
+    FIELDS,
+    PACES,
+    ease,
+    glyph_paths,
+    local_progress,
+    path_glyphs,
+    phase_offsets,
+)
 
 MAP_KINDS = ("glyph", "color", "background")
 STILL_KINDS = (*MAP_KINDS, "preview")
@@ -170,7 +208,12 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                 saturation_loss_strength: float | None = None,
                 glyph_error_movement_strength: float = 0.0,
                 glyph_entropy_strength: float | None = None,
-                gradient_loss_strength: float | None = None) -> Grid:
+                gradient_loss_strength: float | None = None,
+                refinement_sweeps: int = DEFAULT_REFINEMENT_SWEEPS,
+                polish_steps: int = DEFAULT_POLISH_STEPS,
+                perceptual_loss: bool | None = None,
+                viewing_ppd: float | None = None,
+                diagnostics=None) -> Grid:
     """Prepare a grid whose displayed pixels follow the chosen ink polarity."""
     if style not in ("headroom", "structure"):
         raise ValueError(f"Unknown render style: {style}")
@@ -180,6 +223,12 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
         gradient_loss_strength = DEFAULT_GRADIENT_LOSS_STRENGTH if style == "headroom" else 0.0
     if glyph_entropy_strength is None:
         glyph_entropy_strength = DEFAULT_GLYPH_ENTROPY_STRENGTH if style == "headroom" else 0.0
+    if perceptual_loss is None:
+        perceptual_loss = DEFAULT_PERCEPTUAL_LOSS and style == "headroom"
+    if not isinstance(perceptual_loss, bool):
+        raise ValueError("perceptual_loss must be a boolean")
+    if style == "structure" and perceptual_loss:
+        raise ValueError("perceptual_loss is only available for the headroom objective")
     if style == "structure" and glyph_luminance_bonus:
         raise ValueError("glyph_luminance_bonus is only available for the headroom objective")
     if style == "structure" and saturation_loss_strength:
@@ -215,6 +264,10 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                      error_movement_target_oklab=source_lab,
                      gradient_loss_strength=gradient_loss_strength,
                      gradient_target_oklab=source_lab,
+                     refinement_sweeps=refinement_sweeps, polish_steps=polish_steps,
+                     perceptual_loss=perceptual_loss, perceptual_target_srgb=target,
+                     viewing_ppd=viewing_ppd,
+                     **({"diagnostics": diagnostics} if diagnostics is not None else {}),
                      invert_ink=invert_ink)
 
     selection_target = invert_source(target) if invert_ink else target
@@ -273,6 +326,7 @@ def _render_transition(index: int, images: list[Path], output: Path,
                     glyph_luminance_bonus=args.glyph_luminance_bonus,
                     gradient_loss_strength=float(args.gradient_loss_strength),
                     saturation_target_oklab=source_lab, gradient_target_oklab=source_lab,
+                    perceptual_target_srgb=target,
                     invert_ink=args.invert_ink,
                     on_progress=lambda fraction, stage, index=index, frame=frame: report(
                         frame - 1 + fraction, f"Transition {index + 1}/{len(images)}, frame {frame + 1}/{args.frames}: {stage}"))
@@ -339,6 +393,9 @@ def build(args: argparse.Namespace) -> None:
         "gradient_loss_strength": float(gradient_loss_strength),
         "glyph_luminance_bonus": glyph_luminance_bonus,
         "glyph_entropy_strength": args.glyph_entropy_strength,
+        "perceptual_loss": DEFAULT_PERCEPTUAL_LOSS and style == "headroom",
+        "perceptual_weights": PERCEPTUAL_WEIGHTS if style == "headroom" else {},
+        "viewing_ppd": ppd_for_width(args.size[0]) if style == "headroom" else None,
         "crop": args.crop, "grayscale": args.grayscale,
         "frames": args.frames, "steps": args.steps,
         "transition_steps": args.transition_steps,

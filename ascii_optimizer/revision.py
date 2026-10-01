@@ -1,13 +1,12 @@
 """Identify the renderer implementation used to generate cached assets."""
 from __future__ import annotations
 
-from functools import lru_cache
 import hashlib
+from functools import lru_cache
 from pathlib import Path
 
-
 RENDER_MODULES = ("assets.py", "cli.py", "defaults.py", "optimizer.py", "settings.py",
-                  "structure.py", "tone.py", "transition.py", "revision.py")
+                  "structure.py", "tone.py", "transition.py", "perceptual.py", "revision.py")
 
 
 @lru_cache(maxsize=8)

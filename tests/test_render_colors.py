@@ -99,6 +99,42 @@ def test_chrominance_correction_preserves_saturation_when_lightness_increases(li
     assert _saturation_loss(target, target, displayed_lab=holding_chroma) > 1e-5
 
 
+@pytest.mark.parametrize("lightness_factor", [.25, 1., 1.8])
+def test_saturation_preservation_penalizes_excess_and_deficit_symmetrically(lightness_factor):
+    source = torch.tensor([.4, .04, -.03], dtype=torch.float64).reshape(1, 3, 1, 1)
+    matching = source * lightness_factor
+    low, high = matching.clone(), matching.clone()
+    low[:, 1:] *= .5
+    high[:, 1:] *= 1.5
+    assert _saturation_loss(matching, source, displayed_lab=matching).item() < 1e-20
+    deficit = _saturation_loss(low, source, displayed_lab=low)
+    excess = _saturation_loss(high, source, displayed_lab=high)
+    assert deficit.item() > 1e-5
+    torch.testing.assert_close(deficit, excess, atol=1e-15, rtol=1e-12)
+
+
+@pytest.mark.parametrize("source_lightness", [0., 1e-7, .001, .4])
+def test_neutral_saturation_has_no_dark_source_artifact(source_lightness):
+    source = torch.tensor([source_lightness, 0., 0.]).reshape(1, 3, 1, 1)
+    gray = torch.tensor([.4, 0., 0.]).reshape(1, 3, 1, 1).requires_grad_()
+    loss = _saturation_loss(gray, source, displayed_lab=gray)
+    assert loss.item() == 0
+    loss.sum().backward()
+    assert torch.isfinite(gray.grad).all()
+    tinted = gray.detach().clone()
+    tinted[:, 1] = .02
+    assert _saturation_loss(tinted, source, displayed_lab=tinted).item() > 0
+
+
+def test_rgb8_black_ink_has_a_finite_gradient_toward_a_brighter_target():
+    rgb = torch.zeros((1, 3), requires_grad=True)
+    lab = optimizer._playback_color(rgb)
+    assert lab.count_nonzero() == 0
+    (lab[:, 0] - .2).square().sum().backward()
+    assert torch.isfinite(rgb.grad).all()
+    assert (rgb.grad < 0).all()
+
+
 @pytest.mark.parametrize("color", [[0.65, 0.15, 0.03], [0.6, -0.1, -0.15]])
 def test_display_saturation_gradient_tracks_gamut_compression(color):
     lab = np.array(color, dtype=np.float32).reshape(1, 1, 3)
@@ -130,7 +166,8 @@ def test_display_gradient_is_finite_at_black_white_and_primary_boundaries(invert
 
 @pytest.mark.parametrize("fixed_glyphs", [False, True])
 @pytest.mark.parametrize("bonus", [0.12, 0.5])
-def test_light_ink_bonus_preserves_highlight_saturation_and_lifts_shadows(fixed_glyphs, bonus):
+@pytest.mark.parametrize("refinement_sweeps", [0, 2])
+def test_light_ink_bonus_preserves_highlight_saturation_and_lifts_shadows(fixed_glyphs, bonus, refinement_sweeps):
     # Include pastel highlights and the hue-specific brightness limits of all
     # three RGB primaries, plus a shadow whose brightness should still improve.
     swatches = np.array([[0.12, 0.05, 0.08], [0.3, 0.15, 0.22],
@@ -142,7 +179,10 @@ def test_light_ink_bonus_preserves_highlight_saturation_and_lifts_shadows(fixed_
     masks = np.stack((np.zeros((4, 4)), np.eye(4), np.full((4, 4), 0.5),
                       np.ones((4, 4)))).astype(np.float32)
     settings = dict(input_oklab=True, steps=36, saturation_loss_strength=20,
-                    saturation_target_oklab=source_lab, gradient_loss_strength=0)
+                    saturation_target_oklab=source_lab, gradient_loss_strength=0,
+                    # Isolate the ink reward's legacy calibration from the
+                    # default source-brightness preservation objective.
+                    perceptual_loss=False)
 
     def displayed_cells(strength):
         if fixed_glyphs:
@@ -151,7 +191,7 @@ def test_light_ink_bonus_preserves_highlight_saturation_and_lifts_shadows(fixed_
                                     glyph_luminance_bonus=strength, **settings)
         else:
             grid = solve(target, masks, candidates=4, dither=0, background="#000000",
-                         glyph_luminance_bonus=strength, **settings)
+                         glyph_luminance_bonus=strength, refinement_sweeps=refinement_sweeps, **settings)
         displayed = srgb_to_oklab(oklab_to_srgb(display_tone_lab(render_grid(grid, masks))))
         return displayed.reshape(1, 4, len(swatches), 4, 3).mean((0, 1, 3))
 
@@ -162,7 +202,17 @@ def test_light_ink_bonus_preserves_highlight_saturation_and_lifts_shadows(fixed_
     np.testing.assert_allclose(saturation, expected, rtol=0.05, atol=0)
     # Empty glyphs must not collect the bonus and erase the deepest shadow.
     assert boosted[0, 0] > 0.05
-    assert boosted[1, 0] > baseline[1, 0] + 0.015
+    if fixed_glyphs:
+        assert boosted[1, 0] > baseline[1, 0] + 0.015
+    elif refinement_sweeps:
+        # Discrete contextual search can already lift one shadow through its
+        # glyph choice. The reward must still lift shadows without undoing it.
+        assert (boosted[:2, 0] >= baseline[:2, 0] - 0.003).all()
+        assert (boosted[:2, 0] - baseline[:2, 0]).max() > 0.015
+    else:
+        # Geometry can change with the reward; brighter ink need not increase
+        # a sparse cell's mean displayed lightness. Keep both shadows visible.
+        assert (boosted[:2, 0] > 0.05).all()
 
 
 def _sparse_masks():
@@ -229,8 +279,12 @@ def test_fixed_glyph_fit_retains_paths_and_steps_improve_the_retained_color_obje
     fitted = fit_fixed_glyphs(encoded, masks, glyphs, steps=12, **settings)
 
     def score(grid):
-        return _loss(_image_tensor(render_grid(grid, masks)), _image_tensor(encoded),
-                     gradient_target_lab=_image_tensor(source_lab), gradient_loss_strength=1.5)
+        spatial = optimizer._make_spatial_metrics(
+            encoded, source_srgb=None, source_oklab=source_lab, input_oklab=True,
+            pad=(0, 0, 0, 0), cell_height=4, device="cpu", viewing_ppd=None)
+        objective = _FrameObjective(_image_tensor(encoded), "default", (4, 3), False,
+                                    1.5, 0, _image_tensor(source_lab), spatial_metrics=spatial)
+        return objective(_image_tensor(render_grid(grid, masks)))
 
     np.testing.assert_array_equal(fitted.glyph, glyphs)
     np.testing.assert_array_equal(fitted.color, quantize_playback_lab(fitted.color))

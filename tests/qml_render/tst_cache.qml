@@ -14,7 +14,7 @@ TestCase {
     Rectangle { anchors.fill: parent; color: "black"; z: -1 }
 
     Component { id: shaderComponent; AsciiShader { width: 16; height: 8 } }
-    Component { id: clientComponent; RenderClient { autoStart: false; serviceUrl: "http://127.0.0.1:1" } }
+    Component { id: clientComponent; RenderClient { serviceUrl: "http://127.0.0.1:1" } }
     Component { id: spyComponent; SignalSpy { signalName: "scheduledUpdateCompleted" } }
     Component {
         id: neighborComponent
