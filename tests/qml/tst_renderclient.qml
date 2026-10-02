@@ -55,6 +55,42 @@ TestCase {
         compare(renderer.renderState, "idle")
     }
 
+    function test_applied_settings_automatically_render_and_coalesce_changes() {
+        const renderer = createTemporaryObject(clientComponent, tests, {
+            autoRender: true, requestSettings: {images: ["/auto-apply.png"], frames: 4},
+            playbackSettings: {mode: "Image"}
+        })
+        tryCompare(renderer, "displayGeneration", "auto-apply-ready", 3000)
+        renderer.requestSettings = {images: ["/auto-obsolete.png"], frames: 8}
+        renderer.requestSettings = {images: ["/auto-updated.png"], frames: 16}
+        tryCompare(renderer, "displayGeneration", "auto-updated-ready", 3000)
+        verify(!renderer.settingsPending)
+        renderer.requestSettings = {images: [], frames: 16}
+        tryCompare(renderer, "displayDirectory", "", 1000)
+        compare(renderer.renderState, "idle")
+    }
+
+    function test_automatic_wallpaper_restores_matching_saved_assets_without_rendering() {
+        const settings = {images: ["/auto-saved.png"], frames: 4}
+        const renderer = createTemporaryObject(clientComponent, tests, {autoRender: true,
+            requestSettings: settings, cachedDirectory: "/saved-auto",
+            cachedState: JSON.stringify({directory: "/saved-auto", generation: "saved-auto", request: settings})})
+        wait(100)
+        compare(renderer.displayGeneration, "saved-auto")
+        verify(!renderer.requestInFlight)
+        verify(!renderer.submissionPending)
+    }
+
+    function test_automatic_wallpaper_renders_for_new_display_dimensions() {
+        const renderer = createTemporaryObject(clientComponent, tests, {autoRender: true,
+            requestSettings: {images: ["/auto-resize.png"], frames: 4}, physicalWidth: 800, physicalHeight: 600})
+        tryCompare(renderer, "displayGeneration", "auto-resize-ready", 3000)
+        compare(renderer.displayRequestSettings.size, [800, 600])
+        renderer.physicalWidth = 1600
+        tryVerify(() => renderer.displayRequestSettings.size[0] === 1600, 3000)
+        verify(!renderer.settingsPending)
+    }
+
     function test_saved_cache_reconnects_with_read_only_status() {
         const key = "0123456789abcdef01234567"
         const directory = TestConfig.fixtureRoot + "/variants/" + key + "/0123456789abcdef0123456789abcdef"

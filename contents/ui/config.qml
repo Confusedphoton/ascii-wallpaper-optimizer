@@ -8,6 +8,7 @@ pragma ComponentBehavior: Bound
 import QtCore
 import QtQuick
 import "RenderSettings.js" as RenderSettings
+import "Profiles.js" as Profiles
 import QtQuick.Controls as Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
@@ -29,6 +30,7 @@ Item {
             + "/ascii-wallpaper-optimizer/editor.ini"
         category: "WallpaperEditor"
         property int lastProfile: -1
+        property string lastProfileId: ""
     }
 
     property string cfg_Mode: "Image"
@@ -39,9 +41,14 @@ Item {
     property string cfg_ManualProfile: "A"
     property string cfg_ProfileAStart: "07:00"
     property string cfg_ProfileBStart: "19:00"
+    property string cfg_Profiles: ""
+    property int cfg_MaxCachedRenders: 20
+    readonly property var profiles: Profiles.decode(cfg_Profiles)
     property int editProfile: 0
-    readonly property string editMode: editProfile === 0 ? cfg_Mode : cfg_ModeB
-    readonly property var editImages: editProfile === 0 ? cfg_Images : cfg_ImagesB
+    readonly property string editMode: activeSettings.Mode || "Image"
+    readonly property var editImages: activeSettings.Images || []
+    readonly property var editingProfile: profiles[editProfile] || ({id: "A", name: "Profile A", startTime: "07:00"})
+    property string profileMessage: ""
     property string cfg_FontFamily: "Monospace"
     property string cfg_RenderDirectory: ""
     property string cfg_RenderedState: ""
@@ -52,6 +59,7 @@ Item {
     property real cfg_TransitionSpread: 0.65
     property int cfg_BackgroundMode: 0
     property string cfg_BackgroundColor: "#202028"
+    property bool cfg_PerceptualLoss: true
     property string cfg_RenderStyle: "headroom"
     property string cfg_FontFamilyB: "Monospace"
     property string cfg_RenderDirectoryB: ""
@@ -63,6 +71,7 @@ Item {
     property real cfg_TransitionSpreadB: 0.65
     property int cfg_BackgroundModeB: 0
     property string cfg_BackgroundColorB: "#202028"
+    property bool cfg_PerceptualLossB: true
     property string cfg_RenderStyleB: "headroom"
     readonly property string standardChars: " .´:rszunvcxLOGDQ0KNMW&#\\/=^|[]{}"
     readonly property string previousStandardWithAtChars: " .´:rszunvcxLOGDQ0KNMW&@#\\/=^|[]{}"
@@ -94,7 +103,7 @@ Item {
                 || current === legacyOlderStandardWithBasicSymbolsChars
                 || current === structureChars || current === previousStructureChars || current === legacyStructureChars))
             setProfileSetting("AsciiChars", Array.from(structureChars))
-        else if (style === "headroom" && (current === previousStandardWithAtChars || current === previousStandardChars || current === legacyStandardChars
+        else if (style !== "structure" && (current === previousStandardWithAtChars || current === previousStandardChars || current === legacyStandardChars
                 || current === legacyOlderStandardChars || current === legacyOlderStandardWithBasicSymbolsChars
                 || current === structureChars
                 || current === previousStructureChars || current === legacyStructureChars))
@@ -121,7 +130,7 @@ Item {
     property real cfg_GlyphEntropyStrengthB: 0.01
     property real cfg_StructureDitherB: 0.06
     property bool cfg_InvertInkB: false
-    property var activeSettings: makeProfileSettings()
+    property var activeSettings: Profiles.normalizedSettings({})
     property string glyphEditorMessage: ""
 
     property string cfg_Image: ""
@@ -130,40 +139,87 @@ Item {
     property int _activePicker: -1
     property bool _isInternalUpdate: false
 
-    function makeProfileSettings() {
-        const suffix = editProfile === 0 ? "" : "B"
-        return {
-            FontFamily: root["cfg_FontFamily" + suffix],
-            RenderDirectory: root["cfg_RenderDirectory" + suffix],
-            RenderedState: root["cfg_RenderedState" + suffix],
-            TransitionFrames: root["cfg_TransitionFrames" + suffix],
-            TransitionDuration: root["cfg_TransitionDuration" + suffix],
-            TransitionPace: root["cfg_TransitionPace" + suffix],
-            TransitionField: root["cfg_TransitionField" + suffix],
-            TransitionSpread: root["cfg_TransitionSpread" + suffix],
-            BackgroundMode: root["cfg_BackgroundMode" + suffix],
-            BackgroundColor: root["cfg_BackgroundColor" + suffix],
-            RenderStyle: root["cfg_RenderStyle" + suffix],
-            AsciiChars: root["cfg_AsciiChars" + suffix],
-            Detail: root["cfg_Detail" + suffix],
-            Grayscale: root["cfg_Grayscale" + suffix],
-            SlideInterval: root["cfg_SlideInterval" + suffix],
-            Dither: root["cfg_Dither" + suffix],
-            GradientLossStrength: root["cfg_GradientLossStrength" + suffix],
-            GlyphLuminanceBonus: root["cfg_GlyphLuminanceBonus" + suffix],
-            GlyphEntropyStrength: root["cfg_GlyphEntropyStrength" + suffix],
-            StructureDither: root["cfg_StructureDither" + suffix],
-            InvertInk: root["cfg_InvertInk" + suffix]
+    function legacyConfig() {
+        const config = {}
+        for (const key of Object.keys(root)) {
+            if (key.startsWith("cfg_") && !key.endsWith("Changed")) config[key.slice(4)] = root[key]
         }
+        return config
+    }
+
+    function makeProfileSettings() {
+        const profile = profiles[editProfile]
+        if (profile) return Object.assign({}, profile.settings)
+        return Profiles.fromLegacy(legacyConfig())[editProfile === 1 ? 1 : 0].settings
+    }
+
+    function storeProfiles(next) {
+        cfg_Profiles = JSON.stringify(next)
+        // Retain compatibility with existing A/B configuration entries.
+        for (const profile of next) {
+            if (profile.id !== "A" && profile.id !== "B") continue
+            const suffix = profile.id === "B" ? "B" : ""
+            for (const name of Object.keys(Profiles.defaults)) root["cfg_" + name + suffix] = name === "RenderStyle" && profile.settings[name] === "classic"
+                ? "headroom" : profile.settings[name]
+            root["cfg_PerceptualLoss" + suffix] = profile.settings.RenderStyle !== "classic"
+            root["cfg_Profile" + profile.id + "Start"] = profile.startTime
+        }
+        activeSettings = makeProfileSettings()
+        root.configurationChanged()
     }
 
     function setProfileSetting(name, value) {
-        const next = Object.assign({}, activeSettings)
-        next[name] = value
-        activeSettings = next
-        const suffix = editProfile === 0 ? "" : "B"
-        root["cfg_" + name + suffix] = value
-        root.configurationChanged()
+        const next = profiles.slice()
+        if (!next[editProfile]) return
+        next[editProfile] = Object.assign({}, next[editProfile],
+            {settings: Object.assign({}, next[editProfile].settings, {[name]: value})})
+        storeProfiles(next)
+    }
+
+    function addProfile() {
+        const next = profiles.slice()
+        let number = next.length + 1
+        while (next.some(profile => profile.name === "Profile " + number)) number++
+        next.push({id: "profile-" + Date.now().toString(16) + "-" + Math.random().toString(16).slice(2, 8),
+            name: "Profile " + number, startTime: Profiles.availableStart(next),
+            settings: Profiles.normalizedSettings({})})
+        storeProfiles(next)
+        editProfile = next.length - 1
+    }
+
+    function removeProfile() {
+        if (profiles.length <= 1) return
+        const removed = editingProfile.id
+        const next = profiles.filter(profile => profile.id !== removed)
+        if (cfg_ManualProfile === removed) cfg_ManualProfile = next[0].id
+        storeProfiles(next)
+        editProfile = Math.min(editProfile, next.length - 1)
+        activeSettings = makeProfileSettings()
+        loadFromConfig()
+        rememberProfile()
+    }
+
+    function setProfileDetails(name, value) {
+        const next = profiles.slice()
+        if (name === "name") {
+            value = value.trim()
+            if (!value) return false
+        }
+        if (name === "startTime" && (Profiles.minute(value) < 0
+                || next.some((profile, index) => index !== editProfile && profile.startTime === value))) {
+            profileMessage = "Use a unique start time in HH:MM format."
+            return false
+        }
+        next[editProfile] = Object.assign({}, next[editProfile], {[name]: value})
+        storeProfiles(next)
+        profileMessage = ""
+        return true
+    }
+
+    function rememberProfile() {
+        editorState.lastProfile = editProfile
+        editorState.lastProfileId = profiles[editProfile].id
+        editorState.sync()
     }
 
     function restoreCharacterDefaults() {
@@ -193,36 +249,55 @@ Item {
 
     // Plasma calls this before copying cfg_ properties on Apply/OK.
     function saveConfig() {
-        if (!root.setCharacters(characterField.text))
+        const name = profileNameField.text
+        const startTime = profileStartField.text
+        const characters = characterField.text
+        const cacheInput = maxCachedRendersSpin.contentItem as TextInput
+        const maximum = cacheInput ? maxCachedRendersSpin.valueFromText(cacheInput.text, maxCachedRendersSpin.locale)
+            : cfg_MaxCachedRenders
+        if (!root.setProfileDetails("name", name)) profileNameField.text = profiles[editProfile].name
+        if (cfg_ScheduleEnabled && !root.setProfileDetails("startTime", startTime))
+            profileStartField.text = profiles[editProfile].startTime
+        if (Number.isFinite(maximum)) cfg_MaxCachedRenders = Math.max(1, Math.min(1000, maximum))
+        if (!root.setCharacters(characters))
             characterField.text = Array.from(activeSettings.AsciiChars || []).join("")
         syncToConfig()
+        cacheClient.setMaximum()
+        Qt.callLater(function() {
+            if (!renderer.displayDirectory || !renderer.displayMatchesRequest() || renderer.renderState === "error")
+                renderer.start(false)
+        })
     }
 
     function initializeProfileSettings() {
-        if (cfg_ProfileSettingsInitialized) return
-        const names = ["FontFamily", "TransitionFrames", "TransitionDuration", "TransitionPace",
-            "TransitionField", "TransitionSpread", "BackgroundMode", "BackgroundColor", "RenderStyle",
-            "AsciiChars", "Detail", "Grayscale", "SlideInterval", "Dither",
-            "GradientLossStrength", "GlyphLuminanceBonus", "GlyphEntropyStrength", "StructureDither", "InvertInk"]
-        for (const name of names)
-            root["cfg_" + name + "B"] = root["cfg_" + name]
+        if (!profiles.length) {
+            storeProfiles(Profiles.fromLegacy(legacyConfig()))
+            cfg_Image = ""
+        }
         cfg_ProfileSettingsInitialized = true
     }
 
-    onCfg_ImagesChanged: {
-        if (controlsReady && editProfile === 0) loadFromConfig();
+    onCfg_ProfilesChanged: {
+        if (!controlsReady) return
+        const profile = profiles[editProfile]
+        if (!profile) return
+        activeSettings = makeProfileSettings()
+        if (!profileNameField.activeFocus) profileNameField.text = profile.name
+        if (!profileStartField.activeFocus) profileStartField.text = profile.startTime
+        if (!_isInternalUpdate) loadFromConfig()
     }
-    onCfg_ImagesBChanged: if (controlsReady && editProfile === 1) loadFromConfig()
+
     onEditProfileChanged: {
         if (!controlsReady) return
-        editorState.lastProfile = editProfile
-        editorState.sync()
+        rememberProfile()
         activeSettings = makeProfileSettings()
+        profileNameField.text = profiles[editProfile].name
+        profileStartField.text = profiles[editProfile].startTime
         glyphEditorMessage = ""
+        profileMessage = ""
         loadFromConfig()
         previewContainer.resetPreview()
     }
-    onEditModeChanged: if (controlsReady) loadFromConfig()
 
     onCfg_FontFamilyChanged: {
         if (!monoFonts.includes(cfg_FontFamily))
@@ -246,20 +321,7 @@ Item {
         let migrated = false;
         // Derived bindings can still contain the previous profile while its
         // change handler is running. Read this profile's storage directly.
-        let currentImages = Array.from((editProfile === 0 ? cfg_Images : cfg_ImagesB) || []);
-
-        if (editProfile === 0 && root.cfg_Image && root.cfg_Image.trim() !== "") {
-            const cleaned = root.cfg_Image.trim();
-            const alreadyExists = currentImages.some(p => String(p).trim() === cleaned);
-
-            if (!alreadyExists) {
-                currentImages.push(cleaned);
-            }
-
-            migrated = true;
-            root.cfg_Image = ""; 
-            root.cfg_Images = currentImages;
-        }
+        let currentImages = Array.from(activeSettings.Images || []);
 
         let currentChars = Array.from(root.activeSettings.AsciiChars || []);
         if (currentChars.length && currentChars[0] === "\\s") {
@@ -286,7 +348,7 @@ Item {
             imageList.append({ "path": decoded });
         }
 
-        if (imageList.count === 0 && (editProfile === 0 ? cfg_Mode : cfg_ModeB) !== "Slideshow") {
+        if (imageList.count === 0 && activeSettings.Mode !== "Slideshow") {
             imageList.append({ "path": "" });
         }
 
@@ -311,9 +373,8 @@ Item {
             }
         }
         
-        if (editProfile === 0) root.cfg_Images = Array.from(unique);
-        else root.cfg_ImagesB = Array.from(unique);
-        root.configurationChanged()
+        if (JSON.stringify(Array.from(unique)) !== JSON.stringify(Array.from(editImages)))
+            root.setProfileSetting("Images", Array.from(unique))
         _isInternalUpdate = false;
     }
 
@@ -358,13 +419,17 @@ Item {
 
     Component.onCompleted: Qt.callLater(function() {
         // Wait until Plasma has supplied every cfg_ property before migrations.
-        root.editProfile = editorState.lastProfile === 0 || editorState.lastProfile === 1
-            ? editorState.lastProfile : root.cfg_ManualProfile === "B" ? 1 : 0
         root.initializeProfileSettings()
+        const remembered = root.profiles.findIndex(profile => profile.id === editorState.lastProfileId)
+        const manual = root.profiles.findIndex(profile => profile.id === root.cfg_ManualProfile)
+        root.editProfile = remembered >= 0 ? remembered
+            : editorState.lastProfile >= 0 && editorState.lastProfile < root.profiles.length
+                ? editorState.lastProfile : Math.max(0, manual)
         root.activeSettings = root.makeProfileSettings()
         root.loadFromConfig()
         root.applyStyleCharacters(root.activeSettings.RenderStyle)
         fontCombo.editText = root.activeSettings.FontFamily
+        renderer.restoreCachedAssets()
         root.controlsReady = true
         root.startFontScan()
     })
@@ -414,6 +479,12 @@ Item {
             if (root.controlsReady && root.activeSettings.RenderedState !== publishedState)
                 root.setProfileSetting("RenderedState", publishedState)
         }
+    }
+
+    CacheClient {
+        id: cacheClient
+        objectName: "cacheClient"
+        maximum: root.cfg_MaxCachedRenders
     }
 
     FontMetrics {
@@ -552,7 +623,9 @@ Item {
                     smoothOutput: true
                     mipmapOutput: true
 
-                    renderDirectory: renderer.displayDirectory
+                    renderDirectory: renderer.renderState === "ready" && !renderer.settingsPending
+                        ? renderer.displayDirectory : ""
+                    visible: renderer.renderState === "ready" && !renderer.settingsPending
                     generation: renderer.displayGeneration
                     manifest: renderer.displayManifest
                     imageCount: renderer.displayImageCount
@@ -565,9 +638,11 @@ Item {
 
                 Controls.Label {
                     anchors.centerIn: parent
-                    text: "Select an image to render"
+                    text: !root.editImages.length ? "Select an image to render"
+                        : renderer.renderState === "connecting" || renderer.renderState === "queued" || renderer.renderState === "running"
+                            ? "Rendering…" : renderer.settingsPending ? "Apply to preview your changes" : "Apply to render"
                     opacity: 0.5
-                    visible: !renderer.displayDirectory && !previewShader.ready
+                    visible: !previewShader.visible || !previewShader.ready
                 }
 
                 Rectangle {
@@ -614,7 +689,7 @@ Item {
                     wrapMode: Text.WordWrap
                     text: renderer.renderState === "error" ? renderer.error
                         : renderer.renderState === "ready" ? (renderer.settingsPending
-                            ? "Settings changed. Select Render now to apply." : "Render complete")
+                            ? "Settings changed. Apply to render." : "Render complete")
                         : renderer.stage
                 }
                 Controls.Button {
@@ -634,12 +709,27 @@ Item {
                 Kirigami.FormData.label: "Profile Mode"
             }
 
-            Controls.ComboBox {
+            RowLayout {
                 Kirigami.FormData.label: "Editing Profile:"
                 Layout.fillWidth: true
-                model: ["Profile A", "Profile B"]
-                currentIndex: root.editProfile
-                onActivated: index => root.editProfile = index
+                Controls.ComboBox {
+                    objectName: "editingProfileCombo"
+                    Layout.fillWidth: true
+                    model: root.profiles.map(profile => profile.name)
+                    currentIndex: root.editProfile
+                    onActivated: index => root.editProfile = index
+                }
+                Controls.Button { text: "Add"; onClicked: root.addProfile() }
+                Controls.Button { text: "Remove"; enabled: root.profiles.length > 1; onClicked: root.removeProfile() }
+            }
+
+            Controls.TextField {
+                id: profileNameField
+                objectName: "profileNameField"
+                Kirigami.FormData.label: "Profile Name:"
+                Layout.fillWidth: true
+                text: root.editingProfile.name
+                onEditingFinished: if (!root.setProfileDetails("name", text)) text = root.editingProfile.name
             }
 
             Controls.Switch {
@@ -652,53 +742,34 @@ Item {
                 }
             }
 
-            RowLayout {
-                Kirigami.FormData.label: "Manual Profile:"
+            Controls.ComboBox {
+                objectName: "manualProfileCombo"
+                Kirigami.FormData.label: "Active Profile:"
+                Layout.fillWidth: true
                 visible: !root.cfg_ScheduleEnabled
-
-                Controls.RadioButton {
-                    text: "Profile A"
-                    checked: root.cfg_ManualProfile === "A"
-                    onClicked: {
-                        root.cfg_ManualProfile = "A"
-                        root.configurationChanged()
-                    }
-                }
-
-                Controls.RadioButton {
-                    text: "Profile B"
-                    checked: root.cfg_ManualProfile === "B"
-                    onClicked: {
-                        root.cfg_ManualProfile = "B"
-                        root.configurationChanged()
-                    }
+                model: root.profiles.map(profile => profile.name)
+                currentIndex: Math.max(0, root.profiles.findIndex(profile => profile.id === root.cfg_ManualProfile))
+                onActivated: index => {
+                    root.cfg_ManualProfile = root.profiles[index].id
+                    root.configurationChanged()
                 }
             }
 
             Controls.TextField {
-                Kirigami.FormData.label: "Profile A From:"
+                id: profileStartField
+                objectName: "profileStartField"
+                Kirigami.FormData.label: "Starts At:"
                 visible: root.cfg_ScheduleEnabled
-                text: root.cfg_ProfileAStart
+                text: root.editingProfile.startTime
                 inputMask: "99:99"
-                onEditingFinished: {
-                    if (/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(text)) {
-                        root.cfg_ProfileAStart = text
-                        root.configurationChanged()
-                    } else text = root.cfg_ProfileAStart
-                }
+                onEditingFinished: if (!root.setProfileDetails("startTime", text)) text = root.editingProfile.startTime
             }
 
-            Controls.TextField {
-                Kirigami.FormData.label: "Profile B From:"
+            Controls.Label {
                 visible: root.cfg_ScheduleEnabled
-                text: root.cfg_ProfileBStart
-                inputMask: "99:99"
-                onEditingFinished: {
-                    if (/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(text)) {
-                        root.cfg_ProfileBStart = text
-                        root.configurationChanged()
-                    } else text = root.cfg_ProfileBStart
-                }
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: root.profileMessage || "Each profile stays active from its start time until the next profile starts, including across midnight."
             }
 
             Kirigami.Separator {
@@ -716,8 +787,7 @@ Item {
 
                 onActivated: index => {
                     const newMode = model[index]
-                    if (root.editProfile === 0) root.cfg_Mode = newMode
-                    else root.cfg_ModeB = newMode
+                    root.setProfileSetting("Mode", newMode)
 
                     if (newMode !== "Slideshow" && imageList.count === 0) {
                         imageList.append({ "path": "" })
@@ -882,12 +952,13 @@ Item {
             }
 
             Controls.ComboBox {
+                objectName: "renderStyleCombo"
                 Kirigami.FormData.label: "Render Style:"
                 Layout.fillWidth: true
-                model: ["Headroom aware", "Structure first"]
-                currentIndex: root.activeSettings.RenderStyle === "structure" ? 1 : 0
+                model: ["Perceptual headroom", "Classic headroom", "Structure first"]
+                currentIndex: ["headroom", "classic", "structure"].indexOf(root.activeSettings.RenderStyle)
                 onActivated: index => {
-                    const style = index === 1 ? "structure" : "headroom"
+                    const style = ["headroom", "classic", "structure"][index]
                     root.setProfileSetting("RenderStyle", style)
                     root.applyStyleCharacters(style)
                 }
@@ -911,23 +982,6 @@ Item {
             Kirigami.Separator {
                 Kirigami.FormData.isSection: true
                 Kirigami.FormData.label: "Appearance"
-            }
-
-            Controls.TextField {
-                Kirigami.FormData.label: "Render Cache:"
-                Layout.fillWidth: true
-                text: root.activeSettings.RenderDirectory
-                placeholderText: "Generated automatically after rendering"
-                readOnly: true
-                onEditingFinished: {
-                    root.setProfileSetting("RenderDirectory", text.trim())
-                }
-            }
-
-            Controls.Label {
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                text: "Select Render now to apply your changes. The last saved ASCII render stays visible until replacement assets are ready."
             }
 
             Controls.ComboBox {
@@ -1021,10 +1075,11 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Dithering Strength:"
-                visible: root.activeSettings.RenderStyle === "headroom"
+                visible: root.activeSettings.RenderStyle !== "structure"
 
                 Controls.Slider {
                     id: ditherSlider
+                    objectName: "ditherSlider"
                     Layout.fillWidth: true
                     from: 0
                     to: 0.05
@@ -1040,10 +1095,11 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Sobel Edge Loss:"
-                visible: root.activeSettings.RenderStyle === "headroom"
+                visible: root.activeSettings.RenderStyle !== "structure"
 
                 Controls.Slider {
                     id: gradientLossSlider
+                    objectName: "gradientLossSlider"
                     Layout.fillWidth: true
                     from: 0
                     to: 4
@@ -1059,10 +1115,11 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Glyph Luminosity Bonus:"
-                visible: root.activeSettings.RenderStyle === "headroom"
+                visible: root.activeSettings.RenderStyle !== "structure"
 
                 Controls.Slider {
                     id: glyphLuminanceBonusSlider
+                    objectName: "glyphLuminanceBonusSlider"
                     Layout.fillWidth: true
                     from: 0
                     to: 0.5
@@ -1078,7 +1135,7 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Glyph Variety:"
-                visible: root.activeSettings.RenderStyle === "headroom"
+                visible: root.activeSettings.RenderStyle !== "structure"
 
                 Controls.Slider {
                     id: glyphEntropySlider
@@ -1104,6 +1161,7 @@ Item {
 
                 Controls.Slider {
                     id: structureDitherSlider
+                    objectName: "structureDitherSlider"
                     Layout.fillWidth: true
                     from: 0
                     to: 0.12
@@ -1221,6 +1279,40 @@ Item {
                     text: intervalSlider.value + " seconds"
                     font.weight: Font.Bold
                 }
+            }
+
+            Kirigami.Separator {
+                Kirigami.FormData.isSection: true
+                Kirigami.FormData.label: "Render Cache"
+            }
+
+            Controls.SpinBox {
+                id: maxCachedRendersSpin
+                objectName: "maxCachedRendersSpin"
+                Kirigami.FormData.label: "Maximum Cached Renders:"
+                from: 1
+                to: 1000
+                editable: true
+                value: root.cfg_MaxCachedRenders
+                onValueModified: {
+                    root.cfg_MaxCachedRenders = value
+                    root.configurationChanged()
+                }
+            }
+
+            Controls.Button {
+                objectName: "clearCacheButton"
+                Kirigami.FormData.label: ""
+                text: "Clear Cache"
+                icon.name: "edit-clear"
+                enabled: !cacheClient.busy
+                onClicked: cacheClient.clear()
+            }
+
+            Controls.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: cacheClient.message || "In-use renders stay available until replaced."
             }
         }
     }

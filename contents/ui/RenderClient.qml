@@ -7,6 +7,8 @@ Item {
 
     property var requestSettings: ({})
     property var playbackSettings: ({})
+    property bool autoRender: false
+    property bool initialized: false
     property string cachedDirectory: ""
     property string cachedState: ""
     property string screenName: Screen.name || ""
@@ -60,15 +62,16 @@ Item {
         cancelRequest()
         currentRequestForced = false
         submissionPending = false
-        settingsPending = true
+        settingsPending = !displayDirectory || !displayMatchesRequest()
         pendingSettings = ({})
         retryAttempt = 0
         retry.stop()
         jobId = ""
         directory = ""
         renderState = displayDirectory ? "ready" : "idle"
-        stage = "Select Render now to apply these settings"
+        stage = "Settings changed. Apply to render."
         resumeSavedStatus()
+        if (initialized && autoRender) automaticRender.restart()
     }
     onCachedDirectoryChanged: Qt.callLater(restoreCachedAssets)
     onCachedStateChanged: Qt.callLater(restoreCachedAssets)
@@ -78,8 +81,21 @@ Item {
             Qt.callLater(savePlaybackState)
         }
     }
-    Component.onCompleted: restoreCachedAssets()
+    Component.onCompleted: {
+        restoreCachedAssets()
+        initialized = true
+        if (autoRender) automaticRender.restart()
+    }
     Component.onDestruction: cancelRequest()
+
+    Timer {
+        id: automaticRender
+        interval: 0
+        onTriggered: {
+            client.restoreCachedAssets()
+            if (!client.displayDirectory || !client.displayMatchesRequest()) client.start(false)
+        }
+    }
 
     Timer {
         id: poll
@@ -146,8 +162,15 @@ Item {
     }
 
     function displayMatchesRequest() {
+        if (displayRequestSettings.size && JSON.stringify(displayRequestSettings.size)
+                !== JSON.stringify([physicalWidth, physicalHeight])) return false
+        if (displayRequestSettings.screen !== undefined && displayRequestSettings.screen !== screenName) return false
         return Object.keys(requestSettings).every(function(key) {
-            return JSON.stringify(requestSettings[key]) === JSON.stringify(displayRequestSettings[key])
+            let saved = displayRequestSettings[key]
+            if (key === "perceptual_loss" && saved === undefined)
+                saved = displaySettings.perceptual_loss !== undefined ? displaySettings.perceptual_loss
+                    : displayRequestSettings.style === "headroom"
+            return JSON.stringify(requestSettings[key]) === JSON.stringify(saved)
         })
     }
 
@@ -300,6 +323,7 @@ Item {
                 client.renderState = client.displayDirectory ? "ready" : "idle"
                 client.stage = "Saved render retained. Select Render now to update"
                 client.error = ""
+                if (client.autoRender) client.start(false)
             } else client.connectionFailed(reply.error || "Lost contact with renderer service.")
         })
     }
