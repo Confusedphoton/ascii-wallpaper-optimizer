@@ -186,10 +186,11 @@ TestCase {
         const item = page({cfg_PerceptualLoss: false})
         item.editProfile = 0
         compare(item.activeSettings.RenderStyle, "classic")
-        const headroom = ["ditherSlider", "gradientLossSlider", "glyphLuminanceBonusSlider", "glyphEntropySlider"]
+        const headroom = ["gradientLossSlider", "glyphLuminanceBonusSlider", "glyphEntropySlider"]
         for (const style of ["classic", "headroom", "structure"]) {
             item.setProfileSetting("RenderStyle", style)
             for (const name of headroom) compare(findChild(item, name).visible, style !== "structure")
+            compare(findChild(item, "ditherSlider").visible, style === "classic")
             compare(findChild(item, "structureDitherSlider").visible, style === "structure")
             const request = findChild(item, "renderClient").requestSettings
             compare(request.perceptual_loss, style === "headroom")

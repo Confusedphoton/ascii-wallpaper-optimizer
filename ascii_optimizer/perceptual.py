@@ -79,6 +79,7 @@ class SpatialMetrics:
         self.downsample = min(downsample, min(source_rgb.shape[-2:]))
         self.bins = bins
         self.ppd = ppd
+        self.source_rgb = source_rgb
         # Achromatic sources use a tied RGB ink parameter, avoiding brightness
         # gradients introducing a hue into grayscale images.
         self.neutral_source = bool(
@@ -111,6 +112,51 @@ class SpatialMetrics:
         self.edge_weights = tuple(
             ref["mass"] / (ref["mass"] + 0.0001) for ref in self.source_features
         )
+
+    @torch.no_grad()
+    def glyph_stroke_costs(self, masks):
+        """Compare actual atlas stroke tensors with source directions per cell.
+
+        Angular costs are evaluated for every glyph, so the hard-choice
+        surrogate receives each candidate's actual geometric cost instead of
+        a linearization of a normalized tensor at the currently selected glyph.
+        """
+        height, width = masks.shape[-2:]
+        padded = F.pad(masks[:, None], (2, 2, 2, 2))
+        gx, gy = gradients(blur(padded, 0.5))
+        xx, yy, xy = (v.mean((2, 3)) for v in (gx.square(), gy.square(), gx * gy))
+        axial = torch.cat((xx - yy, 2 * xy), 1) / (xx + yy + 1e-8)
+        coverage = masks.mean((1, 2))
+        from .optimizer import _rgb_to_oklab
+        lab = _rgb_to_oklab(self.source_rgb.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        # Source contours are coarser than raster strokes. Reduce only the
+        # source field, aligned to cell boundaries, before its large blurs.
+        stride = 2 if height % 2 == width % 2 == 0 and min(height, width) >= 8 else 1
+        if stride > 1:
+            lab = F.avg_pool2d(lab, stride)
+        source_cell = (height // stride, width // stride)
+        costs = []
+        for sigma in (height / 4, height / 2):
+            # Chromatic contours matter even at equal luminance. Remove the
+            # broad shading ramp: cell colors can represent that ramp without
+            # turning every glyph to its direction.
+            field = blur(lab, max(0.5, sigma / stride)) - blur(lab, max(1.0, 4 * sigma / stride))
+            sx, sy = gradients(field)
+            sx, sy = sx / stride, sy / stride
+            xx, yy, xy = (F.avg_pool2d(v, source_cell).flatten().unsqueeze(1)
+                          for v in (sx.square().sum(1, keepdim=True),
+                                    sy.square().sum(1, keepdim=True),
+                                    (sx * sy).sum(1, keepdim=True)))
+            mass = xx + yy
+            ref = torch.cat((xx - yy, 2 * xy), 1) / (mass + 1e-8)
+            coherence = ref.square().sum(1, keepdim=True).sqrt()
+            weight = mass / (mass + 1e-6) * coherence
+            # Prefer less ink when rasters explain a coherent contour equally
+            # well. Tone matching still pays the cost if a thin glyph cannot
+            # supply enough light. This applies to every raster, without names.
+            costs.append(((ref[:, None] - axial[None]).square().sum(2)
+                          + 0.25 * coverage[None]) * weight)
+        return torch.stack(costs).mean(0)
 
     def blur(self, image, sigma):
         return blur(image, sigma, self.kernels[sigma])
@@ -161,6 +207,7 @@ class SpatialMetrics:
                 *(("orientation_stroke_tensor",) if stroke else ()),
             }
         )
+        stroke = stroke or "orientation_stroke_tensor" in selected
         y = self.reduce(luminance(rgb))
         displayed_l = tuple(lightness(self.blur(y, s)) for s in self.sigmas)
         brightness = torch.stack(
@@ -204,10 +251,8 @@ class SpatialMetrics:
                 if stroke:
                     fine = self.features(y, i, fine=True, histogram=False)
                     stroke_tensor.append(
-                        (
-                            (fine["axial"] - ref["axial"]).square().sum(1, keepdim=True)
-                            * direction_weight
-                        ).mean()
+                        ((fine["axial"] - ref["axial"]).square().sum(1, keepdim=True)
+                         * direction_weight).mean()
                     )
             for name, values in (
                 ("orientation_tensor", tensor),

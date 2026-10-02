@@ -229,6 +229,8 @@ def test_perceptual_and_classic_styles_have_distinct_cache_keys_and_commands(tmp
     perceptual = queue.submit(request_settings)
     classic = queue.submit(dict(request_settings, perceptual_loss=False))
     assert perceptual["id"] != classic["id"]
+    assert perceptual["settings"]["output_stage"] == "adam_terminal"
+    assert classic["settings"]["output_stage"] == "postprocessed"
     assert perceptual["settings"]["perceptual_weights"]
     assert classic["settings"]["perceptual_weights"] == {}
     assert classic["settings"]["viewing_ppd"] is None

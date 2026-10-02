@@ -136,9 +136,9 @@ def test_experimental_objective_matches_independent_weighted_metrics_and_gradien
     assert rendered.grad.abs().sum() > 0
 
 
-def test_default_objective_and_selected_metrics_match_reviewed_experiment(metrics):
+def test_default_objective_matches_weighted_displayed_terms_and_gradients(metrics):
     from ascii_optimizer import optimizer
-    from ascii_optimizer.defaults import PERCEPTUAL_WEIGHTS
+    from ascii_optimizer.defaults import PERCEPTUAL_WEIGHTS, PERCEPTUAL_PIXEL_WEIGHT, PERCEPTUAL_CHROMA_WEIGHT
 
     source = torch.rand(1, 3, 64, 64, generator=torch.Generator().manual_seed(17)) * 0.3
     model = metrics.SpatialMetrics(source, ppd=60, cell_height=8)
@@ -146,18 +146,25 @@ def test_default_objective_and_selected_metrics_match_reviewed_experiment(metric
     baseline = optimizer._FrameObjective(
         target, "default", (8, 8), False, 1.5, 20, target, target
     )
-    reviewed = metrics.ExperimentalObjective(baseline, model, PERCEPTUAL_WEIGHTS)
     production = optimizer._FrameObjective(
         target, "default", (8, 8), False, 1.5, 20, target, target, spatial_metrics=model
     )
     candidate = (target * 0.9).detach().requires_grad_()
-    expected = reviewed(candidate)
+    baseline_components = {}
+    baseline(candidate, components=baseline_components)
+    displayed = optimizer._display_headroom_lab(candidate)
+    rgb = optimizer._oklab_to_rgb(displayed.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+    spatial_terms, _ = model.terms(rgb, selected=PERCEPTUAL_WEIGHTS)
+    expected = sum(value * (1 if name == "saturation" else PERCEPTUAL_PIXEL_WEIGHT)
+                   for name, value in baseline_components.items())
+    expected += PERCEPTUAL_CHROMA_WEIGHT * optimizer._relative_chroma_loss(displayed, target).mean()
+    expected += sum(PERCEPTUAL_WEIGHTS[name] * value for name, value in spatial_terms.items())
     components = {}
     actual = production(candidate, components=components)
-    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    torch.testing.assert_close(actual, expected)
     actual_gradient = torch.autograd.grad(actual, candidate)[0]
     expected_gradient = torch.autograd.grad(expected, candidate)[0]
-    torch.testing.assert_close(actual_gradient, expected_gradient, atol=0, rtol=0)
+    torch.testing.assert_close(actual_gradient, expected_gradient)
     assert set(PERCEPTUAL_WEIGHTS) <= components.keys()
     assert "displayed_sobel" in components and "saturation" in components
     terms, _ = model.terms(source, selected=PERCEPTUAL_WEIGHTS)
@@ -193,13 +200,16 @@ def test_default_solver_uses_original_source_and_logs_perceptual_losses(
     )
     assert trace.metadata["perceptual_loss"] is True
     assert trace.metadata["viewing_ppd"] == pytest.approx(ppd_for_width(13))
-    assert trace.metadata["coefficients"]["spatial_lightness"] == 2
+    from ascii_optimizer.defaults import PERCEPTUAL_WEIGHTS
+    assert trace.metadata["coefficients"]["spatial_lightness"] == PERCEPTUAL_WEIGHTS["spatial_lightness"]
+    assert "reference_range_linear_rgb" in trace.metadata
     assert trace.metadata["replacement_diagnostics"].startswith("Disabled")
     for row in trace.records:
         assert {
             "loss/spatial_lightness",
             "loss/orientation_w1",
             "loss/contour_strength",
+            "loss/glyph_stroke_alignment",
         } <= row["tensors"].keys()
         assert torch.isfinite(row["tensors"]["loss"])
     assert not trace.replacements
@@ -236,7 +246,9 @@ def test_source_features_are_cached_and_original_rgb_is_used(metrics, monkeypatc
         device="cpu",
     )
     expected = srgb_to_linear(torch.from_numpy(source).permute(2, 0, 1)[None])
-    torch.testing.assert_close(captured[0], expected, atol=0, rtol=0)
+    # A full-coverage atlas has the complete display range, so calibration is
+    # the identity up to floating-point color-transform roundoff.
+    torch.testing.assert_close(captured[0], expected, atol=1e-7, rtol=1e-6)
     model = original(expected, ppd=60)
 
     def forbidden(*args, **kwargs):

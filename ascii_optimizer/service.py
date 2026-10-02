@@ -155,6 +155,8 @@ def _validated_request(raw: dict) -> dict:
              "glyph_luminance_bonus", "glyph_entropy_strength", "style", "invert_ink", "background", "crop", "steps",
              "transition_steps", "seed", "perceptual_loss")
     return dict({name: options[name] for name in names}, glyph_search="all" if options["style"] == "headroom" else "structure",
+                output_stage=("adam_terminal" if options["perceptual_loss"] else
+                              "postprocessed" if options["style"] == "headroom" else "structure"),
                 perceptual_weights=PERCEPTUAL_WEIGHTS if options["perceptual_loss"] else {},
                 viewing_ppd=ppd_for_width(size[0]) if options["perceptual_loss"] else None,
                 version=__version__, render_revision=render_revision(), images=images,

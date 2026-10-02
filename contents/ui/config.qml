@@ -1075,7 +1075,7 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Dithering Strength:"
-                visible: root.activeSettings.RenderStyle !== "structure"
+                visible: root.activeSettings.RenderStyle === "classic"
 
                 Controls.Slider {
                     id: ditherSlider

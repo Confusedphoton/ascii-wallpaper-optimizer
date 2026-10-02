@@ -287,7 +287,10 @@ def test_inverting_headroom_changes_solved_ink():
                     candidates=3, dither=0, structure_dither=0, device="cpu")
     normal = solve_style(source, masks, invert_ink=False, **settings)
     inverted = solve_style(source, masks, invert_ink=True, **settings)
-    assert inverted.color.mean() < normal.color.mean() * 0.5
+    from ascii_optimizer.tone import display_tone_lab
+    normal_ink = display_tone_lab(normal.color)
+    inverted_ink = display_tone_lab(inverted.color, invert_ink=True)
+    assert inverted_ink[..., 0].mean() < normal_ink[..., 0].mean() * 0.5
 
 
 def test_render_style_and_inversion_are_saved_with_assets(tmp_path: Path, batch_args):
