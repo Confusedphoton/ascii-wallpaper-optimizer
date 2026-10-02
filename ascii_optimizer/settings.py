@@ -6,7 +6,7 @@ import math
 import re
 from collections.abc import Mapping
 
-from .defaults import (DEFAULT_CHARS, STRUCTURE_CHARS, DEFAULT_GLYPH_LUMINANCE_BONUS,
+from .defaults import (DEFAULT_CHARS, STRUCTURE_CHARS, DEFAULT_PERCEPTUAL_LOSS, DEFAULT_GLYPH_LUMINANCE_BONUS,
                        DEFAULT_GRADIENT_LOSS_STRENGTH, MAX_GLYPH_LUMINANCE_BONUS,
                        DEFAULT_GLYPH_ENTROPY_STRENGTH, MAX_GLYPH_ENTROPY_STRENGTH)
 
@@ -53,6 +53,14 @@ def normalize_options(raw: Mapping) -> dict:
     style = options.setdefault("style", "headroom")
     if style not in ("headroom", "structure"):
         raise ValueError("Unknown render style")
+    perceptual_loss = options.get("perceptual_loss")
+    if perceptual_loss is None:
+        perceptual_loss = DEFAULT_PERCEPTUAL_LOSS if style == "headroom" else False
+        options["perceptual_loss"] = perceptual_loss
+    if not isinstance(perceptual_loss, bool):
+        raise ValueError("perceptual_loss must be a boolean")
+    if style == "structure" and perceptual_loss:
+        raise ValueError("perceptual_loss is only available for headroom rendering")
     options.setdefault("font", "Monospace")
     if not isinstance(options["font"], str) or not options["font"].strip():
         raise ValueError("font must be a nonempty family or path")

@@ -327,6 +327,7 @@ def _render_transition(index: int, images: list[Path], output: Path,
                     gradient_loss_strength=float(args.gradient_loss_strength),
                     saturation_target_oklab=source_lab, gradient_target_oklab=source_lab,
                     perceptual_target_srgb=target,
+                    perceptual_loss=args.perceptual_loss,
                     invert_ink=args.invert_ink,
                     on_progress=lambda fraction, stage, index=index, frame=frame: report(
                         frame - 1 + fraction, f"Transition {index + 1}/{len(images)}, frame {frame + 1}/{args.frames}: {stage}"))
@@ -393,9 +394,9 @@ def build(args: argparse.Namespace) -> None:
         "gradient_loss_strength": float(gradient_loss_strength),
         "glyph_luminance_bonus": glyph_luminance_bonus,
         "glyph_entropy_strength": args.glyph_entropy_strength,
-        "perceptual_loss": DEFAULT_PERCEPTUAL_LOSS and style == "headroom",
-        "perceptual_weights": PERCEPTUAL_WEIGHTS if style == "headroom" else {},
-        "viewing_ppd": ppd_for_width(args.size[0]) if style == "headroom" else None,
+        "perceptual_loss": args.perceptual_loss,
+        "perceptual_weights": PERCEPTUAL_WEIGHTS if args.perceptual_loss else {},
+        "viewing_ppd": ppd_for_width(args.size[0]) if args.perceptual_loss else None,
         "crop": args.crop, "grayscale": args.grayscale,
         "frames": args.frames, "steps": args.steps,
         "transition_steps": args.transition_steps,
@@ -475,6 +476,7 @@ def build(args: argparse.Namespace) -> None:
                          glyph_luminance_bonus=glyph_luminance_bonus,
                          glyph_entropy_strength=args.glyph_entropy_strength,
                          gradient_loss_strength=float(gradient_loss_strength),
+                         perceptual_loss=args.perceptual_loss,
                          on_progress=lambda fraction, stage, index=index: report(
                              fraction, f"Image {index + 1}/{len(images)}: {stage}"))
             grid = _save_grid(grid, still_dir, True, masks, args.size, invert_ink)
@@ -599,6 +601,9 @@ def make_parser() -> argparse.ArgumentParser:
                               f"(default: {DEFAULT_GLYPH_LUMINANCE_BONUS:g}, "
                               f"max: {MAX_GLYPH_LUMINANCE_BONUS:g})"))
     parser.add_argument("--style", choices=("headroom", "structure"), default=defaults["style"])
+    parser.add_argument("--no-perceptual-loss", dest="perceptual_loss", action="store_false",
+                        help="Disable the default perceptual objective for headroom rendering")
+    parser.set_defaults(perceptual_loss=None)
     parser.add_argument("--invert-ink", action="store_true", help="Dark ink on a light canvas")
     parser.add_argument("--structure-dither", type=float, default=defaults["structure_dither"],
                         help="Blue-noise coverage dither for the structure style")

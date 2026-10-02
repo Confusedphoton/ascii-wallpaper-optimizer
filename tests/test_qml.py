@@ -83,6 +83,8 @@ def test_qml_playback_and_client_lifecycle(tmp_path: Path) -> None:
                 self.reply(self.job(name, "late-reply"))
             elif name == "queued":
                 self.reply(dict(self.job(name, "queued-ready"), state="queued", progress=0))
+            elif name == "auto-resize" and request["size"][0] != 800:
+                self.reply(self.job(name, "auto-resize-updated", "new"))
             else:
                 self.reply(self.job(name, "refresh-old" if name == "refresh" else name + "-ready"))
 
@@ -136,3 +138,8 @@ def test_qml_playback_and_client_lifecycle(tmp_path: Path) -> None:
     assert counts["manual-only-updated"] == 1
     assert "superseded" not in counts
     assert "saved-monitor" not in counts
+    assert counts["auto-apply"] == 1
+    assert counts["auto-updated"] == 1
+    assert "auto-obsolete" not in counts
+    assert "auto-saved" not in counts
+    assert counts["auto-resize"] == 2

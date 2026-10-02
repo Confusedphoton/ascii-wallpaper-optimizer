@@ -139,6 +139,103 @@ def test_deleted_cache_assets_are_regenerated(tmp_path, request_settings):
     assert render_queue.submit(request_settings)["state"] == "queued"
 
 
+def test_cache_limit_evicts_old_generations_and_persists(tmp_path, request_settings):
+    queue = service.RenderQueue(tmp_path / "cache", start_worker=False)
+    queue.configure_cache(2)
+    renders = []
+    for detail in (0, 1, 2):
+        reply = queue.submit(dict(request_settings, detail=detail))
+        publish(queue, reply)
+        renders.append(reply)
+    assert not Path(renders[0]["directory"]).exists()
+    assert Path(renders[1]["directory"]).exists()
+    assert Path(renders[2]["directory"]).exists()
+    assert queue.cache_status() == {"maximum": 2, "count": 2}
+    restarted = service.RenderQueue(queue.cache, start_worker=False)
+    assert restarted.maximum_cached_renders == 2
+    assert restarted.status(renders[0]["id"]) is None
+    assert restarted.submit(dict(request_settings, detail=1))["state"] == "ready"
+    assert restarted.submit(dict(request_settings, detail=0))["state"] == "queued"
+
+
+def test_clear_cache_retains_displayed_and_running_assets_then_releases_them(tmp_path, request_settings):
+    queue = service.RenderQueue(tmp_path / "cache", start_worker=False)
+    first = queue.submit(dict(request_settings, client_id="wallpaper"))
+    publish(queue, first)
+    queue.status(first["id"], "wallpaper", first["generation"])
+    unused = queue.submit(dict(request_settings, detail=2))
+    publish(queue, unused)
+    stills = queue.cache / "stills" / "fixture"
+    stills.mkdir(parents=True)
+    (stills / "grid").write_text("cached still")
+    # Changing configuration must keep the previous generation on screen safe.
+    second = queue.submit(dict(request_settings, detail=4, client_id="wallpaper"))
+    Path(second["directory"]).mkdir(parents=True)
+    queue.jobs[second["id"]]["state"] = "running"
+    assert queue.clear_cache()["count"] == 2
+    assert Path(first["directory"]).exists()
+    assert not Path(unused["directory"]).exists()
+    assert stills.exists()
+    publish(queue, second)
+    assert not stills.exists()
+    queue.configure_cache(1)
+    assert Path(first["directory"]).exists()
+    queue.status(second["id"], "wallpaper", second["generation"])
+    assert not Path(first["directory"]).exists()
+    assert queue.cache_status()["count"] == 1
+    queue._detach("wallpaper")
+    assert queue.clear_cache()["count"] == 0
+    assert queue.status(second["id"]) is None
+
+
+def test_forced_render_keeps_preceding_displayed_generation_until_acknowledged(tmp_path, request_settings):
+    queue = service.RenderQueue(tmp_path / "cache", start_worker=False)
+    queue.configure_cache(1)
+    first = queue.submit(dict(request_settings, client_id="wallpaper"))
+    publish(queue, first)
+    queue.status(first["id"], "wallpaper", first["generation"])
+    forced = queue.submit(dict(request_settings, client_id="settings", force=True))
+    publish(queue, forced)
+    assert Path(first["directory"]).exists()
+    queue.status(forced["id"], "wallpaper", forced["generation"])
+    assert not Path(first["directory"]).exists()
+    assert Path(forced["directory"]).exists()
+
+
+@pytest.mark.parametrize("maximum", [0, -1, 1001, True, 2.5, "20", None])
+def test_cache_limit_rejects_invalid_values(tmp_path, maximum):
+    queue = service.RenderQueue(tmp_path / "cache", start_worker=False)
+    with pytest.raises(ValueError, match="Maximum cached renders"):
+        queue.configure_cache(maximum)
+
+
+def test_named_profile_registry_and_override_persist(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "PROFILES_PATH", tmp_path / "profiles.json")
+    monkeypatch.setattr(service, "OVERRIDE_PATH", tmp_path / "override.json")
+    profiles = [{"id": "A", "name": "Morning"}, {"id": "B", "name": "Night"},
+                {"id": "custom-afternoon", "name": "Afternoon"}]
+    assert service.set_profiles(profiles) == profiles
+    assert service.get_profiles() == profiles
+    assert service.set_override("custom-afternoon") == "custom-afternoon"
+    assert service.get_override() == "custom-afternoon"
+    with pytest.raises(ValueError):
+        service.set_profiles(profiles + [profiles[0]])
+    with pytest.raises(ValueError):
+        service.set_override("../escape")
+
+
+def test_perceptual_and_classic_styles_have_distinct_cache_keys_and_commands(tmp_path, request_settings):
+    queue = service.RenderQueue(tmp_path / "cache", start_worker=False)
+    perceptual = queue.submit(request_settings)
+    classic = queue.submit(dict(request_settings, perceptual_loss=False))
+    assert perceptual["id"] != classic["id"]
+    assert perceptual["settings"]["perceptual_weights"]
+    assert classic["settings"]["perceptual_weights"] == {}
+    assert classic["settings"]["viewing_ppd"] is None
+    assert "--no-perceptual-loss" not in queue._command(queue.jobs[perceptual["id"]])
+    assert "--no-perceptual-loss" in queue._command(queue.jobs[classic["id"]])
+
+
 def test_read_only_status_restores_saved_assets_after_source_changes(tmp_path, request_settings, monkeypatch):
     queue = service.RenderQueue(tmp_path / "cache", start_worker=False)
     first = queue.submit(request_settings)
@@ -239,6 +336,19 @@ def test_http_validation_status_and_manifest_generation(tmp_path, request_settin
         publish(render_queue, job)
         with urlopen(base + "/v1/status/" + job["id"], timeout=3) as response:
             assert json.load(response)["manifest"]["generation"] == job["generation"]
+        request = Request(base + "/v1/cache", data=b'{"maximum": 3}',
+                          headers={"Content-Type": "application/json"})
+        with urlopen(request, timeout=3) as response:
+            assert json.load(response) == {"maximum": 3, "count": 1}
+        with urlopen(base + "/v1/cache", timeout=3) as response:
+            assert json.load(response)["maximum"] == 3
+        request = Request(base + "/v1/cache/clear", data=b'{}',
+                          headers={"Content-Type": "application/json"})
+        with urlopen(request, timeout=3) as response:
+            assert json.load(response)["count"] == 0
+        with pytest.raises(HTTPError) as failure:
+            urlopen(base + "/v1/status/" + job["id"], timeout=3)
+        assert failure.value.code == 404
     finally:
         server.shutdown()
         server.server_close()
