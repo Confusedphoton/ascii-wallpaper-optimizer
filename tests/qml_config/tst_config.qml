@@ -18,6 +18,8 @@ TestCase {
         const item = createTemporaryObject(configComponent, tests, properties || {})
         verify(item)
         tryCompare(item, "controlsReady", true)
+        findChild(item, "renderClient").serviceUrl = TestConfig.serviceUrl
+        findChild(item, "cacheClient").serviceUrl = TestConfig.serviceUrl
         return item
     }
 
@@ -97,6 +99,117 @@ TestCase {
         compare(findChild(item, "characterField").text, " .é😀#")
     }
 
+    function test_apply_submits_changed_settings_without_render_now() {
+        const item = page({cfg_Images: ["/apply.png"], cfg_ProfileSettingsInitialized: true})
+        item.editProfile = 0
+        const client = findChild(item, "renderClient")
+        item.setProfileSetting("BackgroundMode", 1)
+        item.setProfileSetting("BackgroundColor", "#112233")
+        wait(50)
+        verify(!client.submissionPending)
+        verify(!client.requestInFlight)
+        item.saveConfig()
+        tryCompare(client, "displayGeneration", "#112233", 3000)
+        verify(!client.currentRequestForced)
+        verify(!client.settingsPending)
+        item.setProfileSetting("BackgroundColor", "#445566")
+        verify(!findChild(item, "previewShader").visible)
+        item.setProfileSetting("BackgroundColor", "#112233")
+        verify(findChild(item, "previewShader").visible)
+        item.setProfileSetting("BackgroundColor", "#445566")
+        item.saveConfig()
+        tryCompare(client, "displayGeneration", "#445566", 3000)
+        verify(findChild(item, "previewShader").visible)
+    }
+
+    function test_preview_clears_during_render_and_on_failure() {
+        const item = page({cfg_Images: ["/preview.png"]})
+        const client = findChild(item, "renderClient")
+        client.consume({state: "ready", directory: TestConfig.fixtureRoot, generation: "old",
+            image_count: 1, frame_count: 4})
+        const preview = findChild(item, "previewShader")
+        tryCompare(preview, "ready", true, 3000)
+        client.consume({state: "running", stage: "Rendering", progress: 0.2})
+        compare(preview.renderDirectory, "")
+        verify(!preview.visible)
+        verify(!preview.ready)
+        client.consume({state: "error", error: "Render failed"})
+        compare(preview.renderDirectory, "")
+        verify(!preview.visible)
+        client.consume({state: "ready", directory: TestConfig.fixtureRoot, generation: "new",
+            image_count: 1, frame_count: 4})
+        tryCompare(preview, "ready", true, 3000)
+        verify(preview.visible)
+    }
+
+    function test_named_profiles_persist_sources_settings_and_schedule() {
+        const item = page()
+        item.addProfile()
+        item.setProfileDetails("name", "Afternoon")
+        verify(item.setProfileDetails("startTime", "13:30"))
+        verify(!item.setProfileDetails("startTime", "07:00"))
+        verify(!item.setProfileDetails("startTime", "25:00"))
+        item.setProfileSetting("Images", ["/afternoon.png"])
+        item.setProfileSetting("RenderStyle", "classic")
+        item.setProfileSetting("Detail", 4)
+        const id = item.profiles[item.editProfile].id
+        item.cfg_ManualProfile = id
+        item.cfg_ScheduleEnabled = true
+        item.addProfile()
+        verify(item.setProfileDetails("name", "Evening"))
+        verify(item.setProfileDetails("startTime", "20:00"))
+        item.editProfile = 2
+        item.saveConfig()
+        const saved = snapshot(item)
+        item.destroy()
+        wait(0)
+        const reopened = page(saved)
+        compare(reopened.profiles.length, 4)
+        compare(reopened.editProfile, 2)
+        compare(reopened.editingProfile.name, "Afternoon")
+        compare(reopened.editingProfile.startTime, "13:30")
+        compare(Array.from(reopened.editImages), ["/afternoon.png"])
+        compare(reopened.activeSettings.RenderStyle, "classic")
+        compare(reopened.activeSettings.Detail, 4)
+        compare(reopened.cfg_ManualProfile, id)
+        compare(findChild(reopened, "editingProfileCombo").count, 4)
+        compare(findChild(reopened, "manualProfileCombo").count, 4)
+        reopened.removeProfile()
+        compare(reopened.profiles.length, 3)
+        compare(reopened.cfg_ManualProfile, "A")
+        while (reopened.profiles.length > 1) reopened.removeProfile()
+        reopened.removeProfile()
+        compare(reopened.profiles.length, 1)
+    }
+
+    function test_each_style_shows_all_and_only_its_controls() {
+        const item = page({cfg_PerceptualLoss: false})
+        item.editProfile = 0
+        compare(item.activeSettings.RenderStyle, "classic")
+        const headroom = ["gradientLossSlider", "glyphLuminanceBonusSlider", "glyphEntropySlider"]
+        for (const style of ["classic", "headroom", "structure"]) {
+            item.setProfileSetting("RenderStyle", style)
+            for (const name of headroom) compare(findChild(item, name).visible, style !== "structure")
+            compare(findChild(item, "ditherSlider").visible, style === "classic")
+            compare(findChild(item, "structureDitherSlider").visible, style === "structure")
+            const request = findChild(item, "renderClient").requestSettings
+            compare(request.perceptual_loss, style === "headroom")
+        }
+        compare(findChild(item, "renderStyleCombo").count, 3)
+    }
+
+    function test_cache_limit_and_clear_are_connected() {
+        const item = page({cfg_MaxCachedRenders: 7})
+        item.editProfile = 0
+        compare(findChild(item, "maxCachedRendersSpin").value, 7)
+        item.saveConfig()
+        const cache = findChild(item, "cacheClient")
+        tryCompare(cache, "busy", false, 3000)
+        findChild(item, "clearCacheButton").clicked()
+        tryCompare(cache, "busy", false, 3000)
+        verify(cache.message.indexOf("Cache cleared") >= 0)
+    }
+
     function test_completed_preview_contains_visible_color() {
         if (GraphicsInfo.api === GraphicsInfo.Software) skip("RHI is required")
         const item = page({cfg_ProfileSettingsInitialized: true})
@@ -117,15 +230,15 @@ TestCase {
         verify(pixels.red(x, y) > pixels.blue(x, y))
         compare(pixels.alpha(x, y), 255)
         compare(JSON.parse(item.cfg_RenderedState).generation, "preview")
-        const reopened = page(snapshot(item))
-        const restored = findChild(reopened, "renderClient")
-        compare(restored.displayGeneration, "preview")
-        compare(restored.displayManifest.atlas_count, 1)
         const point = preview.mapToItem(item, preview.width / 2, preview.height / 2)
         const pagePixels = grabImage(item)
         verify(pagePixels.red(Math.floor(point.x), Math.floor(point.y)) > 100,
             "The preview must be visible in the actual config page")
         pagePixels.save(TestConfig.fixtureRoot + "/settings.png")
+        const reopened = page(snapshot(item))
+        const restored = findChild(reopened, "renderClient")
+        compare(restored.displayGeneration, "preview")
+        compare(restored.displayManifest.atlas_count, 1)
     }
 
     function test_glyph_variety_slider_persists_each_profile_and_zero() {

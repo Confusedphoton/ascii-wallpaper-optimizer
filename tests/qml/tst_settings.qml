@@ -39,4 +39,22 @@ TestCase {
         compare(RenderSettings.request([], {GlyphEntropyStrength: 0}).glyph_entropy_strength, 0)
         compare(RenderSettings.request([], {glyphEntropyStrength: 0}).glyph_entropy_strength, 0)
     }
+
+    function test_render_styles_select_distinct_objectives_and_ignore_unused_settings() {
+        const perceptual = RenderSettings.request([], {RenderStyle: "headroom", StructureDither: 0.12})
+        const classic = RenderSettings.request([], {RenderStyle: "classic", StructureDither: 0})
+        const structure = RenderSettings.request([], {RenderStyle: "structure", Dither: 0.05,
+            GradientLossStrength: 4, GlyphLuminanceBonus: 0.5, GlyphEntropyStrength: 0.1})
+        compare(perceptual.style, "headroom")
+        compare(perceptual.perceptual_loss, true)
+        compare(classic.style, "headroom")
+        compare(classic.perceptual_loss, false)
+        compare(perceptual.structure_dither, classic.structure_dither)
+        compare(classic.gradient_loss_strength, 1.5)
+        compare(structure.perceptual_loss, false)
+        compare(structure.dither, 0)
+        compare(structure.gradient_loss_strength, 0)
+        compare(structure.glyph_luminance_bonus, 0)
+        compare(structure.glyph_entropy_strength, 0)
+    }
 }
