@@ -13,7 +13,10 @@ MAX_GLYPH_LUMINANCE_BONUS = 0.5
 DEFAULT_REFINEMENT_SWEEPS = 0
 DEFAULT_POLISH_STEPS = 9
 DEFAULT_PERCEPTUAL_LOSS = True
-PERCEPTUAL_WEIGHTS = {"spatial_lightness": 2.0, "orientation_w1": 0.2,
+PERCEPTUAL_GLYPH_STROKE_WEIGHT = 0.4
+PERCEPTUAL_PIXEL_WEIGHT = 0.1
+PERCEPTUAL_CHROMA_WEIGHT = 0.2
+PERCEPTUAL_WEIGHTS = {"spatial_lightness": 8.0, "orientation_w1": 0.2,
                       "contour_strength": 0.005}
 # Nominal viewing geometry used for the approved experiment.
 DEFAULT_VIEWING_DISTANCE_METERS = 0.6096

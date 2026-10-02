@@ -120,6 +120,7 @@ def _validated_request(raw: dict) -> dict:
              "transition_steps", "seed")
     return dict({name: options[name] for name in names}, glyph_search="all" if options["style"] == "headroom" else "structure",
                 perceptual_loss=DEFAULT_PERCEPTUAL_LOSS and options["style"] == "headroom",
+                output_stage="adam_terminal" if options["style"] == "headroom" else "structure",
                 perceptual_weights=PERCEPTUAL_WEIGHTS if options["style"] == "headroom" else {},
                 viewing_ppd=ppd_for_width(size[0]) if options["style"] == "headroom" else None,
                 version=__version__, render_revision=render_revision(), images=images,

@@ -211,6 +211,7 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                 gradient_loss_strength: float | None = None,
                 refinement_sweeps: int = DEFAULT_REFINEMENT_SWEEPS,
                 polish_steps: int = DEFAULT_POLISH_STEPS,
+                postprocess: bool | None = None,
                 perceptual_loss: bool | None = None,
                 viewing_ppd: float | None = None,
                 diagnostics=None) -> Grid:
@@ -265,6 +266,7 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                      gradient_loss_strength=gradient_loss_strength,
                      gradient_target_oklab=source_lab,
                      refinement_sweeps=refinement_sweeps, polish_steps=polish_steps,
+                     postprocess=postprocess,
                      perceptual_loss=perceptual_loss, perceptual_target_srgb=target,
                      viewing_ppd=viewing_ppd,
                      **({"diagnostics": diagnostics} if diagnostics is not None else {}),
@@ -394,6 +396,7 @@ def build(args: argparse.Namespace) -> None:
         "glyph_luminance_bonus": glyph_luminance_bonus,
         "glyph_entropy_strength": args.glyph_entropy_strength,
         "perceptual_loss": DEFAULT_PERCEPTUAL_LOSS and style == "headroom",
+        "output_stage": "adam_terminal" if style == "headroom" else "structure",
         "perceptual_weights": PERCEPTUAL_WEIGHTS if style == "headroom" else {},
         "viewing_ppd": ppd_for_width(args.size[0]) if style == "headroom" else None,
         "crop": args.crop, "grayscale": args.grayscale,
@@ -587,7 +590,7 @@ def make_parser() -> argparse.ArgumentParser:
     # Accept old commands without restricting the full glyph-bank solve.
     parser.add_argument("--candidates", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--dither", type=float, default=defaults["dither"],
-                        help="Post-optimization glyph-logit noise (default: blue-noise uniform; Gumbel scale is dither × 100)")
+                        help="Legacy setting; normal headroom renders return the raw Adam terminal without post-optimization noise")
     parser.add_argument("--gradient-loss-strength", type=float, default=None,
                         help="Weight for displayed OKLab Sobel gradients (default: 1.5 for headroom)")
     parser.add_argument("--glyph-entropy-strength", type=float, default=None,

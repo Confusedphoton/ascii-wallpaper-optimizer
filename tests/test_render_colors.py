@@ -191,7 +191,8 @@ def test_light_ink_bonus_preserves_highlight_saturation_and_lifts_shadows(fixed_
                                     glyph_luminance_bonus=strength, **settings)
         else:
             grid = solve(target, masks, candidates=4, dither=0, background="#000000",
-                         glyph_luminance_bonus=strength, refinement_sweeps=refinement_sweeps, **settings)
+                         glyph_luminance_bonus=strength, refinement_sweeps=refinement_sweeps,
+                         glyph_entropy_strength=0, **settings)
         displayed = srgb_to_oklab(oklab_to_srgb(display_tone_lab(render_grid(grid, masks))))
         return displayed.reshape(1, 4, len(swatches), 4, 3).mean((0, 1, 3))
 
@@ -199,7 +200,9 @@ def test_light_ink_bonus_preserves_highlight_saturation_and_lifts_shadows(fixed_
     source = srgb_to_oklab(swatches)
     saturation = np.linalg.norm(boosted[2:, 1:], axis=-1) / boosted[2:, 0]
     expected = np.linalg.norm(source[2:, 1:], axis=-1) / source[2:, 0]
-    np.testing.assert_allclose(saturation, expected, rtol=0.05, atol=0)
+    # Near-neutral RGB8 pastels also need an absolute tolerance; their small
+    # chroma makes a relative ratio sensitive to individual color bytes.
+    np.testing.assert_allclose(saturation, expected, rtol=0.05, atol=0.001)
     # Empty glyphs must not collect the bonus and erase the deepest shadow.
     assert boosted[0, 0] > 0.05
     if fixed_glyphs:
@@ -249,8 +252,11 @@ def test_faint_purple_source_does_not_turn_yellow_during_gamut_constrained_solve
                  gradient_target_oklab=source_lab, gradient_loss_strength=1.5)
     displayed = srgb_to_oklab(oklab_to_srgb(display_tone_lab(render_grid(grid, masks))))
     cells = displayed.reshape(4, 4, 4, 4, 3).mean((1, 3))
-    assert (cells[..., 1] > 0).all()
-    assert (cells[..., 2] < 0).all()
+    # Empty dithered cells display the neutral canvas, whose hue is undefined.
+    visible = masks[grid.glyph].sum((2, 3)) > 0
+    assert visible.any()
+    assert (cells[..., 1][visible] > 0).all()
+    assert (cells[..., 2][visible] < 0).all()
     assert np.sqrt(np.mean((cells[..., 1:] - source_lab[0, 0, 1:]) ** 2)) < 0.01
 
 
@@ -281,7 +287,8 @@ def test_fixed_glyph_fit_retains_paths_and_steps_improve_the_retained_color_obje
     def score(grid):
         spatial = optimizer._make_spatial_metrics(
             encoded, source_srgb=None, source_oklab=source_lab, input_oklab=True,
-            pad=(0, 0, 0, 0), cell_height=4, device="cpu", viewing_ppd=None)
+            pad=(0, 0, 0, 0), cell_height=4, device="cpu", viewing_ppd=None,
+            masks=masks, background=torch.zeros(3), invert_ink=False)
         objective = _FrameObjective(_image_tensor(encoded), "default", (4, 3), False,
                                     1.5, 0, _image_tensor(source_lab), spatial_metrics=spatial)
         return objective(_image_tensor(render_grid(grid, masks)))

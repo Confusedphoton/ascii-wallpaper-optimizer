@@ -1020,25 +1020,6 @@ Item {
             }
 
             RowLayout {
-                Kirigami.FormData.label: "Dithering Strength:"
-                visible: root.activeSettings.RenderStyle === "headroom"
-
-                Controls.Slider {
-                    id: ditherSlider
-                    Layout.fillWidth: true
-                    from: 0
-                    to: 0.05
-                    stepSize: 0.001
-                    value: root.activeSettings.Dither
-                    onMoved: root.setProfileSetting("Dither", value)
-                }
-                Controls.Label {
-                    Layout.preferredWidth: Kirigami.Units.gridUnit * 10
-                    text: ditherSlider.value.toFixed(3)
-                }
-            }
-
-            RowLayout {
                 Kirigami.FormData.label: "Sobel Edge Loss:"
                 visible: root.activeSettings.RenderStyle === "headroom"
 

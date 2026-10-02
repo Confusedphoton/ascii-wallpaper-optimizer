@@ -162,7 +162,9 @@ def test_normal_render_keeps_refinement_disabled(tmp_path):
                     steps=1, diagnostics=trace)
     report = trace.save(tmp_path)
     assert report["metadata"]["refinement_sweeps"] == 0
-    assert report["metadata"]["polish_steps"] == 9
+    assert report["metadata"]["polish_steps"] == 0
+    assert report["metadata"]["postprocess"] is False
+    assert not any(row["stage"] in ("after_dither", "final_polish") for row in report["records"])
     assert not any(row["stage"] == "refinement_group" for row in report["records"])
 
 
