@@ -7,13 +7,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-import torch
 from PIL import Image
 
 from ascii_optimizer import cli
 from ascii_optimizer.optimizer import Grid, render_grid
 from ascii_optimizer.settings import normalize_options
-from ascii_optimizer.tone import display_tone_lab, oklab_to_srgb, srgb_to_oklab
+from ascii_optimizer.tone import display_tone_lab, oklab_to_srgb, playback_rgb8, srgb_to_oklab
 
 
 @pytest.fixture
@@ -33,12 +32,7 @@ def fast_batch(tmp_path: Path, monkeypatch):
         color = np.broadcast_to(srgb_to_oklab(target.mean((0, 1))), (rows, cols, 3)).copy()
         return Grid(glyph, color, np.zeros(3, np.float32))
 
-    def fit_colors(target, masks, glyphs, **kwargs):
-        color = np.broadcast_to(target.mean((0, 1)), (*glyphs.shape, 3)).copy()
-        return Grid(glyphs.copy(), color, kwargs["background_oklab"])
-
     monkeypatch.setattr(cli, "solve_style", solve_still)
-    monkeypatch.setattr(cli, "fit_fixed_glyphs", fit_colors)
 
     def arguments(name="first", count=2, **overrides):
         images = []
@@ -227,7 +221,8 @@ def test_transition_endpoints_copy_exact_still_bytes_and_manifest_describes_ever
 
 
 @pytest.mark.parametrize("workers", [1, 2])
-def test_slideshow_source_memory_is_bounded_by_workers(fast_batch, monkeypatch, workers):
+@pytest.mark.parametrize("field", ["blue-noise", "salience"])
+def test_slideshow_source_memory_is_bounded_by_workers(fast_batch, monkeypatch, workers, field):
     arguments, _, _ = fast_batch
     original = cli.load_target
     references = []
@@ -241,9 +236,49 @@ def test_slideshow_source_memory_is_bounded_by_workers(fast_batch, monkeypatch, 
         return result
 
     monkeypatch.setattr(cli, "load_target", track_target)
-    cli.build(arguments(count=8, transition_workers=workers))
-    assert 2 <= maximum <= 2 * workers
+    cli.build(arguments(count=8, transition_workers=workers, transition_field=field))
+    assert 1 <= maximum <= workers
+    # Only salience needs a source image during transitions, once per pair.
+    assert len(references) == 8 * (2 if field == "salience" else 1)
     assert all(reference() is None for reference in references)
+
+
+@pytest.mark.parametrize("style,perceptual", [("headroom", True), ("headroom", False),
+                                             ("flow", True), ("structure", False)])
+@pytest.mark.parametrize("invert_ink", [False, True])
+def test_transition_colors_follow_saved_keyframes_without_refitting(
+        fast_batch, monkeypatch, style, perceptual, invert_ink):
+    arguments, _, masks = fast_batch
+    args = arguments(style=style, perceptual_loss=perceptual, invert_ink=invert_ink,
+                     frames=5, transition_pace="linear", transition_spread=0.5)
+    start = Grid(np.ones((2, 2), np.uint8),
+                 srgb_to_oklab(np.full((2, 2, 3), 0.25, np.float32)),
+                 srgb_to_oklab(np.full(3, 0.05, np.float32)))
+    end = Grid(start.glyph.copy(), srgb_to_oklab(np.full((2, 2, 3), 0.75, np.float32)),
+               srgb_to_oklab(np.full(3, 0.15, np.float32)))
+    start = cli._save_grid(start, args.output / "stills/0000", False, masks, args.size, invert_ink)
+    end = cli._save_grid(end, args.output / "stills/0001", False, masks, args.size, invert_ink)
+    # Half the cells wait until halfway through; the rest start immediately.
+    monkeypatch.setattr(cli, "phase_offsets", lambda *args: np.array([[0, 1], [0, 1]], np.float32))
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Transition colors must come from saved keyframes")
+    monkeypatch.setattr(cli, "fit_fixed_glyphs", unexpected)
+    monkeypatch.setattr(cli, "load_target", unexpected)
+    cli._render_transition(0, args.images, args.output, args, masks, (2, 2),
+                           cli.glyph_paths(masks), lambda *_: None)
+    pair = args.output / "transitions/0000-0001"
+    first = cli._load_grid(pair / "0001")
+    # A delayed cell keeps its exact keyframe ink instead of darkening on entry.
+    np.testing.assert_array_equal(playback_rgb8(first.color[:, 1]), playback_rgb8(start.color[:, 1]))
+    np.testing.assert_array_equal(playback_rgb8(first.color[:, 0]),
+                                  playback_rgb8((start.color[:, 0] + end.color[:, 0]) / 2))
+    np.testing.assert_array_equal(playback_rgb8(first.background),
+                                  playback_rgb8(0.75 * start.background + 0.25 * end.background))
+    # RGB blending would produce 128 here; the perceptual midpoint is darker.
+    assert playback_rgb8(first.color)[0, 0, 0] < 128
+    for frame, endpoint in ((0, start), (4, end)):
+        np.testing.assert_array_equal(playback_rgb8(cli._load_grid(pair / f"{frame:04d}").color),
+                                      playback_rgb8(endpoint.color))
 
 
 @pytest.mark.parametrize("invert_ink", [False, True])
@@ -273,17 +308,16 @@ def test_failed_render_does_not_publish_a_partial_manifest(fast_batch, monkeypat
 
 def test_transition_pairs_overlap_and_progress_never_goes_backwards(fast_batch, monkeypatch, capsys):
     arguments, _, _ = fast_batch
-    original = cli.fit_fixed_glyphs
+    original = cli._render_transition
     barrier = threading.Barrier(2, timeout=10)
     active = set()
 
-    def concurrent_fit(*args, **kwargs):
+    def concurrent_pair(*args, **kwargs):
         active.add(threading.current_thread().name)
         barrier.wait()
-        kwargs["on_progress"](0.5, "Fitting colors")
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(cli, "fit_fixed_glyphs", concurrent_fit)
+    monkeypatch.setattr(cli, "_render_transition", concurrent_pair)
     args = arguments(transition_workers=2, progress_json=True)
     cli.build(args)
     assert len(active) == 2
@@ -294,28 +328,12 @@ def test_transition_pairs_overlap_and_progress_never_goes_backwards(fast_batch, 
     assert progress[-1] == 1
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_parallel_real_color_solver_matches_serial_assets(fast_batch, monkeypatch, device):
-    if device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("No GPU is available")
-    from ascii_optimizer.optimizer import fit_fixed_glyphs
-
+def test_parallel_transitions_match_serial_assets(fast_batch):
     arguments, _, _ = fast_batch
-    streams = set()
-
-    def real_fit(*args, **kwargs):
-        if device == "cuda":
-            streams.add(torch.cuda.current_stream().cuda_stream)
-        return fit_fixed_glyphs(*args, **kwargs)
-
-    monkeypatch.setattr(cli, "fit_fixed_glyphs", real_fit)
-    serial = arguments("serial", frames=5, device=device, transition_workers=1)
-    parallel = arguments("parallel", frames=5, device=device, transition_workers=2)
+    serial = arguments("serial", frames=5, transition_workers=1)
+    parallel = arguments("parallel", frames=5, transition_workers=2)
     cli.build(serial)
-    streams.clear()
     cli.build(parallel)
-    if device == "cuda":
-        assert len(streams) == 2
     for path in serial.output.rglob("*.png"):
         assert path.read_bytes() == (parallel.output / path.relative_to(serial.output)).read_bytes()
 
@@ -328,7 +346,7 @@ def test_parallel_failure_cancels_other_pairs_without_publishing(fast_batch, mon
         barrier.wait()
         raise RuntimeError("transition failed")
 
-    monkeypatch.setattr(cli, "fit_fixed_glyphs", fail)
+    monkeypatch.setattr(cli, "_render_transition", fail)
     args = arguments(count=8, transition_workers=2)
     with pytest.raises(RuntimeError, match="transition failed"):
         cli.build(args)

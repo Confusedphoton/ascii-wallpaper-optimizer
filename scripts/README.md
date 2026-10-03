@@ -393,3 +393,20 @@ seam** repeats the last and first eight frames. Inspect the internal last/first
 join; the inspection window itself has an artificial restart. FLIP pauses
 playback and compares the selected frames. See [the implementation guide](../docs/flow-playback.md)
 for the temporal overlap boundary and its physical limitations.
+
+## Slideshow transition review
+
+`compare_transitions.py` compares a completed slideshow's saved transitions with
+current transitions using exactly the same saved key frames and glyph atlas.
+It writes separate review assets, full-resolution lightness measurements, and
+previews for both transition directions. It leaves the input directory intact.
+
+```sh
+.venv/bin/python -m ascii_optimizer.launcher scripts/compare_transitions.py \
+  /path/to/completed/assets --output rendered/transitions/review
+.venv/bin/python scripts/view_renders.py --report rendered/transitions/review
+```
+
+Choose **original** for A and **oklab interpolation** for B. P plays the whole
+slideshow with short holds at each key frame; Space switches between the
+synchronized versions. The frame slider supports paused comparisons.

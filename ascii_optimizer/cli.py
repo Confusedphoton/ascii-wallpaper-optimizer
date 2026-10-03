@@ -12,7 +12,6 @@ import shutil
 import threading
 import uuid
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
-from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable
 
@@ -50,7 +49,6 @@ from .defaults import (
 from .optimizer import (
     Grid,
     _choose_background,
-    _color_matrices,
     fit_fixed_glyphs,
     render_grid,
     solve,
@@ -58,7 +56,7 @@ from .optimizer import (
 from .revision import render_revision
 from .runtime import select_device
 from .settings import normalize_options, validate_size
-from .structure import STRUCTURE_CHARS, fit_structure_colors, solve_structure
+from .structure import STRUCTURE_CHARS, solve_structure
 from .tone import (
     display_tone_lab,
     encode_headroom_lab,
@@ -398,11 +396,11 @@ def _cache_loop(source, entry, signature):
 def _render_transition(index: int, images: list[Path], output: Path,
                        args: argparse.Namespace, masks: np.ndarray, cell: tuple[int, int],
                        paths: list[list[list[int]]], report: Callable[[float, str], None]) -> dict:
-    """Render one pair in order, retaining its previous-frame color objective."""
+    """Walk glyph paths while interpolating the exact saved endpoint colors."""
     following = (index + 1) % len(images)
     base = output / "transitions" / f"{index:04d}-{following:04d}"
     backgrounds = {}
-    print(f"Optimizing transition {index + 1}/{len(images)}", flush=True)
+    print(f"Rendering transition {index + 1}/{len(images)}", flush=True)
     start = _load_grid(output / "stills" / f"{index:04d}")
     destination = _load_grid(output / "stills" / f"{following:04d}")
     previous = start
@@ -411,11 +409,11 @@ def _render_transition(index: int, images: list[Path], output: Path,
         np.stack((previous.glyph.ravel(), destination.glyph.ravel()), axis=1), axis=0))
     if longest > args.frames - 1:
         raise ValueError(f"This transition needs at least {longest + 1} frames for adjacent glyph steps")
-    source_target = load_target(images[index], args.size, args.crop, args.grayscale)
-    destination_target = load_target(images[following], args.size, args.crop, args.grayscale)
+    source_target = (load_target(images[index], args.size, args.crop, args.grayscale)
+                     if args.transition_field == "salience" else None)
     offsets = phase_offsets(shape, args.transition_field, args.seed + index * 10007,
                             source_target)
-    cell_height, cell_width = cell[1], cell[0]
+    del source_target
     for frame in range(args.frames):
         fraction = frame / (args.frames - 1)
         progress = ease(fraction, args.transition_pace)
@@ -425,33 +423,15 @@ def _render_transition(index: int, images: list[Path], output: Path,
             grid = destination
         else:
             local = local_progress(progress, offsets, args.transition_spread)
-            pixel_progress = np.repeat(np.repeat(local, cell_height, axis=0), cell_width, axis=1)
-            pixel_progress = pixel_progress[:args.size[1], :args.size[0], None]
-            target = (1 - pixel_progress) * source_target + pixel_progress * destination_target
             glyphs = path_glyphs(start.glyph, destination.glyph, local, paths,
                                 previous.glyph, args.frames - 1 - frame)
-            source_lab = srgb_to_oklab(target)
-            original_background, solve_background = _backgrounds(source_lab, args.background, args.invert_ink)
-            if args.style in ("headroom", "flow"):
-                grid = fit_fixed_glyphs(
-                    encode_headroom_lab(source_lab, invert_ink=args.invert_ink), masks, glyphs,
-                    background_oklab=solve_background, input_oklab=True,
-                    steps=args.transition_steps, device=args.device,
-                    previous=previous, destination=destination, progress=float(local.mean()),
-                    glyph_luminance_bonus=args.glyph_luminance_bonus,
-                    gradient_loss_strength=float(args.gradient_loss_strength),
-                    saturation_target_oklab=source_lab, gradient_target_oklab=source_lab,
-                    perceptual_target_srgb=target,
-                    perceptual_loss=args.perceptual_loss,
-                    invert_ink=args.invert_ink,
-                    on_progress=lambda fraction, stage, index=index, frame=frame: report(
-                        frame - 1 + fraction, f"Transition {index + 1}/{len(images)}, frame {frame + 1}/{args.frames}: {stage}"))
-            else:
-                selection = invert_source(target) if args.invert_ink else target
-                grid = fit_structure_colors(selection, masks, glyphs,
-                                            solve_background if args.invert_ink else original_background)
-                grid.background = solve_background
-            del target, source_lab
+            # These are already decoded playback OKLab colors. Use the same
+            # per-cell clock as the glyphs, anchored to the stills rather than
+            # accumulating a fit from the preceding transition frame.
+            color = (1 - local[..., None]) * start.color + local[..., None] * destination.color
+            # Backgrounds are uniform, so follow the shared eased clock.
+            background = (1 - progress) * start.background + progress * destination.background
+            grid = Grid(glyphs, color, background)
         frame_dir = base / f"{frame:04d}"
         if frame in (0, args.frames - 1):
             _copy_grid(output / "stills" / f"{index if frame == 0 else following:04d}", frame_dir)
@@ -675,28 +655,14 @@ def build(args: argparse.Namespace) -> None:
                     pair_progress[index] = max(pair_progress[index], units)
                     report(sum(pair_progress.values()), stage)
 
-            gpu = style != "structure" and torch.device(args.device).type == "cuda"
-            if gpu:
-                # These cached tensors are shared by the streams. Populate them
-                # before workers start and wait for their uploads to complete.
-                device = torch.device(args.device)
-                _color_matrices(torch.device("cuda", torch.cuda.current_device()
-                                             if device.index is None else device.index), torch.float32)
-                torch.cuda.synchronize(device)
             old_threads = torch.get_num_threads()
             if workers > 1:
                 torch.set_num_threads(min(old_threads, max(1, (os.cpu_count() or 1) // workers)))
 
             def render_pair(index: int) -> dict:
-                stream = torch.cuda.Stream(device=args.device) if gpu else None
-                with torch.cuda.stream(stream) if stream is not None else nullcontext():
-                    try:
-                        pair_report(index, 0.0, f"Starting transition {index + 1}/{len(images)}")
-                        return _render_transition(index, images, output, args, masks, cell, paths,
-                                                  lambda units, stage: pair_report(index, units, stage))
-                    finally:
-                        if stream is not None:
-                            stream.synchronize()
+                pair_report(index, 0.0, f"Starting transition {index + 1}/{len(images)}")
+                return _render_transition(index, images, output, args, masks, cell, paths,
+                                          lambda units, stage: pair_report(index, units, stage))
 
             try:
                 with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ascii-transition") as executor:
@@ -739,7 +705,9 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--transition-field", choices=FIELDS, default=defaults["transition_field"])
     parser.add_argument("--transition-spread", type=float, default=defaults["transition_spread"])
     parser.add_argument("--steps", type=int, default=defaults["steps"], help="Still optimization steps")
-    parser.add_argument("--transition-steps", type=int, default=defaults["transition_steps"])
+    # Accepted for saved settings and old commands; transitions interpolate.
+    parser.add_argument("--transition-steps", type=int, default=defaults["transition_steps"],
+                        help=argparse.SUPPRESS)
     # Accept old commands without restricting the full glyph-bank solve.
     parser.add_argument("--candidates", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--dither", type=float, default=defaults["dither"],
