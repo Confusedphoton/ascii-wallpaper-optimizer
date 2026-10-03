@@ -5,6 +5,7 @@
 
 import QtQuick
 import "RenderSettings.js" as RenderSettings
+import "Profiles.js" as Profiles
 import QtQuick.Controls as Controls
 import org.kde.plasma.plasmoid
 
@@ -13,96 +14,70 @@ WallpaperItem {
 
     property string overrideProfile: "auto"
     property int timeRevision: 0
+    readonly property var profiles: Profiles.read(wallpaper.configuration.Profiles, wallpaper.configuration)
+    readonly property string profileChoices: JSON.stringify(profiles.map(profile => ({id: profile.id, name: profile.name})))
     readonly property string scheduledProfile: {
         timeRevision
-        if (!wallpaper.configuration.ScheduleEnabled)
-            return wallpaper.configuration.ManualProfile === "B" ? "B" : "A"
-        const parse = value => {
-            const parts = String(value).split(":").map(Number)
-            return parts.length === 2 && parts[0] >= 0 && parts[0] < 24 && parts[1] >= 0 && parts[1] < 60
-                ? parts[0] * 60 + parts[1] : 0
-        }
-        const a = parse(wallpaper.configuration.ProfileAStart || "07:00")
-        const b = parse(wallpaper.configuration.ProfileBStart || "19:00")
-        if (a === b) return "A"
-        const now = new Date()
-        const minute = now.getHours() * 60 + now.getMinutes()
-        return a <= b ? (minute >= a && minute < b ? "A" : "B")
-                      : (minute >= a || minute < b ? "A" : "B")
+        return Profiles.selected(profiles, wallpaper.configuration.ManualProfile,
+            wallpaper.configuration.ScheduleEnabled, new Date())
     }
-    readonly property string activeProfile: overrideProfile === "auto" ? scheduledProfile : overrideProfile
-    readonly property string mode: activeProfile === "A" ? (wallpaper.configuration.Mode || "Image")
-        : (wallpaper.configuration.ModeB || "Image")
-    readonly property var configImages: activeProfile === "A" ? (wallpaper.configuration.Images || [])
-        : (wallpaper.configuration.ImagesB || [])
-    readonly property var activeSettings: {
-        const config = wallpaper.configuration
-        const b = activeProfile === "B"
-        const useBSettings = b && !!config.ProfileSettingsInitialized
-        const setting = name => config[name + (useBSettings ? "B" : "")]
-        let chars = Array.from(setting("AsciiChars") || [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "#", "\\", "/", "=", "^", "|", "[", "]", "{", "}"])
-        if (chars.length && chars[0] === "\\s") chars[0] = " "
-        const style = setting("RenderStyle") || "headroom"
-        const currentChars = chars.join("")
-        const standardChars = " .´:rszunvcxLOGDQ0KNMW&#\\/=^|[]{}"
-        const structureChars = " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&#[]{}"
-        const previousDefaults = [
-            " .´:rszunvcxLOGDQ0KNMW&@#\\/=^|[]{}",
-            " .´:rszunvcxLOGDQ0KNMW&@\\/=^|[]{}",
-            " .´:rszunvcxLOGDQ0KNMW&@\\=^|[]{}",
-            " .´:rszunvcxLOGDQ0KNMW&@",
-            " .´:rszunvcxLOGDQ0KNMW&@\\=^",
-            " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&@[]{}",
-            " .´:-_/|+rszunvcxLOGDQ0KNMW&@[]{}"
-        ]
-        if (previousDefaults.includes(currentChars)
-                || (style === "structure" && currentChars === standardChars)
-                || (style === "headroom" && currentChars === structureChars))
-            chars = Array.from(style === "structure" ? structureChars : standardChars)
-        return {
-            fontFamily: setting("FontFamily") || "Monospace",
-            characters: chars.map((glyph, index) => index === 0 && glyph === "\\s" ? " " : glyph).join(""),
-            detail: setting("Detail") !== undefined ? setting("Detail") : 1,
-            grayscale: !!setting("Grayscale"),
-            slideInterval: Math.max(5, setting("SlideInterval") !== undefined ? setting("SlideInterval") : 10),
-            transitionFrames: setting("TransitionFrames") || 16,
-            transitionDuration: Math.max(100, setting("TransitionDuration") || 1500),
-            transitionPace: setting("TransitionPace") || "ease-in-out",
-            transitionField: setting("TransitionField") || "blue-noise",
-            transitionSpread: setting("TransitionSpread") !== undefined ? setting("TransitionSpread") : 0.65,
-            dither: setting("Dither") !== undefined ? setting("Dither") : 0.005,
-            gradientLossStrength: setting("GradientLossStrength") !== undefined ? setting("GradientLossStrength") : 1.5,
-            glyphLuminanceBonus: setting("GlyphLuminanceBonus") !== undefined ? setting("GlyphLuminanceBonus") : 0.12,
-            glyphEntropyStrength: setting("GlyphEntropyStrength") !== undefined ? setting("GlyphEntropyStrength") : 0.01,
-            perceptualLoss: setting("PerceptualLoss") !== undefined ? !!setting("PerceptualLoss") : true,
-            structureDither: setting("StructureDither") !== undefined ? setting("StructureDither") : 0.06,
-            renderStyle: style,
-            invertInk: !!setting("InvertInk"),
-            backgroundMode: setting("BackgroundMode") !== undefined ? setting("BackgroundMode") : 0,
-            backgroundColor: setting("BackgroundColor") || "#202028",
-            renderDirectory: b && !useBSettings ? "" : (setting("RenderDirectory") || ""),
-            renderedState: b && !useBSettings ? "" : (setting("RenderedState") || "")
+    readonly property string activeProfile: overrideProfile !== "auto" && profiles.some(profile => profile.id === overrideProfile)
+        ? overrideProfile : scheduledProfile
+    readonly property var activeSettings: (profiles.find(profile => profile.id === activeProfile) || profiles[0]).settings
+    readonly property string mode: activeSettings.Mode
+    readonly property var configImages: activeSettings.Images
+    property var profilesRequest: null
+    property string registeredChoices: ""
+    onProfileChoicesChanged: Qt.callLater(publishProfiles)
+
+    function publishProfiles() {
+        if (profilesRequest || registeredChoices === profileChoices) return
+        const choices = profileChoices
+        const xhr = new XMLHttpRequest()
+        profilesRequest = xhr
+        xhr.open("POST", "http://127.0.0.1:48741/v1/profiles", true)
+        xhr.setRequestHeader("Content-Type", "application/json")
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState !== XMLHttpRequest.DONE || root.profilesRequest !== xhr) return
+            root.profilesRequest = null
+            profileTimeout.stop()
+            if (xhr.status === 200) root.registeredChoices = choices
         }
+        profileTimeout.restart()
+        xhr.send(choices)
     }
     property var overrideRequest: null
 
     RenderClient {
         id: renderer
+        autoRender: true
         requestSettings: RenderSettings.request(
             root.mode === "Slideshow" ? Array.from(root.configImages) : Array.from(root.configImages).slice(0, 1), root.activeSettings)
-        cachedDirectory: root.activeSettings.renderDirectory
-        cachedState: root.activeSettings.renderedState
-        playbackSettings: ({mode: root.mode, slideInterval: root.activeSettings.slideInterval,
-            transitionDuration: root.activeSettings.transitionDuration})
+        cachedDirectory: root.activeSettings.RenderDirectory
+        cachedState: root.activeSettings.RenderedState
+        playbackSettings: ({mode: root.mode, slideInterval: root.activeSettings.SlideInterval,
+            transitionDuration: root.activeSettings.TransitionDuration})
         onAssetsReady: {
-            const name = root.activeProfile === "B" ? "RenderDirectoryB" : "RenderDirectory"
-            if (wallpaper.configuration[name] !== displayDirectory)
-                wallpaper.configuration[name] = displayDirectory
-            const stateName = root.activeProfile === "B" ? "RenderedStateB" : "RenderedState"
-            if (wallpaper.configuration[stateName] !== publishedState)
-                wallpaper.configuration[stateName] = publishedState
-            wallpaper.configuration.writeConfig()
+            const next = root.profiles.map(profile => profile.id === root.activeProfile
+                ? Object.assign({}, profile, {settings: Object.assign({}, profile.settings,
+                    {RenderDirectory: displayDirectory, RenderedState: publishedState})}) : profile)
+            const serialized = JSON.stringify(next)
+            if (wallpaper.configuration.Profiles !== serialized) {
+                wallpaper.configuration.Profiles = serialized
+                // Keep the original profiles readable by older plugin versions.
+                if (root.activeProfile === "A" || root.activeProfile === "B") {
+                    const suffix = root.activeProfile === "B" ? "B" : ""
+                    wallpaper.configuration["RenderDirectory" + suffix] = displayDirectory
+                    wallpaper.configuration["RenderedState" + suffix] = publishedState
+                }
+                wallpaper.configuration.writeConfig()
+            }
         }
+    }
+
+    CacheClient {
+        maximum: wallpaper.configuration.MaxCachedRenders || 20
+        autoSync: true
     }
 
     SlideshowPlayer {
@@ -128,6 +103,16 @@ WallpaperItem {
     }
 
     Timer {
+        id: profileTimeout
+        interval: 5000
+        onTriggered: {
+            const previous = root.profilesRequest
+            root.profilesRequest = null
+            if (previous) previous.abort()
+        }
+    }
+
+    Timer {
         id: overrideTimeout
         interval: 5000
         onTriggered: {
@@ -149,7 +134,8 @@ WallpaperItem {
             if (xhr.status === 200) {
                 try {
                     const value = JSON.parse(xhr.responseText).profile
-                    if (["auto", "A", "B"].includes(value)) root.overrideProfile = value
+                    if (typeof value === "string") root.overrideProfile = value
+                    root.publishProfiles()
                 } catch (failure) { /* keep the last known override */ }
             }
         }
@@ -194,7 +180,7 @@ WallpaperItem {
                 color: "white"
                 text: renderer.renderState === "error" ? renderer.error
                     : renderer.renderState === "idle" ? (root.configImages.length
-                        ? "Select Render now in wallpaper settings" : "Select an image in wallpaper settings")
+                        ? "Preparing ASCII wallpaper" : "Select an image in wallpaper settings")
                     : renderer.stage || "Preparing ASCII wallpaper"
             }
             Controls.ProgressBar {
@@ -209,6 +195,9 @@ WallpaperItem {
     }
 
     Component.onDestruction: {
+        const previousProfiles = profilesRequest
+        profilesRequest = null
+        if (previousProfiles) previousProfiles.abort()
         const previous = overrideRequest
         overrideRequest = null
         if (previous) previous.abort()

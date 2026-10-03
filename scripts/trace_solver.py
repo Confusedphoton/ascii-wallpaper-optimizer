@@ -31,7 +31,7 @@ SOURCES = (*BASE_SOURCES, ("viviana", Path("screenshots/143381492_p0-Viviana.jpg
                           (330, 270, 530, 440)))
 
 
-STAGES = ("initial", "solver_final", "solver_best", "after_dither", "pre_refinement",
+STAGES = ("initial", "solver_final", "after_dither", "pre_refinement",
           "refinement_sweep", "post_refinement", "final")
 
 
@@ -189,7 +189,7 @@ def summarize(directory, report, reference, masks, chars, crop, cell, plots):
             adam_stages[name] = metrics
             intermediate.append((f"Raw Adam: {row['step']} updates", shown))
         elif row["stage"] == "final":
-            intermediate.append(("Returned frame after retention/polish", shown))
+            intermediate.append(("Returned frame after dither/refinement/polish", shown))
     base.contact_sheet(panels, directory / "stage_comparison.png", columns=3)
     base.contact_sheet(panels, directory / "focus_comparison.png", crop=crop, columns=3, zoom=3)
     base.contact_sheet(intermediate, directory / "adam_comparison.png", columns=3)
@@ -365,7 +365,7 @@ def write_review(output, report):
                   f"![Visual variance and weighted gradient RMS]({name}/visual_and_gradients.png)", "",
                   f"![Raw losses before coefficients]({name}/raw_losses.png)", "",
                   f"[Trace JSON]({name}/trace.json) · [Raw logits]({name}/logits.npz) · [All grid snapshots]({name}/grids.npz)", "",
-                  "Raw Adam snapshots below are from one trajectory, before best-frame retention, dithering, refinement, and final polish. Step zero is initialization. These are distinct from returned frames at independently configured step budgets; the temperature schedules differ.", "",
+                  "Raw Adam snapshots below are from one trajectory, before dithering, refinement, and final polish. Step zero is initialization. These are distinct from returned frames at independently configured step budgets; the temperature schedules differ.", "",
                   "| Completed Adam updates | Raw objective | Glyph entropy, bits | Uniform entropy, bits |",
                   "|---:|---:|---:|---:|"]
         for stage, metrics in item["analysis"].get("adam_stages", {}).items():

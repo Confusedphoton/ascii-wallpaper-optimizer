@@ -181,6 +181,8 @@ class SolverTrace:
                             selection_noise=static["selection_noise"])
         np.savez_compressed(directory / "visual.npz", **{name: np.stack(values) for name, values in visual.items()},
                             record_index=logit_records, pixel_gram=static["pixel_gram"], edge_gram=static["edge_gram"])
+        if "glyph_stroke_costs" in static:
+            np.savez_compressed(directory / "stroke_costs.npz", costs=static["glyph_stroke_costs"])
         replacements = {}
         for stage, tensors in self.replacements.items():
             arrays = {name: value.cpu().numpy() for name, value in tensors.items()}

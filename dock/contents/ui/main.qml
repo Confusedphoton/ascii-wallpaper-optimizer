@@ -11,10 +11,12 @@ PlasmoidItem {
     id: root
     property string profile: "auto"
     property string error: ""
+    property var profiles: [{id: "A", name: "Profile A"}, {id: "B", name: "Profile B"}]
+    readonly property string profileName: (profiles.find(choice => choice.id === profile) || {name: profile}).name
     property var activeRequest: null
     preferredRepresentation: compactRepresentation
     toolTipMainText: "ASCII Wallpaper Profile"
-    toolTipSubText: profile === "auto" ? "Scheduled" : "Profile " + profile + " (manual override)"
+    toolTipSubText: profile === "auto" ? "Scheduled" : profileName + " (manual override)"
 
     function request(method, next) {
         if (activeRequest) {
@@ -33,17 +35,15 @@ PlasmoidItem {
             requestTimeout.stop()
             if (xhr.status === 200) {
                 try {
-                    root.profile = JSON.parse(xhr.responseText).profile
+                    const reply = JSON.parse(xhr.responseText)
+                    root.profile = reply.profile
+                    if (Array.isArray(reply.profiles) && reply.profiles.length) root.profiles = reply.profiles
                     root.error = ""
                 } catch (failure) { root.error = String(failure) }
             } else root.error = "Renderer service is unavailable"
         }
         requestTimeout.restart()
         xhr.send(method === "POST" ? JSON.stringify({profile: next}) : null)
-    }
-
-    function toggleProfile(target) {
-        root.request("POST", root.profile === target ? "auto" : target)
     }
 
     Timer {
@@ -71,23 +71,22 @@ PlasmoidItem {
     }
 
     compactRepresentation: Controls.Button {
-        text: root.profile === "auto" ? "A/B" : root.profile
+        text: root.profile === "auto" ? "Auto" : root.profileName
         icon.name: "preferences-desktop-wallpaper"
-        onClicked: root.request("POST", root.profile === "A" ? "B" : "A")
-        onPressAndHold: root.expanded = true
+        onClicked: root.expanded = !root.expanded
         Controls.ToolTip.visible: hovered
-        Controls.ToolTip.text: root.profile === "auto" ? "Use profile A; open for schedule controls"
-            : "Switch to profile " + (root.profile === "A" ? "B" : "A")
+        Controls.ToolTip.text: "Choose a wallpaper profile"
     }
 
     fullRepresentation: ColumnLayout {
         spacing: 8
         Controls.Label { text: "ASCII Wallpaper Profile"; font.bold: true }
-        Controls.Label { text: root.error || (root.profile === "auto" ? "Following time of day" : "Manual override: " + root.profile) }
-        RowLayout {
-            Controls.Button { text: "A"; checkable: true; checked: root.profile === "A"; onClicked: root.toggleProfile("A") }
-            Controls.Button { text: "B"; checkable: true; checked: root.profile === "B"; onClicked: root.toggleProfile("B") }
+        Controls.Label { text: root.error || (root.profile === "auto" ? "Following time of day" : "Manual override: " + root.profileName) }
+        Controls.ComboBox {
+            Layout.fillWidth: true
+            model: ["Follow schedule"].concat(root.profiles.map(choice => choice.name))
+            currentIndex: root.profile === "auto" ? 0 : root.profiles.findIndex(choice => choice.id === root.profile) + 1
+            onActivated: index => root.request("POST", index === 0 ? "auto" : root.profiles[index - 1].id)
         }
-        Controls.Button { text: "Follow schedule"; enabled: root.profile !== "auto"; onClicked: root.request("POST", "auto") }
     }
 }

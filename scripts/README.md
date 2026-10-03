@@ -196,7 +196,7 @@ and actual selection noise in `logits.npz`, and every evaluated glyph/color grid
 in `grids.npz`. Logits are saved before each Adam update and once after the last;
 they stop changing before discrete refinement. Fixed-temperature entropy curves
 distinguish learned concentration from temperature annealing. Intermediate
-previews separate the final Adam iterate, retained best iterate, post-dither
+previews separate the final Adam iterate, post-dither
 selection, pre-refinement state, every sweep, and final color polish. Histograms,
 coverage, and ink lightness also cover the lowest-variance quarter of source
 cells, using the same region mask at every stage. Acceptance counters expose
@@ -214,7 +214,7 @@ inspection. Instrumented trace times include the extra diagnostic work.
 
 `adam_comparison.png` and `adam_focus.png` include the source, actual
 initialization, raw snapshots every six updates, the raw terminal iterate, and
-the returned frame after retention and polish. Their metrics are recorded
+the returned frame after dither and polish. Their metrics are recorded
 separately in `analysis.adam_stages`; a flat returned-frame budget curve does
 not establish that raw Adam iterates stopped improving visually. The weighted
 objective and displayed pixel/Sobel errors are optimization proxies, rather
@@ -252,14 +252,15 @@ cost only to explicitly instrumented runs.
 Batch acceptance now caches both unchanged and proposed display pixels, since
 tone/gamut mapping is pixel-local. Each trial still evaluates the full image
 objective and interactions, while avoiding repeated gamut mapping of the same
-frame. The Adam loop reuses its hard-render loss for best-frame scoring, directly
-contracts glyph weights with the shared bank, and keeps best-state comparisons
-on the device. Fixed-size histogram accumulation and precomputed parity groups
+frame. The Adam loop evaluates actual hard frames and contracts glyph weights with
+the shared bank. Terminal layouts are never rolled back to initialization or
+an earlier iterate. Fixed-size histogram accumulation and precomputed parity groups
 avoid output-shape synchronization.
 
 `compare_perceptual.py` compares spatial-lightness and contour
 variants, with independent official FLIP evaluation. Its `combined_add` variant
-is now the production headroom default. The script explicitly disables the
+is the historical perceptual baseline; production now also calibrates the
+atlas display range and scores chromatic raster stroke alignment. The script explicitly disables the
 production perceptual terms before adding each variant, so its legacy baseline
 stays comparable and losses are not counted twice. It reads the installed
 profiles and copies their completed previews as references, without changing
@@ -303,7 +304,7 @@ skip unsupported replacement sweeps. `SolverTrace(include_replacements=False)`
 skips that diagnostic sweep while retaining losses, logits, and state grids.
 Production uses the approved terms directly from `ascii_optimizer.perceptual`.
 Script-local objective wrappers
-apply experimental terms during Adam, frame retention, and final color polish.
+apply experimental terms during Adam and final color polish.
 Their coefficients and sampled weighted derivatives are saved separately;
 total objectives with different terms are not cross-variant quality scores.
 
@@ -343,3 +344,28 @@ by four rows, respectively, overlapping at half-window strides. Larger
 windows could encourage consistency along longer contours, but combine
 neighboring curves and lose positional information. An additional low-weight
 224×224 scale would be a useful separate experiment; it has not been tested.
+
+`compare_objective.py` traces the current production objective on any source,
+optionally using an installed manifest for exact font, glyph and appearance
+settings. It saves the source, final render, initialization, raw Adam snapshots,
+terminal state, per-term derivatives and all candidate stroke costs. The
+brightness reference is the source mapped into the atlas display range;
+independent metrics continue to compare with the original source.
+
+```sh
+.venv/bin/python -m ascii_optimizer.launcher scripts/compare_objective.py image.jpg \
+  --manifest /path/to/completed/manifest.json --label fix --output rendered/review
+.venv/bin/python scripts/view_renders.py \
+  --image Source=rendered/review/source.png \
+  --image Current=rendered/review/current/final.png \
+  --image Revised=rendered/review/fix/final.png
+```
+
+Capture `current` with the original revision before editing, or run it from
+a separate checkout on `PYTHONPATH`. Use identical settings for both runs.
+`stroke_costs.npz` records per-cell/per-glyph angular costs; `trace.json` records
+the fixed linear-RGB reference range and effective coefficients, including the
+0.1 pixel-family scale and 0.2 relative-chroma term. Source/image-specific crops belong in analysis only;
+production does not inspect glyph names, semantic regions, or image identities.
+
+Normal production headroom renders now return the raw Adam terminal. Use `compare_objective.py --postprocess` or the Python `postprocess=True` option to inspect optional dither and color polish. Existing comparison images retain their original meaning; changing the output stage invalidates render caches through the source revision.

@@ -18,6 +18,8 @@
     <entry name="ModeB" type="String"><default>Image</default></entry>
     <entry name="ImagesB" type="StringList"><default></default></entry>
     <entry name="ProfileSettingsInitialized" type="Bool"><default>false</default></entry>
+    <entry name="Profiles" type="String"><default></default></entry>
+    <entry name="MaxCachedRenders" type="Int"><default>20</default><min>1</min><max>1000</max></entry>
     <entry name="ScheduleEnabled" type="Bool"><default>false</default></entry>
     <entry name="ManualProfile" type="String"><default>A</default></entry>
     <entry name="ProfileAStart" type="String"><default>07:00</default></entry>
