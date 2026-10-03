@@ -110,6 +110,7 @@ Item {
     property real cfg_GradientLossStrength: 1.5
     property real cfg_GlyphLuminanceBonus: 0.12
     property real cfg_GlyphEntropyStrength: 0.01
+    property bool cfg_PerceptualLoss: true
     property real cfg_StructureDither: 0.06
     property bool cfg_InvertInk: false
     property list<string> cfg_AsciiCharsB: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "#", "\\", "/", "=", "^", "|", "[", "]", "{", "}"]
@@ -119,6 +120,7 @@ Item {
     property real cfg_GradientLossStrengthB: 1.5
     property real cfg_GlyphLuminanceBonusB: 0.12
     property real cfg_GlyphEntropyStrengthB: 0.01
+    property bool cfg_PerceptualLossB: true
     property real cfg_StructureDitherB: 0.06
     property bool cfg_InvertInkB: false
     property var activeSettings: makeProfileSettings()
@@ -152,6 +154,7 @@ Item {
             GradientLossStrength: root["cfg_GradientLossStrength" + suffix],
             GlyphLuminanceBonus: root["cfg_GlyphLuminanceBonus" + suffix],
             GlyphEntropyStrength: root["cfg_GlyphEntropyStrength" + suffix],
+            PerceptualLoss: root["cfg_PerceptualLoss" + suffix],
             StructureDither: root["cfg_StructureDither" + suffix],
             InvertInk: root["cfg_InvertInk" + suffix]
         }
@@ -203,7 +206,7 @@ Item {
         const names = ["FontFamily", "TransitionFrames", "TransitionDuration", "TransitionPace",
             "TransitionField", "TransitionSpread", "BackgroundMode", "BackgroundColor", "RenderStyle",
             "AsciiChars", "Detail", "Grayscale", "SlideInterval", "Dither",
-            "GradientLossStrength", "GlyphLuminanceBonus", "GlyphEntropyStrength", "StructureDither", "InvertInk"]
+            "GradientLossStrength", "GlyphLuminanceBonus", "GlyphEntropyStrength", "PerceptualLoss", "StructureDither", "InvertInk"]
         for (const name of names)
             root["cfg_" + name + "B"] = root["cfg_" + name]
         cfg_ProfileSettingsInitialized = true
@@ -899,6 +902,15 @@ Item {
                 text: "Dark ink on a light canvas"
                 checked: root.activeSettings.InvertInk
                 onToggled: if (root.controlsReady) root.setProfileSetting("InvertInk", checked)
+            }
+
+            Controls.CheckBox {
+                id: perceptualLossCheck
+                Kirigami.FormData.label: "Renderer Objective:"
+                text: "Use current perceptual headroom renderer"
+                checked: root.activeSettings.PerceptualLoss
+                visible: root.activeSettings.RenderStyle === "headroom"
+                onToggled: if (root.controlsReady) root.setProfileSetting("PerceptualLoss", checked)
             }
 
             Controls.CheckBox {

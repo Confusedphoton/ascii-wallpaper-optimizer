@@ -74,6 +74,7 @@ WallpaperItem {
             gradientLossStrength: setting("GradientLossStrength") !== undefined ? setting("GradientLossStrength") : 1.5,
             glyphLuminanceBonus: setting("GlyphLuminanceBonus") !== undefined ? setting("GlyphLuminanceBonus") : 0.12,
             glyphEntropyStrength: setting("GlyphEntropyStrength") !== undefined ? setting("GlyphEntropyStrength") : 0.01,
+            perceptualLoss: setting("PerceptualLoss") !== undefined ? !!setting("PerceptualLoss") : true,
             structureDither: setting("StructureDither") !== undefined ? setting("StructureDither") : 0.06,
             renderStyle: style,
             invertInk: !!setting("InvertInk"),

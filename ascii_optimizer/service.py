@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
-from .defaults import DEFAULT_PERCEPTUAL_LOSS, PERCEPTUAL_WEIGHTS, ppd_for_width
+from .defaults import PERCEPTUAL_WEIGHTS, ppd_for_width
 from .revision import render_revision
 from .settings import normalize_options, validate_size
 
@@ -117,11 +117,10 @@ def _validated_request(raw: dict) -> dict:
     names = ("chars", "detail", "grayscale", "frames", "dither", "structure_dither",
              "transition_pace", "transition_field", "transition_spread", "gradient_loss_strength",
              "glyph_luminance_bonus", "glyph_entropy_strength", "style", "invert_ink", "background", "crop", "steps",
-             "transition_steps", "seed")
+             "transition_steps", "seed", "perceptual_loss")
     return dict({name: options[name] for name in names}, glyph_search="all" if options["style"] == "headroom" else "structure",
-                perceptual_loss=DEFAULT_PERCEPTUAL_LOSS and options["style"] == "headroom",
-                perceptual_weights=PERCEPTUAL_WEIGHTS if options["style"] == "headroom" else {},
-                viewing_ppd=ppd_for_width(size[0]) if options["style"] == "headroom" else None,
+                perceptual_weights=PERCEPTUAL_WEIGHTS if options["perceptual_loss"] else {},
+                viewing_ppd=ppd_for_width(size[0]) if options["perceptual_loss"] else None,
                 version=__version__, render_revision=render_revision(), images=images,
                 image_hashes=[_file_hash(Path(path)) for path in images],
                 font=str(font.resolve()), font_hash=_file_hash(font), size=list(size))
@@ -351,7 +350,11 @@ class RenderQueue:
                    "--size", f"{settings['size'][0]}x{settings['size'][1]}", "--progress-json"]
         for name in ("font", "chars", "detail", "frames", "transition_pace", "transition_field",
                      "transition_spread", "dither", "gradient_loss_strength", "glyph_luminance_bonus", "glyph_entropy_strength",
-                     "style", "structure_dither", "background", "crop", "steps", "transition_steps", "seed"):
+                     "style", "perceptual_loss", "structure_dither", "background", "crop", "steps", "transition_steps", "seed"):
+            if name == "perceptual_loss":
+                if not settings[name]:
+                    command.append("--no-perceptual-loss")
+                continue
             command.extend(("--" + name.replace("_", "-"), str(settings[name])))
         for name in ("invert_ink", "grayscale"):
             if settings[name]:

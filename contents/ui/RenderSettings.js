@@ -26,6 +26,7 @@ function request(images, settings) {
         gradient_loss_strength: style === "headroom" ? setting("gradientLossStrength", "GradientLossStrength", 1.5) : 0,
         structure_dither: setting("structureDither", "StructureDither", 0.06),
         style: style,
+        perceptual_loss: style === "headroom" && setting("perceptualLoss", "PerceptualLoss", true),
         invert_ink: !!setting("invertInk", "InvertInk", false),
         background: setting("backgroundMode", "BackgroundMode", 0) === 1
             ? setting("backgroundColor", "BackgroundColor", "#202028") : "auto"
