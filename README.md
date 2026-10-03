@@ -48,7 +48,9 @@ Use the **Editing Profile** dropdown and **Add** / **Remove** buttons to manage 
 
 Select **Perceptual headroom**, **Classic headroom**, **Structure first**, or **Flow domains** under **Render Style**. The two headroom styles select the current perceptual or previous objective directly; there is no separate objective checkbox. The appearance controls show only settings that affect the chosen renderer. Both headroom styles use Sobel edge loss, glyph luminosity bonus, and glyph variety. Perceptual headroom returns the raw Adam terminal, classic headroom retains its post-optimization dithering, and structure uses coverage dither. All styles support font, characters, detail, grayscale, ink polarity, and background. Slideshow profiles also show transition and playback settings.
 
-The **Render Cache** section at the bottom sets the maximum number of cached render generations (default 20) and provides **Clear Cache**. The limit and clear action also manage reusable still assets. Renders currently displayed or being prepared stay available until consumers replace or release them, so they can temporarily exceed the limit. No cache filesystem path is shown in the editor.
+Enable **Animate flow** with **Flow domains** to prepare a looping simulation clip. The default is ten seconds at 12 fps. A single-image wallpaper loops continuously; slideshows finish a loop before transitioning from its phase-zero anchor. See [the animation guide](docs/flow-playback.md) for temporal boundary construction, controls, and review.
+
+The **Render Cache** section at the bottom sets the maximum number of cached render generations (default 20) and provides **Clear Cache**. The limit and clear action also manage reusable still and loop assets. Renders currently displayed or being prepared stay available until consumers replace or release them, so they can temporarily exceed the limit. No cache filesystem path is shown in the editor.
 
 You can also run the renderer from a terminal for export or batch work:
 
@@ -115,6 +117,15 @@ Create flow comparisons and start the local FLIP viewer with:
 ```
 
 The review includes the standard and expanded perceptual banks, calm flow, balanced flow, stronger eddies, and smaller domains. All comparisons use the same seed, color fitting, and glyph-variety strength. Reports include actual used/effective glyph counts, displayed-color errors, official FLIP scores, field maps, grids, runtime, and source/font/code hashes. In the viewer, Space switches A/B, Enter starts automatic switching, and **FLIP error** computes an error map for the selected images.
+
+Generate and review animated clips with:
+
+```sh
+.venv/bin/python -m ascii_optimizer.launcher scripts/compare_flow_playback.py --device cuda --width 768 --seconds 10
+.venv/bin/python scripts/view_renders.py --report rendered/flow_playback/review
+```
+
+The viewer adds playback, a frame slider, speed controls, and a loop seam inspection window. **P** plays or pauses; FLIP compares the currently selected frames. The report measures the serialized output at the wrap as well as ordinary frame steps.
 
 Install the development dependency group into the existing hardware-configured environment, then run the tests and build the packages:
 

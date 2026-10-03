@@ -120,6 +120,9 @@ Item {
     property real cfg_FlowStrength: 0.4
     property real cfg_FlowEddies: 0.65
     property real cfg_FlowScale: 6.0
+    property bool cfg_FlowAnimated: false
+    property int cfg_FlowLoopSeconds: 10
+    property int cfg_FlowFps: 12
     property bool cfg_InvertInk: false
     property list<string> cfg_AsciiCharsB: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "#", "\\", "/", "=", "^", "|", "[", "]", "{", "}"]
     property bool cfg_GrayscaleB: false
@@ -132,6 +135,9 @@ Item {
     property real cfg_FlowStrengthB: 0.4
     property real cfg_FlowEddiesB: 0.65
     property real cfg_FlowScaleB: 6.0
+    property bool cfg_FlowAnimatedB: false
+    property int cfg_FlowLoopSecondsB: 10
+    property int cfg_FlowFpsB: 12
     property bool cfg_InvertInkB: false
     property var activeSettings: Profiles.normalizedSettings({})
     property string glyphEditorMessage: ""
@@ -604,11 +610,13 @@ Item {
                     previewPlayback.reset()
                 }
 
-                SlideshowPlayer {
+                PlaybackController {
                     id: previewPlayback
-                    ready: previewShader.ready
+                    ready: previewShader.ready && previewShader.displayGeneration === renderer.displayGeneration
                     loading: previewShader.loading
-                    enabled: renderer.displayPlaybackSettings.mode === "Slideshow"
+                    slideshowEnabled: renderer.displayPlaybackSettings.mode === "Slideshow"
+                    manifest: renderer.displayManifest
+                    enabled: previewShader.visible
                     imageCount: renderer.displayImageCount
                     frameCount: renderer.displayFrameCount
                     generation: renderer.displayGeneration
@@ -638,6 +646,7 @@ Item {
                     transitionProgress: previewPlayback.transitionProgress
                     transitionFrame: previewPlayback.transitionFrame
                     transitionFrames: renderer.displayFrameCount
+                    loopFrame: previewPlayback.loopFrame
                 }
 
                 Controls.Label {
@@ -1235,6 +1244,43 @@ Item {
                     Layout.preferredWidth: Kirigami.Units.gridUnit * 10
                     text: flowScaleSlider.value.toFixed(1)
                 }
+            }
+
+            Controls.CheckBox {
+                objectName: "flowAnimatedCheck"
+                visible: root.activeSettings.RenderStyle === "flow"
+                Kirigami.FormData.label: "Flow Playback:"
+                text: "Animate flow"
+                checked: root.activeSettings.FlowAnimated
+                onToggled: root.setProfileSetting("FlowAnimated", checked)
+            }
+            RowLayout {
+                visible: root.activeSettings.RenderStyle === "flow" && root.activeSettings.FlowAnimated
+                Kirigami.FormData.label: "Loop Length:"
+                Controls.SpinBox {
+                    objectName: "flowLoopSecondsSpin"
+                    from: 1; to: 30
+                    value: root.activeSettings.FlowLoopSeconds
+                    onValueModified: root.setProfileSetting("FlowLoopSeconds", value)
+                }
+                Controls.Label { text: "seconds" }
+            }
+            RowLayout {
+                visible: root.activeSettings.RenderStyle === "flow" && root.activeSettings.FlowAnimated
+                Kirigami.FormData.label: "Animation Frames:"
+                Controls.SpinBox {
+                    objectName: "flowFpsSpin"
+                    from: 4; to: 24
+                    value: root.activeSettings.FlowFps
+                    onValueModified: root.setProfileSetting("FlowFps", value)
+                }
+                Controls.Label { text: "per second" }
+            }
+            Controls.Label {
+                visible: root.activeSettings.RenderStyle === "flow" && root.activeSettings.FlowAnimated
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: "Longer loops and more frames take longer to render. Slides change at the end of a complete loop."
             }
 
             RowLayout {

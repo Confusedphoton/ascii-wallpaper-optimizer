@@ -9,6 +9,7 @@ function request(images, settings) {
         return fallback
     }
     const style = setting("renderStyle", "RenderStyle", "headroom")
+    const animated = style === "flow" && !!setting("flowAnimated", "FlowAnimated", false)
     const headroom = style !== "structure"
     const characters = setting("characters", "AsciiChars", " .´:rszunvcxLOGDQ0KNMW&#\\/=^|[]{}")
     return {
@@ -29,6 +30,11 @@ function request(images, settings) {
         flow_strength: setting("flowStrength", "FlowStrength", 0.4),
         flow_eddies: setting("flowEddies", "FlowEddies", 0.65),
         flow_scale: setting("flowScale", "FlowScale", 6.0),
+        flow_animated: animated,
+        flow_loop_seconds: animated ? setting("flowLoopSeconds", "FlowLoopSeconds", 10) : 10,
+        flow_fps: animated ? setting("flowFps", "FlowFps", 12) : 12,
+        flow_frame_steps: 12,
+        flow_temporal_strength: 0.8,
         style: style === "flow" ? "flow" : headroom ? "headroom" : "structure",
         perceptual_loss: style === "headroom" || style === "flow",
         invert_ink: !!setting("invertInk", "InvertInk", false),

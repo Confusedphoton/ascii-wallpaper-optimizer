@@ -43,6 +43,12 @@
         <label class="check"><input id="nearest" type="checkbox"> Crisp pixels</label>
       </div>
     </div>
+    <div class="toolbar" id="animation-controls" hidden>
+      <button id="play-animation" aria-pressed="false">Play animation <kbd>P</kbd></button>
+      <label class="inline">Frame <input id="animation-frame" type="range" min="0" max="119" value="0"><output id="animation-frame-value">1 / 120</output></label>
+      <label class="inline">Speed <select id="animation-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label>
+      <label class="check"><input id="animation-seam" type="checkbox"> Inspect loop seam</label>
+    </div>
   </section>
   <main id="stage" aria-label="Image comparison viewport">
     <canvas id="canvas" tabindex="0" aria-label="Comparison image. Space flips images. Scroll to zoom and drag to pan."></canvas>

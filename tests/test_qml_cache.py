@@ -33,7 +33,7 @@ def test_qml_composed_frame_cache(tmp_path: Path, invert_ink: bool, device_pixel
         pytest.skip(str(error))
     wallpaper, _ = build(destination=tmp_path / "dist", qsb=compiler)
     ui = wallpaper / "contents/ui"
-    (ui / "qmldir").write_text("module Wallpaper\nAsciiShader 1.0 AsciiShader.qml\nRenderClient 1.0 RenderClient.qml\n")
+    (ui / "qmldir").write_text("module Wallpaper\nAsciiShader 1.0 AsciiShader.qml\nRenderClient 1.0 RenderClient.qml\nPlaybackController 1.0 PlaybackController.qml\n")
     (tmp_path / "Wallpaper").symlink_to(ui, target_is_directory=True)
     assets = tmp_path / "assets"
     assets.mkdir()
@@ -46,7 +46,8 @@ def test_qml_composed_frame_cache(tmp_path: Path, invert_ink: bool, device_pixel
     glyphs = np.array([[0, 1, 0, 1], [1, 0, 1, 0]], dtype=np.uint8)
     background_labs, pixels = {}, {}
     for index, name in enumerate(("stills/0000", "stills/0001",
-                                 "transitions/0000-0001/0001", "transitions/0000-0001/0002")):
+                                 "transitions/0000-0001/0001", "transitions/0000-0001/0002",
+                                 *[f"loops/0000/{frame:04d}" for frame in range(4)])):
         colors = np.roll(foreground, index, axis=1)
         background = np.array([20 + index * 10, 30, 48], dtype=np.float32) / 255
         grid = Grid(glyphs, srgb_to_oklab(colors), srgb_to_oklab(background))

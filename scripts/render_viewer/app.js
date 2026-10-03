@@ -5,6 +5,7 @@ const canvas = $("canvas");
 const stage = $("stage");
 const ctx = canvas.getContext("2d", { alpha: false });
 const state = { scenes: [], scene: null, a: null, b: null, mode: "flip", showing: "a", auto: null,
+  clipFrame: 0, clipPlaying: false, clipTimer: null, clipGeneration: 0, clipCount: 0, clipDuration: 10000,
   scale: 1, x: 0, y: 0, autoFit: true, divider: .5, error: null, ready: false, generation: 0, errorGeneration: 0 };
 const images = new Map();
 let drag = null;
@@ -81,6 +82,8 @@ function draw() {
     layer(activeImage().bitmap);
     label = `${state.showing.toUpperCase()} · ${activeImage().label}`;
   }
+  if (state.clipCount) label += ` · frame ${state.clipFrame + 1}/${state.clipCount}`;
+  canvas.dataset.loopFrame = String(state.clipFrame);
   $("current").textContent = label;
   $("current").className = `current ${state.mode === "flip" ? state.showing : ""}`;
   $("fullscreen-label").textContent = label;
@@ -95,12 +98,12 @@ function fillSelections() {
     const select = $(name); select.replaceChildren();
     for (const entry of entries) select.add(new Option(entry.label, entry.id));
     select.value = entries.some(e => e.id === previous[index]) ? previous[index] :
-      (index === 0 ? entries[0].id : (entries.find(e => e.label === "Brightness + Wasserstein") || entries.find(e => e.kind === "final") || entries[0]).id);
+      (index === 0 ? entries[0].id : (entries.find(e => e.frames) || entries.find(e => e.label === "Brightness + Wasserstein") || entries.find(e => e.kind === "final") || entries[0]).id);
   }
 }
 async function selectPair(resetView = false) {
   const generation = ++state.generation;
-  ++state.errorGeneration; stopAuto(); state.error = null; state.ready = false;
+  ++state.errorGeneration; stopAuto(); stopPlayback(); state.clipGeneration++; state.error = null; state.ready = false;
   $("compute").disabled = false;
   $("empty").hidden = false; $("empty").textContent = "Loading images…";
   status("Loading both images before flipping");
@@ -111,6 +114,15 @@ async function selectPair(resetView = false) {
     if (generation !== state.generation) return;
     state.a = { ...a, bitmap: bitmapA }; state.b = { ...b, bitmap: bitmapB };
     state.ready = true; state.showing = "a"; $("empty").hidden = true;
+    state.clipCount = Math.max(a.frames?.length || 0, b.frames?.length || 0);
+    state.clipDuration = b.duration_ms || a.duration_ms || 10000;
+    state.clipFrame = 0;
+    $("animation-controls").hidden = !state.clipCount;
+    $("animation-frame").max = String(Math.max(0, state.clipCount - 1));
+    $("animation-frame").value = "0";
+    $("animation-seam").checked = false;
+    if (state.clipCount) await showClipFrame(0);
+    if (generation !== state.generation) return;
     if (resetView || state.autoFit) fit(); else draw();
     status(a.width === b.width && a.height === b.height ? `${a.width} × ${a.height} · same zoom and position` : "Different dimensions · same pixel scale, aligned at top left");
     if (state.mode === "error") await computeError();
@@ -141,6 +153,7 @@ async function setMode(mode) {
 }
 async function computeError() {
   if (!state.ready) return;
+  stopPlayback();
   const generation = ++state.errorGeneration;
   $("compute").disabled = true; status("Computing official FLIP map for A against B…");
   try {
@@ -155,6 +168,74 @@ async function computeError() {
   } catch (error) { if (generation === state.errorGeneration) status(error.message); }
   finally { if (generation === state.errorGeneration) $("compute").disabled = false; }
 }
+function stopPlayback() {
+  clearTimeout(state.clipTimer); state.clipTimer = null; state.clipPlaying = false;
+  $("play-animation").setAttribute("aria-pressed", "false");
+  $("play-animation").innerHTML = "Play animation <kbd>P</kbd>";
+}
+function clipSequence() {
+  if (!$("animation-seam").checked) return Array.from({length: state.clipCount}, (_, i) => i);
+  const edge = Math.min(8, Math.floor(state.clipCount / 2));
+  return [...Array.from({length: edge}, (_, i) => state.clipCount - edge + i),
+          ...Array.from({length: edge}, (_, i) => i)];
+}
+async function showClipFrame(index) {
+  if (!state.clipCount || !state.ready) return;
+  const generation = ++state.clipGeneration;
+  ++state.errorGeneration;
+  const selected = [state.a, state.b];
+  const frames = selected.map(entry => entry.frames?.[Math.floor(index * entry.frames.length / state.clipCount)] || entry);
+  try {
+    const bitmaps = await Promise.all(frames.map(frame => loadImage(frame.url)));
+    if (generation !== state.clipGeneration) return;
+    state.a = {...selected[0], id: frames[0].id, url: frames[0].url, bitmap: bitmaps[0]};
+    state.b = {...selected[1], id: frames[1].id, url: frames[1].url, bitmap: bitmaps[1]};
+    state.clipFrame = index; state.error = null;
+    $("animation-frame").value = String(index);
+    $("animation-frame-value").textContent = `${index + 1} / ${state.clipCount}`;
+    draw();
+    for (const entry of selected) {
+      if (entry.frames) {
+        const next = Math.floor(((index + 1) % state.clipCount) * entry.frames.length / state.clipCount);
+        loadImage(entry.frames[next].url).catch(() => {});
+      }
+    }
+  } catch (error) { if (generation === state.clipGeneration) { stopPlayback(); status(error.message); } }
+}
+async function playbackTick() {
+  if (!state.clipPlaying) return;
+  const sequence = clipSequence();
+  const index = sequence[(sequence.indexOf(state.clipFrame) + 1) % sequence.length];
+  const began = performance.now();
+  await showClipFrame(index);
+  if (!state.clipPlaying) return;
+  const hold = state.clipDuration / state.clipCount / Number($("animation-speed").value);
+  state.clipTimer = setTimeout(playbackTick, Math.max(1, hold - (performance.now() - began)));
+}
+function togglePlayback() {
+  if (!state.clipCount || !state.ready) return;
+  if (state.clipPlaying) { stopPlayback(); return; }
+  stopAuto();
+  if (state.mode === "error") setMode("flip");
+  if (state.mode === "flip") state.showing = state.b.frames ? "b" : "a";
+  state.clipPlaying = true;
+  $("play-animation").setAttribute("aria-pressed", "true");
+  $("play-animation").innerHTML = "Pause animation <kbd>P</kbd>";
+  draw();
+  state.clipTimer = setTimeout(playbackTick, state.clipDuration / state.clipCount / Number($("animation-speed").value));
+}
+$("play-animation").addEventListener("click", togglePlayback);
+$("animation-frame").addEventListener("input", async () => {
+  stopPlayback(); await showClipFrame(Number($("animation-frame").value));
+  if (state.mode === "error") computeError();
+});
+$("animation-seam").addEventListener("change", async () => {
+  const playing = state.clipPlaying; stopPlayback();
+  await showClipFrame($("animation-seam").checked ? clipSequence()[0] : 0);
+  if (state.mode === "error") await computeError();
+  if (playing) togglePlayback();
+});
+
 async function fullscreen() {
   try { if (document.fullscreenElement) await document.exitFullscreen(); else await stage.requestFullscreen(); }
   catch { status("Use your browser’s fullscreen control"); }
@@ -204,7 +285,7 @@ canvas.addEventListener("pointermove", (event) => {
 });
 canvas.addEventListener("pointerup", () => { drag = null; });
 canvas.addEventListener("pointercancel", () => { drag = null; });
-document.addEventListener("visibilitychange", () => { if (document.hidden) stopAuto(); });
+document.addEventListener("visibilitychange", () => { if (document.hidden) { stopAuto(); stopPlayback(); } });
 document.addEventListener("keydown", (event) => {
   if (["INPUT", "SELECT", "TEXTAREA"].includes(event.target.tagName)) return;
   if (event.target.tagName === "BUTTON" && ["Space", "Enter"].includes(event.code)) return;
@@ -212,7 +293,8 @@ document.addEventListener("keydown", (event) => {
   else if (event.code === "Enter") { event.preventDefault(); toggleAuto(); }
   else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
     event.preventDefault(); setMode("flip"); state.showing = event.key === "ArrowLeft" ? "a" : "b"; draw();
-  } else if (event.key.toLowerCase() === "f") fullscreen();
+  } else if (event.key.toLowerCase() === "p") togglePlayback();
+  else if (event.key.toLowerCase() === "f") fullscreen();
   else if (event.key === "0") fit(); else if (event.key === "1") nativePixels();
   else if (event.key.toLowerCase() === "w") setMode("wipe"); else if (event.key.toLowerCase() === "e") setMode("error");
 });

@@ -167,6 +167,10 @@ Item {
         if (displayRequestSettings.screen !== undefined && displayRequestSettings.screen !== screenName) return false
         return Object.keys(requestSettings).every(function(key) {
             let saved = displayRequestSettings[key]
+            const animationDefaults = {flow_animated: false, flow_loop_seconds: 10,
+                flow_fps: 12, flow_frame_steps: 12, flow_temporal_strength: 0.8}
+            if (saved === undefined && animationDefaults[key] !== undefined)
+                saved = animationDefaults[key]
             if (key === "perceptual_loss" && saved === undefined)
                 saved = displaySettings.perceptual_loss !== undefined ? displaySettings.perceptual_loss
                     : displayRequestSettings.style === "headroom"

@@ -11,6 +11,7 @@ const defaults = {
     TransitionSpread: 0.65, Dither: 0.005, GradientLossStrength: 1.5,
     GlyphLuminanceBonus: 0.12, GlyphEntropyStrength: 0.01, StructureDither: 0.06,
     FlowStrength: 0.4, FlowEddies: 0.65, FlowScale: 6.0,
+    FlowAnimated: false, FlowLoopSeconds: 10, FlowFps: 12,
     InvertInk: false, BackgroundMode: 0, BackgroundColor: "#202028",
     RenderStyle: "headroom", RenderDirectory: "", RenderedState: ""
 }

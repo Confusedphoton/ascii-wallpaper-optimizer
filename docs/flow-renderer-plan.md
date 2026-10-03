@@ -1,5 +1,7 @@
 # Flow domains renderer — proposal for review
 
+The next extension is planned in [Animated forced-flow playback](flow-playback-plan.md): offline simulation clips with explicit loop closure, cyclic glyph/color fitting, and buffered wallpaper playback.
+
 Implementation review: the first static version is available as `style="flow"`. Its default pool is 96 unique glyphs, every glyph remains available in every cell, and glyph variety defaults to 0.02. The selected flow influence is 0.4, eddy forcing 0.65, and domain size 6 character widths. Neighbor coherence comes from the shared field and spatially localized raster descriptors. The solver uses a padded periodic domain with spectral projection and diffusion; this replaces the proposed slip-wall boundary treatment. Comparison artifacts and a FLIP viewer are produced by `scripts/compare_flow.py` and `scripts/view_renders.py`.
 
 The image supplies preferred flow axes and spatial guidance. A forced 2D velocity simulation develops coherent streams, bends, and eddies. Glyphs express the local shape of that flow, while the existing perceptual machinery fits their displayed brightness and color to the source image.

@@ -8,7 +8,8 @@ from collections.abc import Mapping
 
 from .defaults import (DEFAULT_CHARS, STRUCTURE_CHARS, FLOW_CHARS, DEFAULT_FLOW_STRENGTH,
                        DEFAULT_FLOW_GLYPH_ENTROPY_STRENGTH,
-                       DEFAULT_FLOW_EDDIES, DEFAULT_FLOW_SCALE, DEFAULT_PERCEPTUAL_LOSS, DEFAULT_GLYPH_LUMINANCE_BONUS,
+                       DEFAULT_FLOW_EDDIES, DEFAULT_FLOW_SCALE, DEFAULT_FLOW_LOOP_SECONDS, DEFAULT_FLOW_FPS,
+                       DEFAULT_FLOW_FRAME_STEPS, DEFAULT_FLOW_TEMPORAL_STRENGTH, DEFAULT_PERCEPTUAL_LOSS, DEFAULT_GLYPH_LUMINANCE_BONUS,
                        DEFAULT_GRADIENT_LOSS_STRENGTH, MAX_GLYPH_LUMINANCE_BONUS,
                        DEFAULT_GLYPH_ENTROPY_STRENGTH, MAX_GLYPH_ENTROPY_STRENGTH)
 
@@ -109,6 +110,22 @@ def normalize_options(raw: Mapping) -> dict:
         if style != "flow":
             # Inactive settings must not create redundant cache variants.
             options[name] = default
+    animated = options.setdefault("flow_animated", False)
+    if not isinstance(animated, bool):
+        raise ValueError("flow_animated must be a boolean")
+    options["flow_animated"] = animated and style == "flow"
+    for name, default, low, high in (
+        ("flow_loop_seconds", DEFAULT_FLOW_LOOP_SECONDS, 1, 30),
+        ("flow_fps", DEFAULT_FLOW_FPS, 4, 24),
+        ("flow_frame_steps", DEFAULT_FLOW_FRAME_STEPS, 2, 96),
+    ):
+        options[name] = _integer(options.get(name, default), name, low, high)
+        if not options["flow_animated"]:
+            options[name] = default
+    options["flow_temporal_strength"] = finite_float(options.get("flow_temporal_strength",
+        DEFAULT_FLOW_TEMPORAL_STRENGTH), "flow_temporal_strength", 0, 2)
+    if not options["flow_animated"]:
+        options["flow_temporal_strength"] = DEFAULT_FLOW_TEMPORAL_STRENGTH
     if style == "structure" and (options["gradient_loss_strength"] or options["glyph_luminance_bonus"]):
         raise ValueError("Gradient loss and glyph luminance bonus are only available for headroom rendering")
     if style == "structure" and options["glyph_entropy_strength"]:

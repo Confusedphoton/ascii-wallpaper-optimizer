@@ -80,11 +80,13 @@ WallpaperItem {
         autoSync: true
     }
 
-    SlideshowPlayer {
+    PlaybackController {
         id: slideshow
-        ready: shaderContainer.ready
+        enabled: root.visible
+        ready: shaderContainer.ready && shaderContainer.displayGeneration === renderer.displayGeneration
         loading: shaderContainer.loading
-        enabled: renderer.displayPlaybackSettings.mode === "Slideshow"
+        slideshowEnabled: renderer.displayPlaybackSettings.mode === "Slideshow"
+        manifest: renderer.displayManifest
         imageCount: renderer.displayImageCount
         frameCount: renderer.displayFrameCount
         generation: renderer.displayGeneration
@@ -156,6 +158,7 @@ WallpaperItem {
         transitionProgress: slideshow.transitionProgress
         transitionFrame: slideshow.transitionFrame
         transitionFrames: renderer.displayFrameCount
+        loopFrame: slideshow.loopFrame
     }
 
     Rectangle {
@@ -166,7 +169,7 @@ WallpaperItem {
         height: statusColumn.implicitHeight + 24
         radius: 8
         color: "#b0000000"
-        visible: !shaderContainer.ready || renderer.renderState === "queued" || renderer.renderState === "running"
+        visible: !!shaderContainer.frameError || !shaderContainer.ready || renderer.renderState === "queued" || renderer.renderState === "running"
             || (renderer.renderState === "error" && !renderer.retrying)
 
         Column {
@@ -174,6 +177,13 @@ WallpaperItem {
             anchors.fill: parent
             anchors.margins: 12
             spacing: 6
+            Controls.Label {
+                width: parent.width
+                visible: !!shaderContainer.frameError
+                text: shaderContainer.frameError
+                wrapMode: Text.WordWrap
+                color: "white"
+            }
             Controls.Label {
                 width: parent.width
                 wrapMode: Text.WordWrap

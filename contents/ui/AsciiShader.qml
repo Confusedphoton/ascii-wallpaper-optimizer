@@ -15,6 +15,8 @@ Item {
     property int transitionFrame: -1
     property int transitionFrames: 16
     property int imageCount: 1
+    property int loopFrame: -1
+    property string frameError: ""
     property int activeBuffer: -1
     property var cachedDescriptor: null
     property var pendingDescriptor: null
@@ -36,7 +38,7 @@ Item {
     readonly property string desiredKey: descriptor(currentIndex, nextIndex, frameIndex).key
     signal framePresented()
 
-    onDesiredKeyChanged: refresh.restart()
+    onDesiredKeyChanged: { frameError = ""; refresh.restart() }
     onManifestChanged: refresh.restart()
     onOutputTextureSizeChanged: {
         outputDirty = true
@@ -54,6 +56,11 @@ Item {
     function descriptor(current, next, index) {
         const directory = String(renderDirectory || "").trim().replace(/\/$/, "")
         let path = "stills/" + String(current).padStart(4, "0")
+        const loop = manifest.schema_version === 2
+            ? (manifest.loops || ({}))[String(current).padStart(4, "0")] : null
+        if (current === next && loopFrame >= 0 && loop
+                && loop.path === "loops/" + String(current).padStart(4, "0") && loop.frame_count >= 4)
+            path = loop.path + "/" + String(Math.min(loop.frame_count - 1, loopFrame)).padStart(4, "0")
         if (current !== next && index > 0 && index < frameCount - 1) {
             const pair = String(current).padStart(4, "0") + "-" + String(next).padStart(4, "0")
             path = "transitions/" + pair + "/" + String(index).padStart(4, "0")
@@ -111,7 +118,14 @@ Item {
     function prefetch() {
         if (!renderDirectory || pendingDescriptor || !ready || displayedKey !== desiredKey) return
         let upcoming
-        if (currentIndex !== nextIndex && frameIndex < frameCount - 1)
+        if (currentIndex === nextIndex && loopFrame >= 0) {
+            const loop = (manifest.loops || ({}))[String(currentIndex).padStart(4, "0")]
+            if (loop) {
+                upcoming = descriptor(currentIndex, currentIndex, 0)
+                upcoming.path = loop.path + "/" + String((loopFrame + 1) % loop.frame_count).padStart(4, "0")
+                upcoming.key = String(renderDirectory).replace(/\/$/, "") + "/" + upcoming.path + "?v=" + upcoming.generation
+            }
+        } else if (currentIndex !== nextIndex && frameIndex < frameCount - 1)
             upcoming = descriptor(currentIndex, nextIndex, frameIndex + 1)
         else if (currentIndex === nextIndex && displayImageCount > 1)
             upcoming = descriptor(currentIndex, (currentIndex + 1) % displayImageCount, 1)
@@ -139,12 +153,14 @@ Item {
             anchors.fill: parent
             active: asciiRoot.activeBuffer === 0
             onCompleted: asciiRoot.present(firstFrame)
+            onLoadFailed: key => { if (key === asciiRoot.desiredKey) asciiRoot.frameError = "Could not load a prepared frame." }
         }
         AsciiFrame {
             id: secondFrame
             anchors.fill: parent
             active: asciiRoot.activeBuffer === 1
             onCompleted: asciiRoot.present(secondFrame)
+            onLoadFailed: key => { if (key === asciiRoot.desiredKey) asciiRoot.frameError = "Could not load a prepared frame." }
         }
     }
     ShaderEffectSource {

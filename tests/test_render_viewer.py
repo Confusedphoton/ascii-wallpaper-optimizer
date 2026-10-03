@@ -63,6 +63,28 @@ def test_registered_images_and_ui(tmp_path):
             assert error.value.code == 404
 
 
+def test_report_registers_animation_frames_for_playback_and_flip(tmp_path):
+    scene = tmp_path / "sample"
+    clip = scene / "flow_animated"
+    (clip / "frames").mkdir(parents=True)
+    Image.new("RGB", (32, 24), "#446688").save(scene / "source.png")
+    Image.new("RGB", (32, 24), "#557799").save(clip / "final.png")
+    frames = []
+    for index in range(4):
+        frame = f"frames/{index:04d}.png"
+        Image.new("RGB", (32, 24), (30 + index * 20, 80, 100)).save(clip / frame)
+        frames.append(frame)
+    (tmp_path / "metrics.json").write_text(json.dumps({"images": {"sample": {
+        "variants": {"flow_animated": {"clip": {"duration_ms": 1000, "frames": frames}}}}}}))
+    catalog = RenderCatalog()
+    catalog.add_report(tmp_path)
+    entry = catalog.scenes[0]["entries"][1]
+    assert entry["duration_ms"] == 1000
+    assert len(entry["frames"]) == 4
+    assert all(frame["id"] in catalog.assets for frame in entry["frames"])
+    assert entry["frames"][0]["id"] != entry["frames"][-1]["id"]
+
+
 def test_flip_actual_error_map_and_cache(tmp_path):
     pytest.importorskip("flip_evaluator")
     with running_viewer(tmp_path) as (base, catalog):

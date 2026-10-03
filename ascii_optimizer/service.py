@@ -153,7 +153,8 @@ def _validated_request(raw: dict) -> dict:
     names = ("chars", "detail", "grayscale", "frames", "dither", "structure_dither",
              "transition_pace", "transition_field", "transition_spread", "gradient_loss_strength",
              "glyph_luminance_bonus", "glyph_entropy_strength", "style", "invert_ink", "background", "crop", "steps",
-             "transition_steps", "seed", "perceptual_loss", "flow_strength", "flow_eddies", "flow_scale")
+             "transition_steps", "seed", "perceptual_loss", "flow_strength", "flow_eddies", "flow_scale",
+             "flow_animated", "flow_loop_seconds", "flow_fps", "flow_frame_steps", "flow_temporal_strength")
     return dict({name: options[name] for name in names}, glyph_search="all" if options["style"] != "structure" else "structure",
                 output_stage=("adam_terminal" if options["perceptual_loss"] else
                               "postprocessed" if options["style"] == "headroom" else "structure"),
@@ -248,6 +249,17 @@ class RenderQueue:
                 expected.extend(directory / "transitions" / f"{index:04d}-{(index + 1) % count:04d}" /
                                 f"{frame:04d}" / f"{kind}.png" for index in range(count)
                                 for frame in range(frames) for kind in ("glyph", "color", "background"))
+            if settings.get("flow_animated"):
+                if manifest.get("schema_version") != 2:
+                    return None
+                loop_count = settings["flow_loop_seconds"] * settings["flow_fps"]
+                for index in range(count):
+                    info = manifest["loops"][f"{index:04d}"]
+                    if (info["frame_count"] != loop_count or info["path"] != f"loops/{index:04d}"
+                            or info["duration_ms"] != settings["flow_loop_seconds"] * 1000):
+                        return None
+                    expected.extend(directory / info["path"] / f"{frame:04d}" / f"{kind}.png"
+                                    for frame in range(loop_count) for kind in ("glyph", "color", "background"))
             return manifest if all(path.is_file() for path in expected) else None
         except (OSError, ValueError, KeyError, TypeError):
             return None
@@ -418,23 +430,23 @@ class RenderQueue:
         if any(job["state"] == "running" or (job.get("process") is not None
                and job["process"].poll() is None) for job in self.jobs.values()):
             return
-        stills = self.cache / "stills"
-        if self.clear_stills_pending:
-            shutil.rmtree(stills, ignore_errors=True)
-            self.clear_stills_pending = False
-        elif stills.exists():
-            entries = sorted((entry for entry in stills.iterdir() if entry.is_dir()),
-                             key=lambda entry: entry.stat().st_mtime, reverse=True)
-            for entry in entries[self.maximum_cached_renders:]:
-                shutil.rmtree(entry)
-            for entry in entries[:self.maximum_cached_renders]:
-                try:
-                    current = json.loads((entry / "cache.json").read_text())["generation"]
-                except (OSError, ValueError, KeyError, TypeError):
-                    continue
-                for generation in entry.iterdir():
-                    if generation.is_dir() and re.fullmatch(r"[a-f0-9]{32}", generation.name) and generation.name != current:
-                        shutil.rmtree(generation)
+        for stills in (self.cache / "stills", self.cache / "loops"):
+            if self.clear_stills_pending:
+                shutil.rmtree(stills, ignore_errors=True)
+            elif stills.exists():
+                entries = sorted((entry for entry in stills.iterdir() if entry.is_dir()),
+                                 key=lambda entry: entry.stat().st_mtime, reverse=True)
+                for entry in entries[self.maximum_cached_renders:]:
+                    shutil.rmtree(entry)
+                for entry in entries[:self.maximum_cached_renders]:
+                    try:
+                        current = json.loads((entry / "cache.json").read_text())["generation"]
+                    except (OSError, ValueError, KeyError, TypeError):
+                        continue
+                    for generation in entry.iterdir():
+                        if generation.is_dir() and re.fullmatch(r"[a-f0-9]{32}", generation.name) and generation.name != current:
+                            shutil.rmtree(generation)
+        self.clear_stills_pending = False
 
     def _worker(self) -> None:
         while True:
@@ -493,11 +505,12 @@ class RenderQueue:
         for name in ("font", "chars", "detail", "frames", "transition_pace", "transition_field",
                      "transition_spread", "dither", "gradient_loss_strength", "glyph_luminance_bonus", "glyph_entropy_strength",
                      "style", "structure_dither", "background", "crop", "steps", "transition_steps", "seed",
-                     "flow_strength", "flow_eddies", "flow_scale"):
+                     "flow_strength", "flow_eddies", "flow_scale", "flow_loop_seconds", "flow_fps",
+                     "flow_frame_steps", "flow_temporal_strength"):
             command.extend(("--" + name.replace("_", "-"), str(settings[name])))
         if not settings["perceptual_loss"]:
             command.append("--no-perceptual-loss")
-        for name in ("invert_ink", "grayscale"):
+        for name in ("invert_ink", "grayscale", "flow_animated"):
             if settings[name]:
                 command.append("--" + name.replace("_", "-"))
         if job["force"]:

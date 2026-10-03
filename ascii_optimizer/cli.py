@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -222,6 +223,8 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                 flow_eddies: float = DEFAULT_FLOW_EDDIES,
                 flow_scale: float = DEFAULT_FLOW_SCALE,
                 flow_diagnostics: dict | None = None,
+                flow_costs=None,
+                solve_context: dict | None = None,
                 diagnostics=None) -> Grid:
     """Prepare a grid whose displayed pixels follow the chosen ink polarity."""
     if style not in ("headroom", "structure", "flow"):
@@ -257,7 +260,6 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
     original_background, solve_background = _backgrounds(source_lab, background, invert_ink)
 
     if style in ("headroom", "flow"):
-        flow_costs = None
         solve_progress = on_progress
         if style == "flow":
             from .flow import simulate_flow, glyph_flow_costs
@@ -265,7 +267,7 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
             flow_strength = finite_float(flow_strength, "flow_strength", 0, 2)
             flow_eddies = finite_float(flow_eddies, "flow_eddies", 0, 2)
             flow_scale = finite_float(flow_scale, "flow_scale", 1, 24)
-            if flow_strength:
+            if flow_strength and flow_costs is None:
                 field = simulate_flow(target, masks.shape[1:], seed=seed, eddies=flow_eddies,
                                       scale=flow_scale, device=device,
                                       on_progress=(lambda f, stage: on_progress(0.15 * f, stage))
@@ -301,6 +303,7 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                      perceptual_loss=perceptual_loss, perceptual_target_srgb=target,
                      viewing_ppd=viewing_ppd,
                      flow_costs=flow_costs, flow_strength=flow_strength if flow_costs is not None else 0.0,
+                     solve_context=solve_context,
                      **({"diagnostics": diagnostics} if diagnostics is not None else {}),
                      invert_ink=invert_ink)
 
@@ -312,6 +315,84 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                            progress=progress, on_progress=on_progress)
     grid.background = solve_background
     return grid
+
+
+def _render_flow_image(target, masks, args, loop_dir, seed, on_progress):
+    from .flow_playback import render_flow_clip
+    count = args.flow_loop_seconds * args.flow_fps
+    common = dict(style="flow", invert_ink=args.invert_ink, background=args.background,
+                  seed=seed, dither=args.dither, structure_dither=args.structure_dither,
+                  device=args.device, glyph_luminance_bonus=args.glyph_luminance_bonus,
+                  glyph_entropy_strength=args.glyph_entropy_strength,
+                  gradient_loss_strength=args.gradient_loss_strength,
+                  flow_strength=args.flow_strength, flow_eddies=args.flow_eddies,
+                  flow_scale=args.flow_scale, perceptual_loss=True)
+    if not args.flow_strength:
+        grid = solve_style(target, masks, steps=args.steps, **common)
+        grids, diagnostics = [grid] * count, {"method": "static-zero-influence"}
+    else:
+        def solve_frame(costs, steps, context):
+            return solve_style(target, masks, steps=steps, flow_costs=costs,
+                               solve_context=context, **common)
+        source_lab = srgb_to_oklab(target)
+        _, fixed_background = _backgrounds(source_lab, args.background, args.invert_ink)
+        encoded = encode_headroom_lab(source_lab, invert_ink=args.invert_ink)
+        def fit_colors(glyphs, neighbors, context):
+            return fit_fixed_glyphs(encoded, masks, glyphs, background_oklab=fixed_background,
+                input_oklab=True, steps=args.flow_frame_steps, device=args.device,
+                glyph_luminance_bonus=args.glyph_luminance_bonus,
+                gradient_loss_strength=args.gradient_loss_strength, gradient_target_oklab=source_lab,
+                saturation_target_oklab=source_lab, perceptual_target_srgb=target,
+                perceptual_loss=True, invert_ink=args.invert_ink,
+                solve_context=context, temporal_neighbors=neighbors,
+                temporal_strength=args.flow_temporal_strength)
+        grids, diagnostics = render_flow_clip(target, masks, seed=seed, eddies=args.flow_eddies,
+            scale=args.flow_scale, device=args.device, frames=count, steps=args.steps,
+            frame_steps=args.flow_frame_steps, temporal_strength=args.flow_temporal_strength,
+            solve_frame=solve_frame, fit_colors=fit_colors, flow_strength=args.flow_strength,
+            glyph_entropy_strength=args.glyph_entropy_strength, on_progress=on_progress)
+    for frame, grid in enumerate(grids):
+        _save_grid(grid, loop_dir / f"{frame:04d}", False, masks, args.size, args.invert_ink)
+    info = {"frame_count": count, "duration_ms": args.flow_loop_seconds * 1000,
+            "loop": True, "anchor_frame": 0, "closure": diagnostics}
+    _atomic_json(loop_dir / "clip.json", info)
+    return info
+
+
+def _cached_loop(entry, signature, count):
+    try:
+        metadata = json.loads((entry / "cache.json").read_text())
+        if (metadata.get("signature") != signature
+                or not re.fullmatch(r"[a-f0-9]{32}", metadata.get("generation", ""))):
+            return None
+        directory = entry / metadata["generation"]
+        info = json.loads((directory / "clip.json").read_text())
+        if (info["frame_count"] != count or info["duration_ms"] != signature["flow_loop_seconds"] * 1000
+                or info.get("loop") is not True):
+            return None
+        for frame in range(count):
+            grid = _load_grid(directory / f"{frame:04d}")
+            width, height = signature["size"]
+            cw, ch = signature["cell"]
+            if (grid.glyph.shape != (math.ceil(height/ch), math.ceil(width/cw))
+                    or grid.color.shape != (*grid.glyph.shape, 3)
+                    or grid.glyph.max() >= len(signature["chars"])):
+                return None
+        return directory
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def _cache_loop(source, entry, signature):
+    entry.mkdir(parents=True, exist_ok=True)
+    generation = uuid.uuid4().hex
+    temporary = entry / f".{generation}.tmp"
+    try:
+        shutil.copytree(source, temporary)
+        temporary.replace(entry / generation)
+        _atomic_json(entry / "cache.json", {"signature": signature, "generation": generation})
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
 
 
 def _render_transition(index: int, images: list[Path], output: Path,
@@ -415,6 +496,10 @@ def build(args: argparse.Namespace) -> None:
         raise ValueError("Characters must be 1 to 256 distinct glyphs")
     cell = validate_size(args.cell or cell_for_display(args.size, args.detail), max_dimension=255)
     masks = glyph_masks(font, chars, cell)
+    loop_count = args.flow_loop_seconds * args.flow_fps if args.flow_animated else 0
+    cells = math.ceil(args.size[0]/cell[0]) * math.ceil(args.size[1]/cell[1])
+    if loop_count and cells * loop_count * len(args.images) > 40_000_000:
+        raise ValueError("Animated render is too large; reduce detail, loop length, frame rate or image count")
     images = [path.expanduser().resolve() for path in args.images]
     for path in images:
         if not path.is_file():
@@ -426,6 +511,8 @@ def build(args: argparse.Namespace) -> None:
         "size": list(args.size), "cell": list(cell), "detail": args.detail, "chars": effective_chars,
         "style": style, "invert_ink": invert_ink, "structure_dither": structure_dither,
         "flow_strength": args.flow_strength, "flow_eddies": args.flow_eddies, "flow_scale": args.flow_scale,
+        **{name: getattr(args, name) for name in ("flow_animated", "flow_loop_seconds", "flow_fps",
+           "flow_frame_steps", "flow_temporal_strength")},
         "gradient_loss_strength": float(gradient_loss_strength),
         "glyph_luminance_bonus": glyph_luminance_bonus,
         "glyph_entropy_strength": args.glyph_entropy_strength,
@@ -458,9 +545,16 @@ def build(args: argparse.Namespace) -> None:
             expected_pairs = [output / "transitions" / f"{i:04d}-{(i+1)%len(images):04d}" / f"{frame:04d}" / f"{kind}.png"
                               for i in range(len(images)) for frame in range(args.frames)
                               for kind in ("glyph", "color", "background")] if len(images) > 1 else []
+            expected_loops = [output / "loops" / f"{i:04d}" / f"{frame:04d}" / f"{kind}.png"
+                              for i in range(len(images)) for frame in range(loop_count) for kind in MAP_KINDS]
             if (old.get("signature") == signature and (output / "atlas.png").exists()
                     and (output / "metadata.png").exists()
-                    and all(p.exists() for p in expected_stills + expected_pairs)):
+                    and all(p.exists() for p in expected_stills + expected_pairs + expected_loops)
+                    and (not loop_count or (old.get("schema_version") == 2 and all(
+                        old.get("loops", {}).get(f"{i:04d}", {}).get("frame_count") == loop_count
+                        and old["loops"][f"{i:04d}"].get("path") == f"loops/{i:04d}"
+                        and old["loops"][f"{i:04d}"].get("duration_ms") == args.flow_loop_seconds * 1000
+                        and old["loops"][f"{i:04d}"].get("loop") is True for i in range(len(images)))))):
                 print(f"Already rendered: {output}")
                 report(1.0, "Ready")
                 return
@@ -484,6 +578,7 @@ def build(args: argparse.Namespace) -> None:
     # so source-image memory is bounded by worker count, not slideshow length.
     background_labs: dict[str, list[float]] = {}
     grid_shape = None
+    loops = {}
     for index, image in enumerate(images):
         still_dir = output / "stills" / f"{index:04d}"
         still_signature = {key: value for key, value in signature.items()
@@ -492,7 +587,27 @@ def build(args: argparse.Namespace) -> None:
         cache_key = hashlib.sha256(json.dumps(still_signature, sort_keys=True).encode()).hexdigest()
         cache_entry = still_cache / cache_key if still_cache is not None else None
         cached = _cached_still(cache_entry, still_signature) if cache_entry is not None and not args.force else None
-        if (still_settings_match and index < len(old_hashes)
+        if args.flow_animated:
+            loop_dir = output / "loops" / f"{index:04d}"
+            loop_cache = still_cache.parent / "loops" / cache_key if still_cache is not None else None
+            cached_clip = _cached_loop(loop_cache, still_signature, loop_count) if loop_cache and not args.force else None
+            if cached_clip is not None:
+                shutil.rmtree(loop_dir, ignore_errors=True)
+                shutil.copytree(cached_clip, loop_dir)
+                info = json.loads((loop_dir / "clip.json").read_text())
+            else:
+                target = load_target(image, args.size, args.crop, args.grayscale)
+                info = _render_flow_image(target, masks, args, loop_dir, args.seed + index,
+                    lambda fraction, stage: report(fraction, f"Image {index + 1}/{len(images)}: {stage}"))
+                del target
+                if loop_cache is not None:
+                    _cache_loop(loop_dir, loop_cache, still_signature)
+            loops[f"{index:04d}"] = dict(info, path=f"loops/{index:04d}")
+            grid = _save_grid(_load_grid(loop_dir / "0000"), still_dir, True, masks, args.size, invert_ink)
+            _copy_grid(loop_dir / "0000", still_dir)
+            for frame in range(loop_count):
+                background_labs[f"loops/{index:04d}/{frame:04d}"] = grid.background.tolist()
+        elif (still_settings_match and index < len(old_hashes)
                 and old_hashes[index] == signature["image_hashes"][index]
                 and all((still_dir / f"{kind}.png").exists() for kind in STILL_KINDS)):
             print(f"Reusing still {index + 1}/{len(images)}", flush=True)
@@ -598,7 +713,7 @@ def build(args: argparse.Namespace) -> None:
                 if workers > 1:
                     torch.set_num_threads(old_threads)
             completed_units += len(pending_pairs) * (args.frames - 2)
-    _atomic_json(manifest, {"signature": signature, "generation": getattr(args, "generation", None) or uuid.uuid4().hex,
+    _atomic_json(manifest, {"schema_version": 2, "loops": loops, "signature": signature, "generation": getattr(args, "generation", None) or uuid.uuid4().hex,
                             "image_count": len(images), "frame_count": args.frames,
                             "grid": [grid_shape[1], grid_shape[0]], "output_size": list(args.size),
                             "cell_size": list(cell), "atlas_count": len(chars), "invert_ink": invert_ink,
@@ -646,6 +761,11 @@ def make_parser() -> argparse.ArgumentParser:
                         help="Eddy forcing strength, 0–2")
     parser.add_argument("--flow-scale", type=float, default=DEFAULT_FLOW_SCALE,
                         help="Domain size in glyph widths, 1–24")
+    parser.add_argument("--flow-animated", action="store_true", help="Prepare a looping offline flow animation")
+    parser.add_argument("--flow-loop-seconds", type=int, default=defaults["flow_loop_seconds"])
+    parser.add_argument("--flow-fps", type=int, default=defaults["flow_fps"])
+    parser.add_argument("--flow-frame-steps", type=int, default=defaults["flow_frame_steps"], help="Optimization updates per animated frame")
+    parser.add_argument("--flow-temporal-strength", type=float, default=defaults["flow_temporal_strength"], help="Cyclic raster/color coherence weight")
     parser.add_argument("--no-perceptual-loss", dest="perceptual_loss", action="store_false",
                         help="Disable the default perceptual objective for headroom rendering")
     parser.set_defaults(perceptual_loss=None)

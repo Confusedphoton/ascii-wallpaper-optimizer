@@ -24,6 +24,46 @@ TestCase {
         }
     }
 
+    Component {
+        id: automaticLoopComponent
+        Item {
+            id: playback
+            width: 16; height: 8
+            property var presented: []
+            property alias player: controller
+            property alias shader: output
+            PlaybackController {
+                id: controller
+                ready: output.ready && output.displayGeneration === generation
+                loading: output.loading
+                imageCount: 1
+                generation: "automatic-loop"
+                manifest: Object.assign({}, TestConfig.manifest, {schema_version: 2,
+                    loops: {"0000": {path: "loops/0000", frame_count: 4, duration_ms: 240}}})
+            }
+            AsciiShader {
+                id: output
+                anchors.fill: parent
+                renderDirectory: TestConfig.fixtureRoot
+                generation: controller.generation
+                manifest: controller.manifest
+                loopFrame: controller.loopFrame
+                onFramePresented: playback.presented.push(cachedDescriptor.path)
+            }
+        }
+    }
+
+    function test_automatic_loop_presents_each_complete_frame_at_the_wrap() {
+        const playback = createTemporaryObject(automaticLoopComponent, tests)
+        tryVerify(function() { return playback.presented.length >= 9 }, 3000)
+        compare(playback.presented.slice(0, 9), ["loops/0000/0000", "loops/0000/0001", "loops/0000/0002",
+            "loops/0000/0003", "loops/0000/0000", "loops/0000/0001", "loops/0000/0002",
+            "loops/0000/0003", "loops/0000/0000"])
+        playback.player.enabled = false
+        tryCompare(playback.shader, "loading", false, 1000)
+        checkPixels(playback.shader, "loops/0000/0000", 1)
+    }
+
     function initTestCase() {
         if (GraphicsInfo.api === GraphicsInfo.Software)
             skip("The Qt Quick RHI backend is unavailable")
@@ -78,6 +118,27 @@ TestCase {
         checkPixels(item, "transitions/0000-0001/0001", 1)
         wait(200)
         compare(rendered.count, 1)
+    }
+
+    function test_loop_maps_wrap_with_exact_serialized_pixels_and_one_capture_per_frame() {
+        const item = shader()
+        const rendered = createTemporaryObject(spyComponent, tests, {target: findChild(item, "composedFrame")})
+        item.manifest = Object.assign({}, TestConfig.manifest, {schema_version: 2,
+            loops: {"0000": {path: "loops/0000", frame_count: 4, duration_ms: 400}}})
+        item.loopFrame = 0
+        tryVerify(function() { return item.displayedKey.indexOf("loops/0000/0000") >= 0 }, 2000)
+        tryCompare(item, "loading", false, 2000)
+        rendered.clear()
+        for (const frame of [1, 2, 3, 0, 1, 2, 3, 0]) {
+            item.loopFrame = frame
+            const path = "loops/0000/" + String(frame).padStart(4, "0")
+            tryVerify(function() { return item.displayedKey.indexOf(path) >= 0 }, 2000)
+            tryCompare(item, "loading", false, 2000)
+            checkPixels(item, path, 1)
+        }
+        compare(rendered.count, 8)
+        wait(100)
+        compare(rendered.count, 8)
     }
 
     function test_saved_state_renders_correct_pixels_without_a_service() {

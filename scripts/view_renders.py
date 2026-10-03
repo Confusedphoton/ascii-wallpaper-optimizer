@@ -26,6 +26,11 @@ from PIL import Image
 
 UI = Path(__file__).with_name("render_viewer")
 LABELS = {
+    "flow_static": "Flow · static baseline",
+    "flow_animated": "Flow · animated",
+    "flow_animated_smooth": "Flow · stronger temporal fitting",
+    "flow_animated_stable": "Flow · maximum temporal fitting",
+    "flow_animated_strong": "Flow · animated strong eddies",
     "perceptual_standard": "Perceptual · standard glyph bank",
     "perceptual_wide": "Perceptual · 96 glyphs",
     "flow_calm": "Flow domains · calm",
@@ -90,7 +95,13 @@ class RenderCatalog:
                     else f"{variant}/final.png"
                 )
                 if filename.exists():
-                    entries.append(self.entry(filename, label))
+                    entry = self.entry(filename, label)
+                    clip = data["variants"][variant].get("clip")
+                    if clip:
+                        entry["frames"] = [self.entry(directory / variant / frame, f"{label} / frame {index}")
+                                           for index, frame in enumerate(clip["frames"])]
+                        entry["duration_ms"] = clip["duration_ms"]
+                    entries.append(entry)
                 for stage, title in STAGES.items():
                     filename = directory / variant / f"{stage}.png"
                     if filename.exists():

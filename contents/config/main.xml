@@ -98,6 +98,9 @@
     <entry name="FlowStrength" type="Double"><default>0.4</default><min>0</min><max>2</max></entry>
     <entry name="FlowEddies" type="Double"><default>0.65</default><min>0</min><max>2</max></entry>
     <entry name="FlowScale" type="Double"><default>6.0</default><min>1</min><max>24</max></entry>
+    <entry name="FlowAnimated" type="Bool"><default>false</default></entry>
+    <entry name="FlowLoopSeconds" type="Int"><default>10</default><min>1</min><max>30</max></entry>
+    <entry name="FlowFps" type="Int"><default>12</default><min>4</min><max>24</max></entry>
     <entry name="BackgroundMode" type="Int">
         <default>0</default>
         <min>0</min>
@@ -129,6 +132,9 @@
     <entry name="FlowStrengthB" type="Double"><default>0.4</default><min>0</min><max>2</max></entry>
     <entry name="FlowEddiesB" type="Double"><default>0.65</default><min>0</min><max>2</max></entry>
     <entry name="FlowScaleB" type="Double"><default>6.0</default><min>1</min><max>24</max></entry>
+    <entry name="FlowAnimatedB" type="Bool"><default>false</default></entry>
+    <entry name="FlowLoopSecondsB" type="Int"><default>10</default><min>1</min><max>30</max></entry>
+    <entry name="FlowFpsB" type="Int"><default>12</default><min>4</min><max>24</max></entry>
     <entry name="BackgroundModeB" type="Int"><default>0</default><min>0</min><max>1</max></entry>
     <entry name="BackgroundColorB" type="String"><default>#202028</default></entry>
   </group>

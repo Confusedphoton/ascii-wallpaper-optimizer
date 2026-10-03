@@ -19,9 +19,11 @@ Item {
         || atlasImage.status === Image.Error || (!hasMetadata && metadataImage.status === Image.Error)
         || backgroundMap.status === Image.Error
     signal completed()
+    signal loadFailed(string key)
 
     function load(value) {
-        if (!value || value.key === frameKey) return
+        if (!value) return
+        if (value.key === frameKey) { Qt.callLater(reportReady); return }
         loadingSources = true
         descriptor = value
         const base = value.url + "/"
@@ -37,8 +39,10 @@ Item {
 
     function reportReady() {
         if (!loadingSources && ready) completed()
+        else if (!loadingSources && failed) loadFailed(frameKey)
     }
     onReadyChanged: reportReady()
+    onFailedChanged: reportReady()
 
     Image { id: glyphMap; visible: false; smooth: false; cache: true; asynchronous: true }
     Image { id: colorMap; visible: false; smooth: false; cache: true; asynchronous: true }

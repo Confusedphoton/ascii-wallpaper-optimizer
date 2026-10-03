@@ -10,6 +10,7 @@ Item {
     property int slideInterval: 10000
     property int transitionDuration: 1500
     property int frameCount: 16
+    property bool automaticAdvance: true
     property string generation: ""
     property int currentIndex: 0
     property int nextIndex: 0
@@ -90,7 +91,7 @@ Item {
         id: slideTimer
         interval: Math.max(1, player.slideInterval)
         repeat: true
-        running: player.enabled && player.ready && !player.loading && !player.resetting
+        running: player.enabled && player.automaticAdvance && player.ready && !player.loading && !player.resetting
             && player.imageCount > 1 && player.currentIndex === player.nextIndex
         onTriggered: player.advance()
     }

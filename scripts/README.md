@@ -369,3 +369,27 @@ the fixed linear-RGB reference range and effective coefficients, including the
 production does not inspect glyph names, semantic regions, or image identities.
 
 Normal production headroom renders now return the raw Adam terminal. Use `compare_objective.py --postprocess` or the Python `postprocess=True` option to inspect optional dither and color polish. Existing comparison images retain their original meaning; changing the output stage invalidates render caches through the source revision.
+
+## Animated flow review
+
+`compare_flow_playback.py` prepares real production flow clips, reconstructs
+previews from their serialized maps, and compares static flow, animation, and
+stronger eddies on the four standard sources. It records ordinary and seam
+pixel/lightness steps, temporal acceleration, glyph changes, field closure,
+sampled official FLIP scores, runtime, and source/font/code provenance.
+
+```sh
+.venv/bin/python -m ascii_optimizer.launcher scripts/compare_flow_playback.py \
+  --device cuda --width 768 --seconds 10 --fps 12
+.venv/bin/python scripts/view_renders.py --report rendered/flow_playback/review
+```
+
+Use `--images tree` or `--variants flow_animated` for a smaller pilot, with a
+separate `--output` directory to retain the complete review report. `--progress`
+prints the production render stages; `--force` rebuilds matching outputs.
+
+In the viewer, P plays/pauses, the slider selects a frame, and **Inspect loop
+seam** repeats the last and first eight frames. Inspect the internal last/first
+join; the inspection window itself has an artificial restart. FLIP pauses
+playback and compares the selected frames. See [the implementation guide](../docs/flow-playback.md)
+for the temporal overlap boundary and its physical limitations.

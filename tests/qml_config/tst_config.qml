@@ -33,6 +33,28 @@ TestCase {
         return properties
     }
 
+    function test_flow_animation_options_persist_across_profiles() {
+        const item = page({cfg_ProfileSettingsInitialized: true})
+        item.editProfile = 0
+        item.setProfileSetting("RenderStyle", "flow")
+        item.setProfileSetting("FlowAnimated", true)
+        item.setProfileSetting("FlowLoopSeconds", 6)
+        item.setProfileSetting("FlowFps", 16)
+        item.editProfile = 1
+        compare(item.activeSettings.FlowAnimated, false)
+        item.saveConfig()
+        const saved = snapshot(item)
+        item.destroy()
+        const reopened = page(saved)
+        reopened.editProfile = 0
+        compare(reopened.activeSettings.FlowAnimated, true)
+        compare(reopened.activeSettings.FlowLoopSeconds, 6)
+        compare(reopened.activeSettings.FlowFps, 16)
+        verify(findChild(reopened, "flowAnimatedCheck").visible)
+        reopened.editProfile = 1
+        compare(reopened.activeSettings.FlowAnimated, false)
+    }
+
     function test_saved_sources_survive_profile_switch_apply_and_reopen() {
         const a = ["/pictures/A%20literal.png", "/pictures/A,2.png"]
         const b = ["/pictures/日本語.png", "/pictures/B%2F.png"]
