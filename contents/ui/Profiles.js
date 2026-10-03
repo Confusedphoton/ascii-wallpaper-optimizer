@@ -3,12 +3,14 @@
 
 const standardChars = " .´:rszunvcxLOGDQ0KNMW&#\\/=^|[]{}"
 const structureChars = " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&#[]{}"
+const flowChars = Array.from({length: 95}, (_, i) => String.fromCharCode(32 + i)).join("") + "´"
 const defaults = {
     Mode: "Image", Images: [], FontFamily: "Monospace", AsciiChars: Array.from(standardChars),
     Detail: 1, Grayscale: false, SlideInterval: 10, TransitionFrames: 16,
     TransitionDuration: 1500, TransitionPace: "ease-in-out", TransitionField: "blue-noise",
     TransitionSpread: 0.65, Dither: 0.005, GradientLossStrength: 1.5,
     GlyphLuminanceBonus: 0.12, GlyphEntropyStrength: 0.01, StructureDither: 0.06,
+    FlowStrength: 0.4, FlowEddies: 0.65, FlowScale: 6.0,
     InvertInk: false, BackgroundMode: 0, BackgroundColor: "#202028",
     RenderStyle: "headroom", RenderDirectory: "", RenderedState: ""
 }
@@ -16,6 +18,8 @@ const defaults = {
 function normalizedSettings(settings) {
     const result = Object.assign({}, defaults, settings)
     if (result.RenderStyle === "headroom" && result.PerceptualLoss === false) result.RenderStyle = "classic"
+    if (result.RenderStyle === "flow" && settings.GlyphEntropyStrength === undefined)
+        result.GlyphEntropyStrength = 0.02
     delete result.PerceptualLoss
     result.Images = Array.from(result.Images || [])
     let chars = Array.from(result.AsciiChars || defaults.AsciiChars)
@@ -27,10 +31,9 @@ function normalizedSettings(settings) {
         " .´:-_/|+rszunvcxLOGDQ0KNMW&@[]{}"
     ]
     const current = chars.join("")
-    if (previousDefaults.includes(current)
-            || (result.RenderStyle === "structure" && current === standardChars)
-            || (result.RenderStyle !== "structure" && current === structureChars))
-        chars = Array.from(result.RenderStyle === "structure" ? structureChars : standardChars)
+    if (previousDefaults.includes(current) || [standardChars, structureChars, flowChars].includes(current))
+        chars = Array.from(result.RenderStyle === "flow" ? flowChars
+                          : result.RenderStyle === "structure" ? structureChars : standardChars)
     result.AsciiChars = chars
     return result
 }

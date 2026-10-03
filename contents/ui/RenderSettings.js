@@ -23,11 +23,14 @@ function request(images, settings) {
         transition_spread: setting("transitionSpread", "TransitionSpread", 0.65),
         dither: headroom ? setting("dither", "Dither", 0.005) : 0,
         glyph_luminance_bonus: headroom ? setting("glyphLuminanceBonus", "GlyphLuminanceBonus", 0.12) : 0,
-        glyph_entropy_strength: headroom ? setting("glyphEntropyStrength", "GlyphEntropyStrength", 0.01) : 0,
+        glyph_entropy_strength: headroom ? setting("glyphEntropyStrength", "GlyphEntropyStrength", style === "flow" ? 0.02 : 0.01) : 0,
         gradient_loss_strength: headroom ? setting("gradientLossStrength", "GradientLossStrength", 1.5) : 0,
         structure_dither: style === "structure" ? setting("structureDither", "StructureDither", 0.06) : 0.06,
-        style: headroom ? "headroom" : "structure",
-        perceptual_loss: style === "headroom",
+        flow_strength: setting("flowStrength", "FlowStrength", 0.4),
+        flow_eddies: setting("flowEddies", "FlowEddies", 0.65),
+        flow_scale: setting("flowScale", "FlowScale", 6.0),
+        style: style === "flow" ? "flow" : headroom ? "headroom" : "structure",
+        perceptual_loss: style === "headroom" || style === "flow",
         invert_ink: !!setting("invertInk", "InvertInk", false),
         background: setting("backgroundMode", "BackgroundMode", 0) === 1
             ? setting("backgroundColor", "BackgroundColor", "#202028") : "auto"

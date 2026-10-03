@@ -187,15 +187,39 @@ TestCase {
         item.editProfile = 0
         compare(item.activeSettings.RenderStyle, "classic")
         const headroom = ["gradientLossSlider", "glyphLuminanceBonusSlider", "glyphEntropySlider"]
-        for (const style of ["classic", "headroom", "structure"]) {
+        for (const style of ["classic", "headroom", "structure", "flow"]) {
             item.setProfileSetting("RenderStyle", style)
             for (const name of headroom) compare(findChild(item, name).visible, style !== "structure")
             compare(findChild(item, "ditherSlider").visible, style === "classic")
             compare(findChild(item, "structureDitherSlider").visible, style === "structure")
+            for (const name of ["flowStrengthSlider", "flowEddiesSlider", "flowScaleSlider"])
+                compare(findChild(item, name).visible, style === "flow")
             const request = findChild(item, "renderClient").requestSettings
-            compare(request.perceptual_loss, style === "headroom")
+            compare(request.perceptual_loss, style === "headroom" || style === "flow")
         }
-        compare(findChild(item, "renderStyleCombo").count, 3)
+        compare(findChild(item, "renderStyleCombo").count, 4)
+    }
+
+    function test_flow_bank_controls_and_custom_characters_persist() {
+        const item = page({cfg_RenderStyle: "flow"})
+        item.editProfile = 0
+        item.setProfileSetting("RenderStyle", "flow")
+        compare(item.activeSettings.AsciiChars.length, 96)
+        item.setProfileSetting("FlowStrength", 0.4)
+        item.setProfileSetting("FlowEddies", 1.2)
+        item.setProfileSetting("FlowScale", 4)
+        item.saveConfig()
+        const restored = page(snapshot(item))
+        restored.editProfile = 0
+        compare(restored.activeSettings.RenderStyle, "flow")
+        compare(restored.activeSettings.AsciiChars.length, 96)
+        compare(restored.activeSettings.FlowStrength, 0.4)
+        compare(restored.activeSettings.FlowEddies, 1.2)
+        compare(restored.activeSettings.FlowScale, 4)
+        restored.setCharacters(" .G@")
+        restored.setProfileSetting("RenderStyle", "headroom")
+        restored.applyStyleCharacters("headroom")
+        compare(restored.activeSettings.AsciiChars.join(""), " .G@")
     }
 
     function test_cache_limit_and_clear_are_connected() {

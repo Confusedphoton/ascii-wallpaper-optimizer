@@ -7,6 +7,13 @@ DEFAULT_USE_SHORTLIST = False
 DEFAULT_GLYPH_ENTROPY_STRENGTH = 0.01
 MAX_GLYPH_ENTROPY_STRENGTH = 0.1
 STRUCTURE_CHARS = " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&#[]{}"
+# Printable ASCII offers thin strokes, bends, junctions, loops and fine texture.
+# Keep the accent used by the other styles; every glyph remains a candidate.
+FLOW_CHARS = "".join(chr(code) for code in range(32, 127)) + "´"
+DEFAULT_FLOW_STRENGTH = 0.4
+DEFAULT_FLOW_GLYPH_ENTROPY_STRENGTH = 0.02
+DEFAULT_FLOW_EDDIES = 0.65
+DEFAULT_FLOW_SCALE = 6.0
 DEFAULT_GRADIENT_LOSS_STRENGTH = 1.5
 DEFAULT_GLYPH_LUMINANCE_BONUS = 0.12
 MAX_GLYPH_LUMINANCE_BONUS = 0.5

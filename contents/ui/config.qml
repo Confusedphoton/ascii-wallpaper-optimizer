@@ -80,6 +80,7 @@ Item {
     readonly property string legacyOlderStandardChars: " .´:rszunvcxLOGDQ0KNMW&@"
     readonly property string legacyOlderStandardWithBasicSymbolsChars: " .´:rszunvcxLOGDQ0KNMW&@\\=^"
     readonly property string structureChars: " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&#[]{}"
+    readonly property string flowChars: Profiles.flowChars
     readonly property string previousStructureChars: " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&@[]{}"
     readonly property string legacyStructureChars: " .´:-_/|+rszunvcxLOGDQ0KNMW&@[]{}"
     property list<string> cfg_AsciiChars: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "#", "\\", "/", "=", "^", "|", "[", "]", "{", "}"]
@@ -98,16 +99,12 @@ Item {
 
     function applyStyleCharacters(style) {
         const current = Array.from(activeSettings.AsciiChars || []).join("")
-        if (style === "structure" && (current === standardChars || current === previousStandardWithAtChars || current === previousStandardChars
-                || current === legacyStandardChars || current === legacyOlderStandardChars
-                || current === legacyOlderStandardWithBasicSymbolsChars
-                || current === structureChars || current === previousStructureChars || current === legacyStructureChars))
-            setProfileSetting("AsciiChars", Array.from(structureChars))
-        else if (style !== "structure" && (current === previousStandardWithAtChars || current === previousStandardChars || current === legacyStandardChars
-                || current === legacyOlderStandardChars || current === legacyOlderStandardWithBasicSymbolsChars
-                || current === structureChars
-                || current === previousStructureChars || current === legacyStructureChars))
-            setProfileSetting("AsciiChars", Array.from(standardChars))
+        const defaults = [standardChars, structureChars, flowChars, previousStandardWithAtChars,
+            previousStandardChars, legacyStandardChars, legacyOlderStandardChars,
+            legacyOlderStandardWithBasicSymbolsChars, previousStructureChars, legacyStructureChars]
+        if (defaults.includes(current))
+            setProfileSetting("AsciiChars", Array.from(style === "flow" ? flowChars
+                : style === "structure" ? structureChars : standardChars))
     }
 
     property int cfg_Detail: 1
@@ -120,6 +117,9 @@ Item {
     property real cfg_GlyphLuminanceBonus: 0.12
     property real cfg_GlyphEntropyStrength: 0.01
     property real cfg_StructureDither: 0.06
+    property real cfg_FlowStrength: 0.4
+    property real cfg_FlowEddies: 0.65
+    property real cfg_FlowScale: 6.0
     property bool cfg_InvertInk: false
     property list<string> cfg_AsciiCharsB: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "#", "\\", "/", "=", "^", "|", "[", "]", "{", "}"]
     property bool cfg_GrayscaleB: false
@@ -129,6 +129,9 @@ Item {
     property real cfg_GlyphLuminanceBonusB: 0.12
     property real cfg_GlyphEntropyStrengthB: 0.01
     property real cfg_StructureDitherB: 0.06
+    property real cfg_FlowStrengthB: 0.4
+    property real cfg_FlowEddiesB: 0.65
+    property real cfg_FlowScaleB: 6.0
     property bool cfg_InvertInkB: false
     property var activeSettings: Profiles.normalizedSettings({})
     property string glyphEditorMessage: ""
@@ -223,7 +226,8 @@ Item {
     }
 
     function restoreCharacterDefaults() {
-        const chars = activeSettings.RenderStyle === "structure" ? structureChars : standardChars
+        const chars = activeSettings.RenderStyle === "flow" ? flowChars
+            : activeSettings.RenderStyle === "structure" ? structureChars : standardChars
         setProfileSetting("AsciiChars", Array.from(chars))
         glyphEditorMessage = ""
     }
@@ -955,11 +959,13 @@ Item {
                 objectName: "renderStyleCombo"
                 Kirigami.FormData.label: "Render Style:"
                 Layout.fillWidth: true
-                model: ["Perceptual headroom", "Classic headroom", "Structure first"]
-                currentIndex: ["headroom", "classic", "structure"].indexOf(root.activeSettings.RenderStyle)
+                model: ["Perceptual headroom", "Classic headroom", "Structure first", "Flow domains"]
+                currentIndex: ["headroom", "classic", "structure", "flow"].indexOf(root.activeSettings.RenderStyle)
                 onActivated: index => {
-                    const style = ["headroom", "classic", "structure"][index]
+                    const style = ["headroom", "classic", "structure", "flow"][index]
                     root.setProfileSetting("RenderStyle", style)
+                    if (style === "flow" && root.activeSettings.GlyphEntropyStrength === 0.01)
+                        root.setProfileSetting("GlyphEntropyStrength", 0.02)
                     root.applyStyleCharacters(style)
                 }
             }
@@ -1146,7 +1152,8 @@ Item {
                     stepSize: 0.001
                     value: root.activeSettings.GlyphEntropyStrength
                     onMoved: root.setProfileSetting("GlyphEntropyStrength", value)
-                    Controls.ToolTip.text: "Higher values reduce repeated glyphs. Zero disables this; the default is 0.010."
+                    Controls.ToolTip.text: "Higher values reduce repeated glyphs. Zero disables this; the default is "
+                        + (root.activeSettings.RenderStyle === "flow" ? "0.020." : "0.010.")
                     Controls.ToolTip.visible: hovered
                 }
                 Controls.Label {
@@ -1172,6 +1179,61 @@ Item {
                 Controls.Label {
                     Layout.preferredWidth: Kirigami.Units.gridUnit * 10
                     text: structureDitherSlider.value.toFixed(3)
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Flow Influence:"
+                visible: root.activeSettings.RenderStyle === "flow"
+                Controls.Slider {
+                    id: flowStrengthSlider
+                    objectName: "flowStrengthSlider"
+                    Layout.fillWidth: true
+                    from: 0; to: 2; stepSize: 0.05
+                    value: root.activeSettings.FlowStrength
+                    onMoved: root.setProfileSetting("FlowStrength", value)
+                    Controls.ToolTip.text: "How strongly glyph shapes follow the simulated flow."
+                    Controls.ToolTip.visible: hovered
+                }
+                Controls.Label {
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 10
+                    text: flowStrengthSlider.value.toFixed(2)
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Eddy Strength:"
+                visible: root.activeSettings.RenderStyle === "flow"
+                Controls.Slider {
+                    id: flowEddiesSlider
+                    objectName: "flowEddiesSlider"
+                    Layout.fillWidth: true
+                    from: 0; to: 2; stepSize: 0.05
+                    value: root.activeSettings.FlowEddies
+                    onMoved: root.setProfileSetting("FlowEddies", value)
+                }
+                Controls.Label {
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 10
+                    text: flowEddiesSlider.value.toFixed(2)
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Domain Size:"
+                visible: root.activeSettings.RenderStyle === "flow"
+                Controls.Slider {
+                    id: flowScaleSlider
+                    objectName: "flowScaleSlider"
+                    Layout.fillWidth: true
+                    from: 1; to: 24; stepSize: 0.5
+                    value: root.activeSettings.FlowScale
+                    onMoved: root.setProfileSetting("FlowScale", value)
+                    Controls.ToolTip.text: "Spatial scale of streams and eddies, in character widths."
+                    Controls.ToolTip.visible: hovered
+                }
+                Controls.Label {
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 10
+                    text: flowScaleSlider.value.toFixed(1)
                 }
             }
 

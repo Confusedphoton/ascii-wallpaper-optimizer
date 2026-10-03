@@ -5,6 +5,16 @@ import TestSupport 1.0
 import "../../contents/ui/RenderSettings.js" as RenderSettings
 
 TestCase {
+    function test_flow_request_preserves_style_controls_and_variety() {
+        const request = RenderSettings.request([], {RenderStyle: "flow", FlowStrength: 0.8,
+            FlowEddies: 1.2, FlowScale: 4, GlyphEntropyStrength: 0.03})
+        compare(request.style, "flow")
+        compare(request.perceptual_loss, true)
+        compare(request.flow_strength, 0.8)
+        compare(request.flow_eddies, 1.2)
+        compare(request.flow_scale, 4)
+        compare(request.glyph_entropy_strength, 0.03)
+    }
     name: "RenderSettings"
 
     function test_defaults_match_service_and_cli() {

@@ -153,8 +153,8 @@ def _validated_request(raw: dict) -> dict:
     names = ("chars", "detail", "grayscale", "frames", "dither", "structure_dither",
              "transition_pace", "transition_field", "transition_spread", "gradient_loss_strength",
              "glyph_luminance_bonus", "glyph_entropy_strength", "style", "invert_ink", "background", "crop", "steps",
-             "transition_steps", "seed", "perceptual_loss")
-    return dict({name: options[name] for name in names}, glyph_search="all" if options["style"] == "headroom" else "structure",
+             "transition_steps", "seed", "perceptual_loss", "flow_strength", "flow_eddies", "flow_scale")
+    return dict({name: options[name] for name in names}, glyph_search="all" if options["style"] != "structure" else "structure",
                 output_stage=("adam_terminal" if options["perceptual_loss"] else
                               "postprocessed" if options["style"] == "headroom" else "structure"),
                 perceptual_weights=PERCEPTUAL_WEIGHTS if options["perceptual_loss"] else {},
@@ -492,7 +492,8 @@ class RenderQueue:
                    "--size", f"{settings['size'][0]}x{settings['size'][1]}", "--progress-json"]
         for name in ("font", "chars", "detail", "frames", "transition_pace", "transition_field",
                      "transition_spread", "dither", "gradient_loss_strength", "glyph_luminance_bonus", "glyph_entropy_strength",
-                     "style", "structure_dither", "background", "crop", "steps", "transition_steps", "seed"):
+                     "style", "structure_dither", "background", "crop", "steps", "transition_steps", "seed",
+                     "flow_strength", "flow_eddies", "flow_scale"):
             command.extend(("--" + name.replace("_", "-"), str(settings[name])))
         if not settings["perceptual_loss"]:
             command.append("--no-perceptual-loss")

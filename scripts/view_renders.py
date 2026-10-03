@@ -26,6 +26,12 @@ from PIL import Image
 
 UI = Path(__file__).with_name("render_viewer")
 LABELS = {
+    "perceptual_standard": "Perceptual · standard glyph bank",
+    "perceptual_wide": "Perceptual · 96 glyphs",
+    "flow_calm": "Flow domains · calm",
+    "flow_default": "Flow domains · balanced",
+    "flow_eddies": "Flow domains · stronger eddies",
+    "flow_fine": "Flow domains · finer domains",
     "installed": "Installed render",
     "baseline": "Current baseline",
     "brightness_2": "Spatial brightness",
@@ -94,7 +100,7 @@ class RenderCatalog:
             self.scenes.append(
                 {
                     "id": name,
-                    "label": "Vivian" if name == "viviana" else name.title(),
+                    "label": data.get("label", "Vivian" if name == "viviana" else name.title()),
                     "ppd": data.get("ppd", 67),
                     "entries": entries,
                 }

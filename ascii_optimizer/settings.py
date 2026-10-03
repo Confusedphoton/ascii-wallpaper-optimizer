@@ -6,7 +6,9 @@ import math
 import re
 from collections.abc import Mapping
 
-from .defaults import (DEFAULT_CHARS, STRUCTURE_CHARS, DEFAULT_PERCEPTUAL_LOSS, DEFAULT_GLYPH_LUMINANCE_BONUS,
+from .defaults import (DEFAULT_CHARS, STRUCTURE_CHARS, FLOW_CHARS, DEFAULT_FLOW_STRENGTH,
+                       DEFAULT_FLOW_GLYPH_ENTROPY_STRENGTH,
+                       DEFAULT_FLOW_EDDIES, DEFAULT_FLOW_SCALE, DEFAULT_PERCEPTUAL_LOSS, DEFAULT_GLYPH_LUMINANCE_BONUS,
                        DEFAULT_GRADIENT_LOSS_STRENGTH, MAX_GLYPH_LUMINANCE_BONUS,
                        DEFAULT_GLYPH_ENTROPY_STRENGTH, MAX_GLYPH_ENTROPY_STRENGTH)
 
@@ -51,16 +53,18 @@ def normalize_options(raw: Mapping) -> dict:
     # rendering, and must not create separate cache variants.
     options.pop("candidates", None)
     style = options.setdefault("style", "headroom")
-    if style not in ("headroom", "structure"):
+    if style not in ("headroom", "structure", "flow"):
         raise ValueError("Unknown render style")
     perceptual_loss = options.get("perceptual_loss")
     if perceptual_loss is None:
-        perceptual_loss = DEFAULT_PERCEPTUAL_LOSS if style == "headroom" else False
+        perceptual_loss = DEFAULT_PERCEPTUAL_LOSS if style != "structure" else False
         options["perceptual_loss"] = perceptual_loss
     if not isinstance(perceptual_loss, bool):
         raise ValueError("perceptual_loss must be a boolean")
     if style == "structure" and perceptual_loss:
         raise ValueError("perceptual_loss is only available for headroom rendering")
+    if style == "flow" and not perceptual_loss:
+        raise ValueError("Flow rendering requires perceptual color fitting")
     options.setdefault("font", "Monospace")
     if not isinstance(options["font"], str) or not options["font"].strip():
         raise ValueError("font must be a nonempty family or path")
@@ -71,7 +75,8 @@ def normalize_options(raw: Mapping) -> dict:
         chars = " " + chars[2:]
     if not 1 <= len(chars) <= 256 or len(set(chars)) != len(chars):
         raise ValueError("Characters must be 1 to 256 distinct glyphs")
-    options["chars"] = STRUCTURE_CHARS if style == "structure" and chars == DEFAULT_CHARS else chars
+    options["chars"] = ({"structure": STRUCTURE_CHARS, "flow": FLOW_CHARS}.get(style, chars)
+                        if chars == DEFAULT_CHARS else chars)
     for name, default in (("invert_ink", False), ("grayscale", False)):
         value = options.setdefault(name, default)
         if not isinstance(value, bool):
@@ -85,14 +90,25 @@ def normalize_options(raw: Mapping) -> dict:
     for name, default, high in (
         ("dither", 0.005, 0.05), ("structure_dither", 0.06, 0.12),
         ("transition_spread", 0.65, 0.9),
-        ("gradient_loss_strength", DEFAULT_GRADIENT_LOSS_STRENGTH if style == "headroom" else 0.0, 4.0),
-        ("glyph_luminance_bonus", DEFAULT_GLYPH_LUMINANCE_BONUS if style == "headroom" else 0.0,
+        ("gradient_loss_strength", DEFAULT_GRADIENT_LOSS_STRENGTH if style != "structure" else 0.0, 4.0),
+        ("glyph_luminance_bonus", DEFAULT_GLYPH_LUMINANCE_BONUS if style != "structure" else 0.0,
          MAX_GLYPH_LUMINANCE_BONUS),
-        ("glyph_entropy_strength", DEFAULT_GLYPH_ENTROPY_STRENGTH if style == "headroom" else 0.0,
+        ("glyph_entropy_strength", DEFAULT_FLOW_GLYPH_ENTROPY_STRENGTH if style == "flow" else
+         DEFAULT_GLYPH_ENTROPY_STRENGTH if style == "headroom" else 0.0,
          MAX_GLYPH_ENTROPY_STRENGTH),
     ):
         value = options.get(name)
         options[name] = finite_float(default if value is None else value, name, 0, high)
+    for name, default, low, high in (
+        ("flow_strength", DEFAULT_FLOW_STRENGTH, 0, 2),
+        ("flow_eddies", DEFAULT_FLOW_EDDIES, 0, 2),
+        ("flow_scale", DEFAULT_FLOW_SCALE, 1, 24),
+    ):
+        value = options.get(name)
+        options[name] = finite_float(default if value is None else value, name, low, high)
+        if style != "flow":
+            # Inactive settings must not create redundant cache variants.
+            options[name] = default
     if style == "structure" and (options["gradient_loss_strength"] or options["glyph_luminance_bonus"]):
         raise ValueError("Gradient loss and glyph luminance bonus are only available for headroom rendering")
     if style == "structure" and options["glyph_entropy_strength"]:

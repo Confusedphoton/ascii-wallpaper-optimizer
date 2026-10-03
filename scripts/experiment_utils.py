@@ -23,6 +23,7 @@ from ascii_optimizer import __version__
 from ascii_optimizer.assets import glyph_masks, load_target, resolve_font, srgb_to_linear
 from ascii_optimizer.cli import solve_style as _solve_style
 from ascii_optimizer.defaults import (DEFAULT_CHARS, DEFAULT_GLYPH_LUMINANCE_BONUS,
+                                      DEFAULT_FLOW_GLYPH_ENTROPY_STRENGTH,
                                       DEFAULT_GRADIENT_LOSS_STRENGTH, DEFAULT_GLYPH_ENTROPY_STRENGTH)
 from ascii_optimizer.optimizer import Grid, _sobel_gradients, render_grid
 from ascii_optimizer.tone import (display_tone_lab, headroom_curve, oklab_to_rgb,
@@ -215,8 +216,8 @@ def reset_runs() -> None:
 def solve_style(target: np.ndarray, masks: np.ndarray, **kwargs) -> Grid:
     """Measure a solve using production style defaults unless explicitly overridden."""
     style = kwargs.get("style", "headroom")
-    kwargs.setdefault("glyph_luminance_bonus", DEFAULT_GLYPH_LUMINANCE_BONUS if style == "headroom" else 0.0)
-    kwargs.setdefault("gradient_loss_strength", DEFAULT_GRADIENT_LOSS_STRENGTH if style == "headroom" else 0.0)
+    kwargs.setdefault("glyph_luminance_bonus", DEFAULT_GLYPH_LUMINANCE_BONUS if style != "structure" else 0.0)
+    kwargs.setdefault("gradient_loss_strength", DEFAULT_GRADIENT_LOSS_STRENGTH if style != "structure" else 0.0)
     arguments = inspect.signature(_solve_style).bind(target, masks, **kwargs)
     arguments.apply_defaults()
     device = kwargs.get("device", "cpu")
@@ -232,9 +233,10 @@ def solve_style(target: np.ndarray, masks: np.ndarray, **kwargs) -> Grid:
     effective = {name: value for name, value in arguments.arguments.items()
                  if isinstance(value, (str, bool, int, float)) or value is None}
     if effective.get("gradient_loss_strength") is None:
-        effective["gradient_loss_strength"] = DEFAULT_GRADIENT_LOSS_STRENGTH if style == "headroom" else 0.0
+        effective["gradient_loss_strength"] = DEFAULT_GRADIENT_LOSS_STRENGTH if style != "structure" else 0.0
     if effective.get("glyph_entropy_strength") is None:
-        effective["glyph_entropy_strength"] = DEFAULT_GLYPH_ENTROPY_STRENGTH if style == "headroom" else 0.0
+        effective["glyph_entropy_strength"] = (DEFAULT_FLOW_GLYPH_ENTROPY_STRENGTH if style == "flow" else
+                                                DEFAULT_GLYPH_ENTROPY_STRENGTH if style == "headroom" else 0.0)
     if effective.get("saturation_loss_strength") is None:
         effective["saturation_loss_strength"] = 20.0 if effective["glyph_luminance_bonus"] > 0 else 0.0
     effective["glyphs_per_cell"] = (min(effective["candidates"], len(masks))

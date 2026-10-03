@@ -6,6 +6,18 @@ import "../../contents/ui/Profiles.js" as Profiles
 TestCase {
     name: "Profiles"
 
+    function test_flow_default_bank_and_controls_survive_profile_roundtrip() {
+        const settings = Profiles.normalizedSettings({RenderStyle: "flow", FlowEddies: 1.2})
+        compare(settings.AsciiChars.length, 96)
+        verify(settings.AsciiChars.includes("@"))
+        compare(new Set(settings.AsciiChars).size, 96)
+        const profile = {id: "flow", name: "Flow", startTime: "12:00", settings: settings}
+        const restored = Profiles.decode(JSON.stringify([profile]))[0].settings
+        compare(restored.AsciiChars.join(""), Profiles.flowChars)
+        compare(restored.FlowEddies, 1.2)
+        compare(Profiles.normalizedSettings({RenderStyle: "flow", AsciiChars: [" ", "G"]}).AsciiChars.join(""), " G")
+    }
+
     function test_multiple_start_times_wrap_midnight_and_ignore_list_order() {
         const profiles = [{id: "night", startTime: "22:00"}, {id: "day", startTime: "07:00"},
             {id: "afternoon", startTime: "13:30"}, {id: "evening", startTime: "18:00"}]

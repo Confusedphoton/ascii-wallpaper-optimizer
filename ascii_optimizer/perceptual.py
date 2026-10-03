@@ -72,6 +72,15 @@ def gradients(image):
     return x, y
 
 
+def bandpass_moments(lab, sigma, *, stride=1):
+    """Unsigned gradient-normal evidence shared by image and flow guidance."""
+    field = blur(lab, max(0.5, sigma / stride)) - blur(lab, max(1.0, 4 * sigma / stride))
+    sx, sy = gradients(field)
+    sx, sy = sx / stride, sy / stride
+    return (sx.square().sum(1, keepdim=True), sy.square().sum(1, keepdim=True),
+            (sx * sy).sum(1, keepdim=True))
+
+
 class SpatialMetrics:
     """Cache source features once; all differentiable work stays on its device."""
 
@@ -140,13 +149,9 @@ class SpatialMetrics:
             # Chromatic contours matter even at equal luminance. Remove the
             # broad shading ramp: cell colors can represent that ramp without
             # turning every glyph to its direction.
-            field = blur(lab, max(0.5, sigma / stride)) - blur(lab, max(1.0, 4 * sigma / stride))
-            sx, sy = gradients(field)
-            sx, sy = sx / stride, sy / stride
+            moments = bandpass_moments(lab, sigma, stride=stride)
             xx, yy, xy = (F.avg_pool2d(v, source_cell).flatten().unsqueeze(1)
-                          for v in (sx.square().sum(1, keepdim=True),
-                                    sy.square().sum(1, keepdim=True),
-                                    (sx * sy).sum(1, keepdim=True)))
+                          for v in moments)
             mass = xx + yy
             ref = torch.cat((xx - yy, 2 * xy), 1) / (mass + 1e-8)
             coherence = ref.square().sum(1, keepdim=True).sqrt()

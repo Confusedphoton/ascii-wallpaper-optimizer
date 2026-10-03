@@ -531,6 +531,7 @@ class _FrameObjective:
     error_movement_target: torch.Tensor | None = None
     layout_loss_strength: float = 0.0
     spatial_metrics: SpatialMetrics | None = None
+    contour_scale: float = 1.0
 
     def __post_init__(self) -> None:
         if self.spatial_metrics is not None and hasattr(self.spatial_metrics, "encoded_target"):
@@ -632,6 +633,8 @@ class _FrameObjective:
             rgb = _oklab_to_rgb(displayed.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
             terms, _ = self.spatial_metrics.terms(rgb, selected=PERCEPTUAL_WEIGHTS)
             for name, weight in PERCEPTUAL_WEIGHTS.items():
+                if name != "spatial_lightness":
+                    weight *= self.contour_scale
                 term = weight * terms[name]
                 loss = loss + term
                 if components is not None:
@@ -1302,6 +1305,8 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
           perceptual_loss: bool = DEFAULT_PERCEPTUAL_LOSS,
           perceptual_target_srgb: np.ndarray | None = None,
           viewing_ppd: float | None = None,
+          flow_costs: torch.Tensor | np.ndarray | None = None,
+          flow_strength: float = 0.0,
           diagnostics: SolverTrace | None = None,
           invert_ink: bool = False,
           input_oklab: bool = False) -> Grid:
@@ -1343,6 +1348,11 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
     glyph_error_movement_strength = finite_float(
         glyph_error_movement_strength, "glyph_error_movement_strength", minimum=0)
     glyph_entropy_strength = finite_float(glyph_entropy_strength, "glyph_entropy_strength", minimum=0)
+    flow_strength = finite_float(flow_strength, "flow_strength", 0, 2)
+    if flow_strength and flow_costs is None:
+        raise ValueError("Flow strength requires flow/glyph costs")
+    if flow_strength and (not perceptual_loss or refinement_sweeps):
+        raise ValueError("Flow glyph selection requires the perceptual full-frame solver")
     layout_loss_strength = finite_float(layout_loss_strength, "layout_loss_strength", minimum=0)
     if (glyph_error_movement_strength and error_movement_target_oklab is not None
             and error_movement_target_oklab.shape != image_srgb.shape):
@@ -1363,6 +1373,12 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
     original_height, original_width = image_srgb.shape[:2]
     rows = (original_height + cell_height - 1) // cell_height
     cols = (original_width + cell_width - 1) // cell_width
+    if flow_costs is not None:
+        flow_costs = torch.as_tensor(flow_costs, dtype=torch.float32, device=device).detach()
+        if flow_costs.shape != (rows * cols, len(masks_np)) or not bool(torch.isfinite(flow_costs).all()):
+            raise ValueError("Flow costs must be finite and match every cell and glyph")
+    if not flow_strength:
+        flow_costs = None
     if diagnostics is not None:
         diagnostics.start(device, rows=rows, cols=cols, steps=steps, seed=seed,
                           postprocess=postprocess,
@@ -1440,10 +1456,12 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
                                          device=device, viewing_ppd=viewing_ppd, masks=masks_np,
                                          background=background_color, invert_ink=invert_ink)
                                      if perceptual_loss else None)
+    if flow_costs is not None:
+        frame_objective.contour_scale = 1 / (1 + 3 * flow_strength)
     neutral_ink = (perceptual_loss and frame_objective.spatial_metrics.neutral_source
                    and bool(background_color[1:].abs().amax() < 1e-6))
     stroke_costs = (frame_objective.spatial_metrics.glyph_stroke_costs(masks)
-                    if perceptual_loss else None)
+                    if perceptual_loss and flow_costs is None else None)
     cells = _cells(frame_objective.target.squeeze(0), rows, cols, cell_height, cell_width)
     saturation_target_lab = frame_objective.saturation_target
     if saturation_target_lab is not None:
@@ -1462,8 +1480,11 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
             "displayed_sobel": gradient_loss_strength, "saturation": saturation_loss_strength,
             "error_movement": 3 * glyph_error_movement_strength, "layout": layout_loss_strength,
             "glyph_entropy": glyph_entropy_strength, "ink_reward": -glyph_luminance_bonus,
+            "glyph_flow": flow_strength,
             "transition_mask": .025, "transition_color": .010, "transition_schedule": .008,
-            **({**PERCEPTUAL_WEIGHTS, "glyph_stroke_alignment": PERCEPTUAL_GLYPH_STROKE_WEIGHT}
+            **({**{name: weight * (frame_objective.contour_scale if name != "spatial_lightness" else 1)
+                    for name, weight in PERCEPTUAL_WEIGHTS.items()},
+                "glyph_stroke_alignment": PERCEPTUAL_GLYPH_STROKE_WEIGHT if stroke_costs is not None else 0.0}
                if perceptual_loss else {})},
             perceptual_loss=perceptual_loss,
             neutral_ink=neutral_ink,
@@ -1486,7 +1507,11 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
             diagnostics.metadata["stroke_definition"] = (
                 "Squared unsigned OKLab contour tensor distance plus 0.25 times raster coverage; "
                 "source bandpass scales H/4..H and H/2..2H, coherence and energy weights.")
-            diagnostics.register(glyph_stroke_costs=stroke_costs)
+            if stroke_costs is not None:
+                diagnostics.register(glyph_stroke_costs=stroke_costs)
+            diagnostics.metadata["contour_scale"] = frame_objective.contour_scale
+            if flow_costs is not None:
+                diagnostics.register(glyph_flow_costs=flow_costs)
     local_weight = frame_objective.local_weight
     target_lab = frame_objective.target.detach()
     target_lab_cells = _cells(target_lab.squeeze(0), rows, cols, cell_height, cell_width)
@@ -1588,6 +1613,8 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
             initial_errors = initial_errors + PERCEPTUAL_CHROMA_WEIGHT * relative
     if stroke_costs is not None:
         initial_errors = initial_errors + PERCEPTUAL_GLYPH_STROKE_WEIGHT * stroke_costs.gather(1, indices)
+    if flow_costs is not None:
+        initial_errors = initial_errors + flow_strength * flow_costs.gather(1, indices)
     if previous is not None and destination is not None:
         chosen = torch.where(noise < float(progress),
                              torch.as_tensor(destination.glyph.astype(np.int64), device=device).flatten(),
@@ -1646,6 +1673,8 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
         if stroke_costs is not None:
             add("glyph_stroke_alignment", PERCEPTUAL_GLYPH_STROKE_WEIGHT *
                 stroke_costs.gather(1, chosen_glyph[:, None]).mean())
+        if flow_costs is not None:
+            add("glyph_flow", flow_strength * flow_costs.gather(1, chosen_glyph[:, None]).mean())
         if glyph_luminance_bonus:
             add("ink_reward", -glyph_luminance_bonus * _ink_lightness_reward(
                 chosen_color, chosen_masks.gt(0).any(1)).mean())
@@ -1723,6 +1752,9 @@ def solve(image_srgb: np.ndarray, masks_np: np.ndarray, *, seed: int = 0,
             if stroke_costs is not None:
                 training_term("glyph_stroke_alignment", PERCEPTUAL_GLYPH_STROKE_WEIGHT *
                               (weights * stroke_costs.gather(1, indices)).sum(1).mean())
+            if flow_costs is not None:
+                training_term("glyph_flow", flow_strength *
+                              (weights * flow_costs.gather(1, indices)).sum(1).mean())
             if prev_masks is not None:
                 training_term("transition_mask", 0.025 * (mask - prev_masks).square().mean())
                 training_term("transition_color", 0.010 * (color - prev_colors).square().mean())

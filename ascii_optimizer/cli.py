@@ -30,6 +30,10 @@ from .assets import (
 )
 from .defaults import (
     DEFAULT_CHARS,
+    DEFAULT_FLOW_STRENGTH,
+    DEFAULT_FLOW_EDDIES,
+    DEFAULT_FLOW_SCALE,
+    DEFAULT_FLOW_GLYPH_ENTROPY_STRENGTH,
     DEFAULT_GLYPH_ENTROPY_STRENGTH,
     DEFAULT_GLYPH_LUMINANCE_BONUS,
     DEFAULT_GRADIENT_LOSS_STRENGTH,
@@ -214,20 +218,27 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                 postprocess: bool | None = None,
                 perceptual_loss: bool | None = None,
                 viewing_ppd: float | None = None,
+                flow_strength: float = DEFAULT_FLOW_STRENGTH,
+                flow_eddies: float = DEFAULT_FLOW_EDDIES,
+                flow_scale: float = DEFAULT_FLOW_SCALE,
+                flow_diagnostics: dict | None = None,
                 diagnostics=None) -> Grid:
     """Prepare a grid whose displayed pixels follow the chosen ink polarity."""
-    if style not in ("headroom", "structure"):
+    if style not in ("headroom", "structure", "flow"):
         raise ValueError(f"Unknown render style: {style}")
     if objective_space != "oklab":
         raise ValueError("The renderer operates only in OKLab.")
     if gradient_loss_strength is None:
-        gradient_loss_strength = DEFAULT_GRADIENT_LOSS_STRENGTH if style == "headroom" else 0.0
+        gradient_loss_strength = DEFAULT_GRADIENT_LOSS_STRENGTH if style != "structure" else 0.0
     if glyph_entropy_strength is None:
-        glyph_entropy_strength = DEFAULT_GLYPH_ENTROPY_STRENGTH if style == "headroom" else 0.0
+        glyph_entropy_strength = (DEFAULT_FLOW_GLYPH_ENTROPY_STRENGTH if style == "flow" else
+                                  DEFAULT_GLYPH_ENTROPY_STRENGTH if style == "headroom" else 0.0)
     if perceptual_loss is None:
-        perceptual_loss = DEFAULT_PERCEPTUAL_LOSS and style == "headroom"
+        perceptual_loss = DEFAULT_PERCEPTUAL_LOSS and style != "structure"
     if not isinstance(perceptual_loss, bool):
         raise ValueError("perceptual_loss must be a boolean")
+    if style == "flow" and not perceptual_loss:
+        raise ValueError("Flow rendering requires perceptual color fitting")
     if style == "structure" and perceptual_loss:
         raise ValueError("perceptual_loss is only available for the headroom objective")
     if style == "structure" and glyph_luminance_bonus:
@@ -245,7 +256,27 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
     source_lab = srgb_to_oklab(target)
     original_background, solve_background = _backgrounds(source_lab, background, invert_ink)
 
-    if style == "headroom":
+    if style in ("headroom", "flow"):
+        flow_costs = None
+        solve_progress = on_progress
+        if style == "flow":
+            from .flow import simulate_flow, glyph_flow_costs
+            from .settings import finite_float
+            flow_strength = finite_float(flow_strength, "flow_strength", 0, 2)
+            flow_eddies = finite_float(flow_eddies, "flow_eddies", 0, 2)
+            flow_scale = finite_float(flow_scale, "flow_scale", 1, 24)
+            if flow_strength:
+                field = simulate_flow(target, masks.shape[1:], seed=seed, eddies=flow_eddies,
+                                      scale=flow_scale, device=device,
+                                      on_progress=(lambda f, stage: on_progress(0.15 * f, stage))
+                                      if on_progress is not None else None)
+                flow_costs, summary = glyph_flow_costs(field, torch.as_tensor(masks, device=device))
+                if flow_diagnostics is not None:
+                    flow_diagnostics.update(field=field, costs=flow_costs, **field.diagnostics, **summary)
+                if diagnostics is not None:
+                    diagnostics.metadata["flow"] = {**field.diagnostics, **summary}
+                if on_progress is not None:
+                    solve_progress = lambda f, stage: on_progress(0.15 + 0.85 * f, stage)
         encoded_target = encode_headroom_lab(source_lab, invert_ink=invert_ink)
         return solve(encoded_target, masks, seed=seed, steps=steps,
                      candidates=candidates, dither=dither,
@@ -254,7 +285,7 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                      background_oklab=solve_background, device=device,
                      input_oklab=True,
                      previous=previous, destination=destination,
-                     progress=progress, on_progress=on_progress,
+                     progress=progress, on_progress=solve_progress,
                      detail_loss=detail_loss,
                      objective_space=objective_space,
                      glyph_luminance_bonus=glyph_luminance_bonus,
@@ -269,6 +300,7 @@ def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
                      postprocess=postprocess,
                      perceptual_loss=perceptual_loss, perceptual_target_srgb=target,
                      viewing_ppd=viewing_ppd,
+                     flow_costs=flow_costs, flow_strength=flow_strength if flow_costs is not None else 0.0,
                      **({"diagnostics": diagnostics} if diagnostics is not None else {}),
                      invert_ink=invert_ink)
 
@@ -319,7 +351,7 @@ def _render_transition(index: int, images: list[Path], output: Path,
                                 previous.glyph, args.frames - 1 - frame)
             source_lab = srgb_to_oklab(target)
             original_background, solve_background = _backgrounds(source_lab, args.background, args.invert_ink)
-            if args.style == "headroom":
+            if args.style in ("headroom", "flow"):
                 grid = fit_fixed_glyphs(
                     encode_headroom_lab(source_lab, invert_ink=args.invert_ink), masks, glyphs,
                     background_oklab=solve_background, input_oklab=True,
@@ -377,7 +409,7 @@ def build(args: argparse.Namespace) -> None:
 
     report(0.0, "Preparing input images")
     font = resolve_font(args.font)
-    effective_chars = STRUCTURE_CHARS if style == "structure" and args.chars == DEFAULT_CHARS else args.chars
+    effective_chars = args.chars  # normalize_options already resolves style defaults
     chars = list(effective_chars)
     if not chars or len(chars) > 256 or len(set(chars)) != len(chars):
         raise ValueError("Characters must be 1 to 256 distinct glyphs")
@@ -393,6 +425,7 @@ def build(args: argparse.Namespace) -> None:
         "font": str(font), "font_hash": _file_hash(font),
         "size": list(args.size), "cell": list(cell), "detail": args.detail, "chars": effective_chars,
         "style": style, "invert_ink": invert_ink, "structure_dither": structure_dither,
+        "flow_strength": args.flow_strength, "flow_eddies": args.flow_eddies, "flow_scale": args.flow_scale,
         "gradient_loss_strength": float(gradient_loss_strength),
         "glyph_luminance_bonus": glyph_luminance_bonus,
         "glyph_entropy_strength": args.glyph_entropy_strength,
@@ -406,7 +439,7 @@ def build(args: argparse.Namespace) -> None:
         "transition_steps": args.transition_steps,
         "transition_pace": args.transition_pace, "transition_field": args.transition_field,
         "transition_spread": args.transition_spread,
-        "glyph_search": "all" if style == "headroom" else "structure",
+        "glyph_search": "all" if style != "structure" else "structure",
         "dither": args.dither, "background": args.background, "seed": args.seed,
     }
     output = args.output.expanduser().resolve()
@@ -481,6 +514,8 @@ def build(args: argparse.Namespace) -> None:
                          glyph_entropy_strength=args.glyph_entropy_strength,
                          gradient_loss_strength=float(gradient_loss_strength),
                          perceptual_loss=args.perceptual_loss,
+                         flow_strength=args.flow_strength, flow_eddies=args.flow_eddies,
+                         flow_scale=args.flow_scale,
                          on_progress=lambda fraction, stage, index=index: report(
                              fraction, f"Image {index + 1}/{len(images)}: {stage}"))
             grid = _save_grid(grid, still_dir, True, masks, args.size, invert_ink)
@@ -525,7 +560,7 @@ def build(args: argparse.Namespace) -> None:
                     pair_progress[index] = max(pair_progress[index], units)
                     report(sum(pair_progress.values()), stage)
 
-            gpu = style == "headroom" and torch.device(args.device).type == "cuda"
+            gpu = style != "structure" and torch.device(args.device).type == "cuda"
             if gpu:
                 # These cached tensors are shared by the streams. Populate them
                 # before workers start and wait for their uploads to complete.
@@ -604,7 +639,13 @@ def make_parser() -> argparse.ArgumentParser:
                         help=("Bonus for lighter glyph ink with automatic chrominance correction "
                               f"(default: {DEFAULT_GLYPH_LUMINANCE_BONUS:g}, "
                               f"max: {MAX_GLYPH_LUMINANCE_BONUS:g})"))
-    parser.add_argument("--style", choices=("headroom", "structure"), default=defaults["style"])
+    parser.add_argument("--style", choices=("headroom", "structure", "flow"), default=defaults["style"])
+    parser.add_argument("--flow-strength", type=float, default=DEFAULT_FLOW_STRENGTH,
+                        help="Flow influence in glyph selection, 0–2 (0 reproduces perceptual headroom with the same glyph bank)")
+    parser.add_argument("--flow-eddies", type=float, default=DEFAULT_FLOW_EDDIES,
+                        help="Eddy forcing strength, 0–2")
+    parser.add_argument("--flow-scale", type=float, default=DEFAULT_FLOW_SCALE,
+                        help="Domain size in glyph widths, 1–24")
     parser.add_argument("--no-perceptual-loss", dest="perceptual_loss", action="store_false",
                         help="Disable the default perceptual objective for headroom rendering")
     parser.set_defaults(perceptual_loss=None)
