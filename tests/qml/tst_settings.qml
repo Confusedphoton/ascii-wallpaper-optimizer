@@ -17,6 +17,23 @@ TestCase {
     }
     name: "RenderSettings"
 
+    function test_source_modes_and_video_options_use_shared_request_schema() {
+        for (const mode of ["Image", "Slideshow", "Video", "Archive"]) {
+            const config = RenderSettings.request(["/source"], {Mode: mode, FrameStride: 3,
+                VideoTransitionFrames: 2, RenderStyle: "flow", FlowAnimated: true})
+            const wallpaper = RenderSettings.request(["/source"], {mode: mode, frameStride: 3,
+                videoTransitionFrames: 2, renderStyle: "flow", flowAnimated: true})
+            compare(JSON.stringify(config), JSON.stringify(wallpaper))
+            compare(config.input_format, mode === "Video" ? "video" : mode === "Archive" ? "archive" : "images")
+            compare(config.frame_stride, 3)
+            compare(config.video_transition_frames, 2)
+            compare(config.flow_animated, mode === "Image" || mode === "Slideshow")
+        }
+        const defaults = RenderSettings.request([], {Mode: "Video"})
+        compare(defaults.frame_stride, 1)
+        compare(defaults.video_transition_frames, 0)
+    }
+
     function test_defaults_match_service_and_cli() {
         const request = RenderSettings.request([], {})
         for (const key of Object.keys(request)) {

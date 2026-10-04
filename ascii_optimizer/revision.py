@@ -6,7 +6,8 @@ from functools import lru_cache
 from pathlib import Path
 
 RENDER_MODULES = ("assets.py", "cli.py", "defaults.py", "optimizer.py", "settings.py",
-                  "structure.py", "tone.py", "transition.py", "perceptual.py", "flow.py", "flow_playback.py", "revision.py")
+                  "structure.py", "tone.py", "transition.py", "perceptual.py", "flow.py", "flow_playback.py",
+                  "video.py", "archive.py", "revision.py")
 
 
 @lru_cache(maxsize=8)

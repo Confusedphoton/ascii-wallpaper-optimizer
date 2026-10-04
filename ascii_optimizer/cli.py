@@ -1,4 +1,4 @@
-"""Batch entry point for still grids and ASCII-aware slideshow transitions."""
+"""Render image slideshows or videos, and import/export compressed ASCII archives."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import math
 import os
 import re
 import shutil
+import tempfile
 import threading
 import uuid
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
@@ -78,6 +79,7 @@ from .transition import (
     phase_offsets,
     transport_cells,
 )
+from .video import decode_frames, frame_durations, probe_video
 
 MAP_KINDS = ("glyph", "color", "background")
 STILL_KINDS = (*MAP_KINDS, "preview")
@@ -150,7 +152,7 @@ def _copy_grid(source: Path, destination: Path, *, preview: bool = False) -> Non
         shutil.copyfile(source / f"{kind}.png", destination / f"{kind}.png")
 
 
-def _cached_still(entry: Path, signature: dict) -> Path | None:
+def _cached_still(entry: Path, signature: dict, *, preview: bool = True) -> Path | None:
     try:
         metadata = json.loads((entry / "cache.json").read_text())
         if not isinstance(metadata, dict):
@@ -159,7 +161,7 @@ def _cached_still(entry: Path, signature: dict) -> Path | None:
         if metadata.get("signature") != signature or not re.fullmatch(r"[a-f0-9]{32}", generation):
             return None
         directory = entry / generation
-        if all((directory / f"{kind}.png").is_file() for kind in STILL_KINDS):
+        if all((directory / f"{kind}.png").is_file() for kind in STILL_KINDS if preview or kind != "preview"):
             grid = _load_grid(directory)
             width, height = signature["size"]
             cell_width, cell_height = signature["cell"]
@@ -169,23 +171,24 @@ def _cached_still(entry: Path, signature: dict) -> Path | None:
                 return None
             if grid.glyph.max() >= len(signature["chars"]):
                 return None
-            with Image.open(directory / "preview.png") as image:
-                if image.size != (width, height):
-                    return None
-                image.verify()
+            if preview:
+                with Image.open(directory / "preview.png") as image:
+                    if image.size != (width, height):
+                        return None
+                    image.verify()
             return directory
     except (OSError, ValueError, TypeError):
         pass
     return None
 
 
-def _cache_still(source: Path, entry: Path, signature: dict) -> None:
+def _cache_still(source: Path, entry: Path, signature: dict, *, preview: bool = True) -> None:
     """Keep each cached generation immutable, and switch its index atomically."""
     entry.mkdir(parents=True, exist_ok=True)
     generation = uuid.uuid4().hex
     temporary = entry / f".{generation}.tmp"
     try:
-        _copy_grid(source, temporary, preview=True)
+        _copy_grid(source, temporary, preview=preview)
         temporary.replace(entry / generation)
         _atomic_json(entry / "cache.json", {"signature": signature, "generation": generation})
     finally:
@@ -458,7 +461,232 @@ def _render_transition(index: int, images: list[Path], output: Path,
     return backgrounds
 
 
+def _video_intermediates(start: Grid, destination: Grid, args: argparse.Namespace,
+                         masks: np.ndarray, paths: list[list[list[int]]],
+                         source: np.ndarray, index: int):
+    """Sample the transition at any requested budget, including a single frame."""
+    destinations = None
+    target_glyphs, target_colors = destination.glyph, destination.color
+    if args.transition_type == "earth-mover":
+        destinations = earth_mover_destinations(
+            start.glyph, destination.glyph, start.color, destination.color,
+            start.background, destination.background, masks, invert_ink=args.invert_ink)
+        target_glyphs = destination.glyph.ravel()[destinations]
+        target_colors = destination.color.reshape(-1, 3)[destinations]
+    offsets = phase_offsets(start.glyph.shape, args.transition_field,
+                            args.seed + index * 10007,
+                            source if args.transition_field == "salience" else None)
+    for frame in range(1, args.video_transition_frames + 1):
+        progress = ease(frame / (args.video_transition_frames + 1), args.transition_pace)
+        local = local_progress(progress, offsets, args.transition_spread)
+        # Videos specify an exact interpolation count. Sampling a glyph path
+        # directly lets a short interval skip glyphs rather than rejecting it.
+        glyphs = path_glyphs(start.glyph, target_glyphs, local, paths)
+        color = (1 - local[..., None]) * start.color + local[..., None] * target_colors
+        background = (1 - progress) * start.background + progress * destination.background
+        if destinations is not None:
+            glyphs, color = transport_cells(glyphs, color, background, destinations, local, masks)
+        yield Grid(glyphs, color, background)
+
+
+def _build_video(args: argparse.Namespace, source: Path, output: Path,
+                 signature: dict, masks: np.ndarray, cell: tuple[int, int]) -> None:
+    """Optimize only sampled frames, then emit a timestamp-preserving clip."""
+    info = probe_video(source)
+    times = info.sampled_times(args.frame_stride)
+    durations = frame_durations(info, args.frame_stride, args.video_transition_frames)
+    count = len(durations)
+    manifest_path = output / "manifest.json"
+    if manifest_path.is_file() and not args.force:
+        try:
+            old = json.loads(manifest_path.read_text())
+            if (isinstance(old, dict) and old.get("signature") == signature and old.get("schema_version") == 3
+                    and old.get("video", {}).get("frame_count") == count
+                    and old["video"].get("duration_ms") == info.duration_ms
+                    and all((output / name).is_file() for name in
+                            ("atlas.png", "metadata.png", "stills/0000/preview.png"))
+                    and all((output / "video" / f"{frame:04d}" / f"{kind}.png").is_file()
+                            for frame in range(count) for kind in MAP_KINDS)
+                    and all((output / "stills/0000" / f"{kind}.png").is_file() for kind in MAP_KINDS)):
+                print(f"Already rendered: {output}")
+                if getattr(args, "progress_json", False):
+                    print('ASCII_PROGRESS {"progress": 1.0, "stage": "Ready"}', flush=True)
+                return
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+    output.mkdir(parents=True, exist_ok=True)
+    save_atlas(masks, output / "atlas.png")
+    save_metadata(args.size, cell, len(args.chars), output / "metadata.png", invert_ink=args.invert_ink)
+    # A failed render must never leave a complete manifest describing mixed old
+    # and new frames; the service also renders into unpublished generations.
+    manifest_path.unlink(missing_ok=True)
+    shutil.rmtree(output / "video", ignore_errors=True)
+    backgrounds = {}
+    emitted = 0
+    completed = 0
+    previous = None
+    previous_target = None
+    paths = glyph_paths(masks) if args.video_transition_frames else None
+    still_cache = getattr(args, "still_cache", None)
+    if still_cache is not None:
+        still_cache = Path(still_cache).expanduser().resolve()
+    endpoint_settings = {key: value for key, value in signature.items()
+                         if key not in {"images", "image_hashes", "font", "frame_stride",
+                                        "video_transition_frames", *TRANSITION_SETTINGS}}
+    endpoint_settings["image_hash"] = signature["image_hashes"][0]
+
+    def report(fraction: float, stage: str) -> None:
+        if getattr(args, "progress_json", False):
+            print("ASCII_PROGRESS " + json.dumps({
+                "progress": min(1.0, (completed + fraction) / count), "stage": stage,
+            }), flush=True)
+
+    def save(grid: Grid) -> Grid:
+        nonlocal emitted
+        directory = output / "video" / f"{emitted:04d}"
+        persisted = _save_grid(grid, directory, False, masks, args.size, args.invert_ink)
+        backgrounds[f"video/{emitted:04d}"] = persisted.background.tolist()
+        emitted += 1
+        return persisted
+
+    decoded = decode_frames(source, args.size, args.crop, args.grayscale, args.frame_stride)
+    sampled_count = 0
+    try:
+        for index, target in enumerate(decoded):
+            if index >= len(times):
+                raise ValueError("Decoded video frame count does not match its timing metadata")
+            original_index = index * args.frame_stride
+            endpoint_signature = dict(endpoint_settings, source_frame=original_index,
+                                      seed=args.seed + original_index)
+            cache_key = hashlib.sha256(json.dumps(endpoint_signature, sort_keys=True).encode()).hexdigest()
+            cache_entry = still_cache / cache_key if still_cache is not None else None
+            cached = (_cached_still(cache_entry, endpoint_signature, preview=False)
+                      if cache_entry is not None and not args.force else None)
+            if cached is not None:
+                print(f"Reusing cached video frame {index + 1}/{len(times)}", flush=True)
+                endpoint = _load_grid(cached)
+            else:
+                print(f"Optimizing video frame {index + 1}/{len(times)}", flush=True)
+                grid = solve_style(target, masks, style=args.style, invert_ink=args.invert_ink,
+                                   seed=args.seed + original_index, steps=args.steps, dither=args.dither,
+                                   structure_dither=args.structure_dither, background=args.background,
+                                   device=args.device, glyph_luminance_bonus=args.glyph_luminance_bonus,
+                                   glyph_entropy_strength=args.glyph_entropy_strength,
+                                   gradient_loss_strength=float(args.gradient_loss_strength),
+                                   perceptual_loss=args.perceptual_loss, flow_strength=args.flow_strength,
+                                   flow_eddies=args.flow_eddies, flow_scale=args.flow_scale,
+                                   on_progress=lambda fraction, stage, index=index: report(
+                                       fraction, f"Video frame {index + 1}/{len(times)}: {stage}"))
+                # Quantize endpoints before interpolating, exactly like slideshows.
+                endpoint = Grid(grid.glyph, quantize_playback_lab(grid.color),
+                                quantize_playback_lab(grid.background))
+            if previous is not None and args.video_transition_frames:
+                report(0.0, f"Video transition {index}/{len(times) - 1}: {args.transition_type}")
+                for intermediate in _video_intermediates(
+                        previous, endpoint, args, masks, paths, previous_target, index - 1):
+                    save(intermediate)
+                    completed += 1
+                    report(0.0, f"Finished interpolated video frame {emitted}/{count}")
+            previous = save(endpoint)
+            if cache_entry is not None and cached is None:
+                _cache_still(output / "video" / f"{emitted - 1:04d}", cache_entry,
+                             endpoint_signature, preview=False)
+            if index == 0:
+                anchor = output / "stills/0000"
+                _save_grid(previous, anchor, True, masks, args.size, args.invert_ink)
+                _copy_grid(output / "video/0000", anchor)
+                backgrounds["stills/0000"] = previous.background.tolist()
+            previous_target = target if args.video_transition_frames else None
+            completed += 1
+            sampled_count += 1
+            report(0.0, f"Finished video frame {index + 1}/{len(times)}")
+    finally:
+        decoded.close()
+    if sampled_count != len(times) or emitted != count:
+        raise ValueError("Decoded video frame count does not match its timing metadata")
+    video = {"path": "video", "frame_count": count, "duration_ms": info.duration_ms}
+    if all(math.isclose(duration, durations[0], rel_tol=1e-9, abs_tol=1e-6) for duration in durations):
+        video["frame_duration_ms"] = info.duration_ms / count
+    else:
+        video["frame_durations_ms"] = durations
+    _atomic_json(manifest_path, {
+        "schema_version": 3, "video": video, "loops": {}, "signature": signature,
+        "generation": getattr(args, "generation", None) or uuid.uuid4().hex,
+        "image_count": 1, "frame_count": args.frames,
+        "grid": [previous.glyph.shape[1], previous.glyph.shape[0]],
+        "output_size": list(args.size), "cell_size": list(cell),
+        "atlas_count": len(args.chars), "invert_ink": args.invert_ink,
+        "background_labs": backgrounds,
+    })
+    print(f"Rendered video assets: {output}")
+    report(0.0, "Ready")
+
+
+def _import_archive(args: argparse.Namespace, output: Path) -> None:
+    from .archive import extract_archive
+
+    if len(args.images) != 1:
+        raise ValueError("Archive input requires exactly one source archive")
+    source = args.images[0].expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    if source.is_relative_to(output):
+        raise ValueError("Archive output must not contain the input archive")
+    if output.exists() and (not output.is_dir() or any(output.iterdir())) and not args.force:
+        raise ValueError("Archive output must be absent or empty; use --force to replace it")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".ascii-import-", dir=output.parent) as temporary:
+        stage = Path(temporary) / "assets"
+        manifest = extract_archive(source, stage)
+        manifest["signature"] = {"input_format": "archive", "images": [str(source)],
+                                 "image_hashes": [_file_hash(source)]}
+        manifest["generation"] = getattr(args, "generation", None) or uuid.uuid4().hex
+        _atomic_json(stage / "manifest.json", manifest)
+        backup = Path(temporary) / "previous"
+        if output.exists():
+            output.rename(backup)
+        try:
+            stage.rename(output)
+        except BaseException:
+            if backup.exists():
+                backup.rename(output)
+            raise
+    print(f"Imported ASCII archive: {output}")
+    if getattr(args, "progress_json", False):
+        print('ASCII_PROGRESS {"progress": 1.0, "stage": "Ready"}', flush=True)
+
+
 def build(args: argparse.Namespace) -> None:
+    """Choose an input/output container before preparing numerical rendering."""
+    input_format = getattr(args, "input_format", "images")
+    if input_format not in ("images", "video", "archive"):
+        raise ValueError("Invalid input_format")
+    output_format = getattr(args, "output_format", "directory")
+    if output_format not in ("directory", "zip"):
+        raise ValueError("Invalid output_format")
+    output = args.output.expanduser().resolve()
+    if any(output == Path(path).expanduser().resolve() for path in args.images):
+        raise ValueError("Output must differ from every input source")
+    if output_format == "zip":
+        from .archive import write_archive
+
+        with tempfile.TemporaryDirectory(prefix="ascii-export-") as temporary:
+            inner = argparse.Namespace(**vars(args))
+            inner.output = Path(temporary) / "assets"
+            inner.output_format = "directory"
+            build(inner)
+            write_archive(inner.output, output)
+        print(f"Compressed ASCII archive: {output}")
+        return
+    if input_format == "archive":
+        _import_archive(args, output)
+        return
+    if args.size is None:
+        raise ValueError("--size is required for image and video rendering")
+    _build_directory(args)
+
+
+def _build_directory(args: argparse.Namespace) -> None:
     vars(args).update(normalize_options(vars(args)))
     transition_workers = getattr(args, "transition_workers", 2)
     if isinstance(transition_workers, bool) or not isinstance(transition_workers, int) or transition_workers < 1:
@@ -471,6 +699,8 @@ def build(args: argparse.Namespace) -> None:
     structure_dither = args.structure_dither
     if not args.images:
         raise ValueError("At least one source image is required")
+    if args.input_format == "video" and len(args.images) != 1:
+        raise ValueError("Video input requires exactly one source video")
     report_progress = getattr(args, "progress_json", False)
     total_units = len(args.images) + (len(args.images) * (args.frames - 2) if len(args.images) > 1 else 0)
     completed_units = 0
@@ -499,6 +729,8 @@ def build(args: argparse.Namespace) -> None:
         if not path.is_file():
             raise FileNotFoundError(path)
     signature = {
+        "input_format": args.input_format,
+        "frame_stride": args.frame_stride, "video_transition_frames": args.video_transition_frames,
         "version": __version__, "render_revision": render_revision(), "images": [str(path) for path in images],
         "image_hashes": [_file_hash(path) for path in images],
         "font": str(font), "font_hash": _file_hash(font),
@@ -525,6 +757,10 @@ def build(args: argparse.Namespace) -> None:
         "dither": args.dither, "background": args.background, "seed": args.seed,
     }
     output = args.output.expanduser().resolve()
+    if args.input_format == "video":
+        signature.update(frame_stride=args.frame_stride, video_transition_frames=args.video_transition_frames)
+        _build_video(args, images[0], output, signature, masks, cell)
+        return
     still_cache = getattr(args, "still_cache", None)
     if still_cache is not None:
         still_cache = Path(still_cache).expanduser().resolve()
@@ -706,9 +942,16 @@ def build(args: argparse.Namespace) -> None:
 def make_parser() -> argparse.ArgumentParser:
     defaults = normalize_options({})
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("images", nargs="+", type=Path, help="Source images in slideshow order")
-    parser.add_argument("--output", type=Path, required=True, help="Generated asset directory")
-    parser.add_argument("--size", type=_size, required=True, help="Wallpaper size, WIDTHxHEIGHT")
+    parser.add_argument("images", nargs="+", type=Path, help="Source images, one video, or one ASCII archive")
+    parser.add_argument("--input-format", choices=("images", "video", "archive"), default="images")
+    parser.add_argument("--output", type=Path, required=True, help="Generated asset directory or compressed archive")
+    parser.add_argument("--output-format", choices=("directory", "zip"), default="directory",
+                        help="Directory of assets or an explicitly compressed ZIP archive")
+    parser.add_argument("--size", type=_size, help="Wallpaper size, WIDTHxHEIGHT (required when rendering)")
+    parser.add_argument("--frame-stride", type=int, default=1,
+                        help="Render every Nth source video frame without changing playback duration")
+    parser.add_argument("--video-transition-frames", type=int, default=0,
+                        help="Interpolated frames between sampled video frames (default: 0)")
     parser.add_argument("--font", default=defaults["font"], help="Font family or font file")
     parser.add_argument("--chars", default=DEFAULT_CHARS, help="Distinct characters, including a space")
     parser.add_argument("--detail", type=int, choices=(0, 1, 2, 3, 4), default=defaults["detail"])

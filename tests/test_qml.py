@@ -32,6 +32,7 @@ def _assets(directory: Path, *, complete: bool = True) -> None:
     frames = ["stills/0000", "stills/0001"]
     frames.extend(f"transitions/0000-0001/{frame:04d}" for frame in (1, 2))
     frames.extend(f"loops/0000/{frame:04d}" for frame in range(4))
+    frames.extend(f"video/{frame:04d}" for frame in range(4))
     for relative in frames:
         frame = directory / relative
         frame.mkdir(parents=True, exist_ok=True)

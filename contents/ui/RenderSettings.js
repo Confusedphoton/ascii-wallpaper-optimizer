@@ -9,11 +9,17 @@ function request(images, settings) {
         return fallback
     }
     const style = setting("renderStyle", "RenderStyle", "headroom")
-    const animated = style === "flow" && !!setting("flowAnimated", "FlowAnimated", false)
+    const mode = setting("mode", "Mode", "Image")
+    const inputFormat = mode === "Video" ? "video" : mode === "Archive" ? "archive" : "images"
+    const animated = inputFormat === "images" && style === "flow"
+        && !!setting("flowAnimated", "FlowAnimated", false)
     const headroom = style !== "structure"
     const characters = setting("characters", "AsciiChars", " .´:rszunvcxLOGDQ0KNMW&#\\/=^|[]{}")
     return {
         images: Array.from(images || []),
+        input_format: inputFormat,
+        frame_stride: setting("frameStride", "FrameStride", 1),
+        video_transition_frames: setting("videoTransitionFrames", "VideoTransitionFrames", 0),
         font: setting("fontFamily", "FontFamily", "Monospace"),
         chars: Array.from(characters).map((glyph, index) => index === 0 && glyph === "\\s" ? " " : glyph).join(""),
         detail: setting("detail", "Detail", 1),

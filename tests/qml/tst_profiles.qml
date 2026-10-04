@@ -18,6 +18,21 @@ TestCase {
         compare(Profiles.normalizedSettings({RenderStyle: "flow", AsciiChars: [" ", "G"]}).AsciiChars.join(""), " G")
     }
 
+    function test_video_options_default_and_migrate_independent_profiles() {
+        const defaults = Profiles.normalizedSettings({})
+        compare(defaults.FrameStride, 1)
+        compare(defaults.VideoTransitionFrames, 0)
+        const profiles = Profiles.fromLegacy({ProfileSettingsInitialized: true,
+            Mode: "Video", Images: ["/one.mp4"], FrameStride: 4, VideoTransitionFrames: 2,
+            ModeB: "Video", ImagesB: ["/two.mp4"], FrameStrideB: 7, VideoTransitionFramesB: 0})
+        const restored = Profiles.decode(JSON.stringify(profiles))
+        compare(restored[0].settings.Mode, "Video")
+        compare(restored[0].settings.FrameStride, 4)
+        compare(restored[0].settings.VideoTransitionFrames, 2)
+        compare(restored[1].settings.FrameStride, 7)
+        compare(restored[1].settings.VideoTransitionFrames, 0)
+    }
+
     function test_multiple_start_times_wrap_midnight_and_ignore_list_order() {
         const profiles = [{id: "night", startTime: "22:00"}, {id: "day", startTime: "07:00"},
             {id: "afternoon", startTime: "13:30"}, {id: "evening", startTime: "18:00"}]

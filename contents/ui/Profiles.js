@@ -7,6 +7,7 @@ const flowChars = Array.from({length: 95}, (_, i) => String.fromCharCode(32 + i)
 const defaults = {
     Mode: "Image", Images: [], FontFamily: "Monospace", AsciiChars: Array.from(standardChars),
     Detail: 1, Grayscale: false, SlideInterval: 10, TransitionFrames: 16,
+    FrameStride: 1, VideoTransitionFrames: 0,
     TransitionDuration: 1500, TransitionType: "glyph-path", TransitionPace: "ease-in-out", TransitionField: "blue-noise",
     TransitionSpread: 0.65, Dither: 0.005, GradientLossStrength: 1.5,
     GlyphLuminanceBonus: 0.12, GlyphEntropyStrength: 0.01, StructureDither: 0.06,

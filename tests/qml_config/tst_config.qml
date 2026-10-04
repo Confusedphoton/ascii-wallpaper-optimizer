@@ -33,6 +33,89 @@ TestCase {
         return properties
     }
 
+    function test_video_source_controls_defaults_and_profile_persistence() {
+        const item = page({cfg_ProfileSettingsInitialized: true})
+        item.editProfile = 0
+        const modes = findChild(item, "modeCombo")
+        compare(modes.count, 4)
+        modes.activated(2)
+        compare(item.editMode, "Video")
+        compare(item.activeSettings.FrameStride, 1)
+        compare(item.activeSettings.VideoTransitionFrames, 0)
+        const stride = findChild(item, "frameStrideSpin")
+        const interpolation = findChild(item, "videoTransitionFramesSpin")
+        verify(stride.visible)
+        verify(interpolation.visible)
+        compare(stride.from, 1)
+        compare(stride.to, 10000)
+        compare(interpolation.from, 0)
+        compare(interpolation.to, 118)
+        verify(!findChild(item, "transitionType").visible)
+        item.setProfileSetting("Images", ["/one.mp4", "/ignored.mp4"])
+        item.setProfileSetting("FrameStride", 3)
+        item.setProfileSetting("VideoTransitionFrames", 2)
+        item.setProfileSetting("TransitionType", "earth-mover")
+        item.setProfileSetting("RenderStyle", "flow")
+        item.setProfileSetting("FlowAnimated", true)
+        verify(findChild(item, "transitionType").visible)
+        verify(!findChild(item, "flowAnimatedCheck").visible)
+        verify(!findChild(item, "flowLoopSecondsSpin").visible)
+        const request = findChild(item, "renderClient").requestSettings
+        compare(request.input_format, "video")
+        compare(request.images, ["/one.mp4"])
+        compare(request.frame_stride, 3)
+        compare(request.video_transition_frames, 2)
+        compare(request.transition_type, "earth-mover")
+        compare(request.flow_animated, false)
+        item.editProfile = 1
+        item.setProfileSetting("Mode", "Video")
+        item.setProfileSetting("FrameStride", 5)
+        compare(item.activeSettings.VideoTransitionFrames, 0)
+        item.saveConfig()
+        const saved = snapshot(item)
+        compare(saved.cfg_FrameStride, 3)
+        compare(saved.cfg_VideoTransitionFrames, 2)
+        compare(saved.cfg_FrameStrideB, 5)
+        compare(saved.cfg_VideoTransitionFramesB, 0)
+        item.destroy()
+        const reopened = page(saved)
+        reopened.editProfile = 0
+        compare(reopened.activeSettings.FrameStride, 3)
+        compare(reopened.activeSettings.VideoTransitionFrames, 2)
+        reopened.editProfile = 1
+        compare(reopened.activeSettings.FrameStride, 5)
+        compare(reopened.activeSettings.VideoTransitionFrames, 0)
+    }
+
+    function test_archive_source_uses_single_bundle_and_hides_appearance() {
+        const item = page({cfg_ProfileSettingsInitialized: true})
+        item.editProfile = 0
+        findChild(item, "modeCombo").activated(3)
+        compare(item.editMode, "Archive")
+        item.setProfileSetting("Images", ["/prepared.ascii.zip", "/ignored.zip"])
+        const request = findChild(item, "renderClient").requestSettings
+        compare(request.input_format, "archive")
+        compare(request.images, ["/prepared.ascii.zip"])
+        verify(findChild(item, "archiveSourceHint").visible)
+        verify(!findChild(item, "renderStyleCombo").visible)
+        verify(!findChild(item, "characterField").visible)
+        verify(!findChild(item, "frameStrideSpin").visible)
+        verify(!findChild(item, "videoTransitionFramesSpin").visible)
+        verify(!findChild(item, "transitionType").visible)
+        const client = findChild(item, "renderClient")
+        client.displayPlaybackSettings = {mode: "Archive"}
+        client.displayManifest = {image_count: 2}
+        verify(findChild(item, "previewPlayback").slideshowEnabled)
+        verify(item.showSlideshowTiming)
+        client.displayManifest = {image_count: 1, video: {path: "video", frame_count: 3,
+            duration_ms: 300, frame_durations_ms: [100, 100, 100]}}
+        verify(!findChild(item, "previewPlayback").slideshowEnabled)
+        verify(!item.showSlideshowTiming)
+        item.setProfileSetting("Mode", "Image")
+        verify(findChild(item, "renderStyleCombo").visible)
+        verify(findChild(item, "characterField").visible)
+    }
+
     function test_earth_mover_selection_persists_across_profiles() {
         const item = page({cfg_Mode: "Slideshow", cfg_ModeB: "Slideshow"})
         item.editProfile = 0

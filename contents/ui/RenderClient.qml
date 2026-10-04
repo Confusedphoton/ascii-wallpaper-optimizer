@@ -167,7 +167,8 @@ Item {
         if (displayRequestSettings.screen !== undefined && displayRequestSettings.screen !== screenName) return false
         return Object.keys(requestSettings).every(function(key) {
             let saved = displayRequestSettings[key]
-            const animationDefaults = {flow_animated: false, flow_loop_seconds: 10,
+            const animationDefaults = {input_format: "images", frame_stride: 1, video_transition_frames: 0,
+                flow_animated: false, flow_loop_seconds: 10,
                 flow_fps: 12, flow_frame_steps: 12, flow_temporal_strength: 0.8}
             if (saved === undefined && animationDefaults[key] !== undefined)
                 saved = animationDefaults[key]
@@ -285,7 +286,7 @@ Item {
         currentRequestForced = !!force
         if (!request.images.length) {
             renderState = "idle"
-            stage = "Select an image"
+            stage = "Select a source file"
             directory = ""
             displayDirectory = ""
             displayImageCount = 0

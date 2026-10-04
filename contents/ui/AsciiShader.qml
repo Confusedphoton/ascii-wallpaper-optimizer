@@ -56,10 +56,12 @@ Item {
     function descriptor(current, next, index) {
         const directory = String(renderDirectory || "").trim().replace(/\/$/, "")
         let path = "stills/" + String(current).padStart(4, "0")
-        const loop = manifest.schema_version === 2
-            ? (manifest.loops || ({}))[String(current).padStart(4, "0")] : null
+        const video = manifest.schema_version === 3 && manifest.video && manifest.video.path === "video"
+            && manifest.video.frame_count >= 1 ? manifest.video : null
+        const loop = video || (manifest.schema_version === 2
+            ? (manifest.loops || ({}))[String(current).padStart(4, "0")] : null)
         if (current === next && loopFrame >= 0 && loop
-                && loop.path === "loops/" + String(current).padStart(4, "0") && loop.frame_count >= 4)
+                && (video || (loop.path === "loops/" + String(current).padStart(4, "0") && loop.frame_count >= 4)))
             path = loop.path + "/" + String(Math.min(loop.frame_count - 1, loopFrame)).padStart(4, "0")
         if (current !== next && index > 0 && index < frameCount - 1) {
             const pair = String(current).padStart(4, "0") + "-" + String(next).padStart(4, "0")
@@ -119,7 +121,8 @@ Item {
         if (!renderDirectory || pendingDescriptor || !ready || displayedKey !== desiredKey) return
         let upcoming
         if (currentIndex === nextIndex && loopFrame >= 0) {
-            const loop = (manifest.loops || ({}))[String(currentIndex).padStart(4, "0")]
+            const loop = manifest.schema_version === 3 ? manifest.video
+                : (manifest.loops || ({}))[String(currentIndex).padStart(4, "0")]
             if (loop) {
                 upcoming = descriptor(currentIndex, currentIndex, 0)
                 upcoming.path = loop.path + "/" + String((loopFrame + 1) % loop.frame_count).padStart(4, "0")

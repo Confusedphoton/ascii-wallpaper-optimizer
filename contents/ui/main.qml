@@ -86,6 +86,7 @@ WallpaperItem {
         ready: shaderContainer.ready && shaderContainer.displayGeneration === renderer.displayGeneration
         loading: shaderContainer.loading
         slideshowEnabled: renderer.displayPlaybackSettings.mode === "Slideshow"
+            || Number(renderer.displayManifest.image_count) > 1
         manifest: renderer.displayManifest
         imageCount: renderer.displayImageCount
         frameCount: renderer.displayFrameCount

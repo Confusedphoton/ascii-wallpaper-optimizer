@@ -42,11 +42,11 @@ Then install the project and Plasma package:
 
 Installing PyTorch first prevents pip from choosing its default CUDA build on an AMD system.
 
-In Plasma's wallpaper settings, select **ASCII Wallpaper Optimizer** and choose an image or slideshow, then select **Apply** or **OK** to render it. **Render now** prepares a preview or forces a rebuild. A progress bar and status message appear while rendering. The settings preview clears when its settings change or a render begins, then shows the completed result. The desktop keeps its completed wallpaper until the replacement is ready. Each profile saves its generation, manifest, and playback settings, so startup restores matching saved frames without waiting for the renderer. Applied changes and selecting an unrendered profile start a render automatically; opening the editor and making unapplied edits leave rendering idle. Requests retry if the service is temporarily unavailable.
+In Plasma's wallpaper settings, select **ASCII Wallpaper Optimizer** and choose **Image**, **Slideshow**, **Video**, or **Archive** as the source type, then select **Apply** or **OK** to render it. **Render now** prepares a preview or forces a rebuild. A progress bar and status message appear while rendering. The settings preview clears when its settings change or a render begins, then shows the completed result. The desktop keeps its completed wallpaper until the replacement is ready. Each profile saves its generation, manifest, and playback settings, so startup restores matching saved frames without waiting for the renderer. Applied changes and selecting an unrendered profile start a render automatically; opening the editor and making unapplied edits leave rendering idle. Requests retry if the service is temporarily unavailable.
 
-Use the **Editing Profile** dropdown and **Add** / **Remove** buttons to manage multiple named profiles. Each stores independent sources, appearance, and slideshow settings. The editor remembers the last profile you opened. Choose the **Active Profile** from the matching dropdown for manual selection, or enable **Switch profiles automatically** and edit **Starts At** for each profile. Start times use local `HH:MM` time and must be unique. A profile remains active until the next start time, including across midnight. Existing A/B settings migrate automatically. The **ASCII Wallpaper Profile** panel applet offers the same named profiles in a dropdown, plus **Follow schedule** to clear its shared, persistent manual override.
+Use the **Editing Profile** dropdown and **Add** / **Remove** buttons to manage multiple named profiles. Each stores independent sources, appearance, and playback settings. The editor remembers the last profile you opened. Choose the **Active Profile** from the matching dropdown for manual selection, or enable **Switch profiles automatically** and edit **Starts At** for each profile. Start times use local `HH:MM` time and must be unique. A profile remains active until the next start time, including across midnight. Existing A/B settings migrate automatically. The **ASCII Wallpaper Profile** panel applet offers the same named profiles in a dropdown, plus **Follow schedule** to clear its shared, persistent manual override.
 
-Select **Perceptual headroom**, **Classic headroom**, **Structure first**, or **Flow domains** under **Render Style**. The two headroom styles select the current perceptual or previous objective directly; there is no separate objective checkbox. The appearance controls show only settings that affect the chosen renderer. Both headroom styles use Sobel edge loss, glyph luminosity bonus, and glyph variety. Perceptual headroom returns the raw Adam terminal, classic headroom retains its post-optimization dithering, and structure uses coverage dither. All styles support font, characters, detail, grayscale, ink polarity, and background. Slideshow profiles also show transition and playback settings.
+Select **Perceptual headroom**, **Classic headroom**, **Structure first**, or **Flow domains** under **Render Style**. The two headroom styles select the current perceptual or previous objective directly; there is no separate objective checkbox. The appearance controls show only settings that affect the chosen renderer. Both headroom styles use Sobel edge loss, glyph luminosity bonus, and glyph variety. Perceptual headroom returns the raw Adam terminal, classic headroom retains its post-optimization dithering, and structure uses coverage dither. All styles support font, characters, detail, grayscale, ink polarity, and background. Slideshow profiles also show transition and playback settings. Video profiles expose subsampling and interpolation controls; Archive profiles use the appearance already saved in the bundle.
 
 Enable **Animate flow** with **Flow domains** to prepare a looping simulation clip. The default is ten seconds at 12 fps. A single-image wallpaper loops continuously; slideshows finish a loop before transitioning from its phase-zero anchor. See [the animation guide](docs/flow-playback.md) for temporal boundary construction, controls, and review.
 
@@ -70,6 +70,47 @@ The rendered directory contains `atlas.png`, `metadata.png`, still grids, transi
 Playback advances only at prepared-frame boundaries, including when a frame is held for several seconds. Each complete frame is composed once into a GPU texture, which stays frozen between frame changes and can be reused when other desktop items redraw. Display-size changes and graphics-context recovery refresh that texture. The RGBA output texture uses four bytes per physical display pixel (about 28 MiB at 3414×2134), plus Qt's render-target buffers and the compact input maps; it does not load the PNG previews for playback.
 
 The service publishes complete renders in immutable generation directories and maintains a separate content-based still cache. Changing transition settings reuses matching stills without overwriting another variant. Cache signatures include the renderer source revision, so local color or solver fixes invalidate old variants and stills even between releases. `--still-cache PATH` enables the same reuse for CLI exports. A forced render publishes a new generation and refreshes the still cache atomically. Requests superseded by the same client are removed from the queue or stopped when no other client needs them. Source-image memory stays bounded to a single still or one image per active salience transition worker; other transition fields use only the prepared grids.
+
+## Video and compressed archives
+
+Video input requires `ffmpeg` and `ffprobe` on `PATH`. The renderer decodes one local video, optimizes its sampled frames with the same ASCII styles, and records source timing for looping wallpaper playback. Audio is omitted. `--frame-stride N` retains source frames 0, N, 2N, and so on; its default is `1`. Subsampling reduces the number of solves while preserving the original video duration. `--video-transition-frames N` inserts exactly N intermediate frames between each sampled pair; its default is `0`. Intermediates divide that pair's time evenly, and the last sampled frame is held until the video's end. There is no added transition across the loop seam.
+
+To download a local source with `yt-dlp` installed, for example:
+
+```sh
+yt-dlp --no-playlist \
+  -f 'bestvideo[height<=480]/best[height<=480]/best' \
+  -o 'bad-apple.%(ext)s' \
+  'https://www.youtube.com/watch?v=FtutLA63Cp8'
+```
+
+Use the downloaded file's actual extension in the render command. Given a local Bad Apple video, prepare a compressed earth mover clip with:
+
+```sh
+.venv/bin/ascii-wallpaper-render \
+  --input-format video \
+  --size 1920x1080 --detail 2 --font "DejaVu Sans Mono" \
+  --crop fit --grayscale --frame-stride 3 --video-transition-frames 2 \
+  --transition-type earth-mover --transition-pace linear --transition-spread 0 \
+  --output-format zip --output bad-apple.ascii.zip \
+  /path/to/bad-apple.mp4
+```
+
+For a 30 fps source, stride 3 solves about ten source frames per second, and two interpolated frames restore roughly 30 prepared frames per second. Increase the stride or use a lower detail setting to reduce rendering work. Video is prepared offline, so a full clip can take substantial time. Each interpolated frame uses the selected glyph path or earth mover transition; the Video settings reveal the transition controls when **Interpolated Frames** is greater than zero.
+
+`--output-format zip` explicitly creates a DEFLATE-compressed archive containing the manifest, atlas, metadata, glyph/color grids, and previews. The default `--output-format directory` keeps the existing directory export. Compression retains the prepared frame data and timing without changing appearance.
+
+To use the clip as a background, choose **Archive** in Plasma wallpaper settings, select `bad-apple.ascii.zip`, and select **Apply**. The service imports the prepared assets into its cache and playback follows the timing in the video manifest. Choose **Video** instead to render a local video directly from settings. Video profiles use the source sequence rather than the separate **Animate flow** loop option; the static Flow domains style remains available.
+
+The CLI also imports an archive into a prepared directory:
+
+```sh
+.venv/bin/ascii-wallpaper-render \
+  --input-format archive --output imported-render \
+  bad-apple.ascii.zip
+```
+
+Slideshow archives use the profile's slide interval and transition time; video archives retain their recorded timing.
 
 ## Quality controls
 

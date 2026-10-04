@@ -46,12 +46,18 @@ Item {
     readonly property var profiles: Profiles.decode(cfg_Profiles)
     property int editProfile: 0
     readonly property string editMode: activeSettings.Mode || "Image"
+    readonly property bool showTransitionControls: editMode === "Slideshow"
+        || (editMode === "Video" && activeSettings.VideoTransitionFrames > 0)
+    readonly property bool showSlideshowTiming: editMode === "Slideshow"
+        || (editMode === "Archive" && !renderer.displayManifest.video)
     readonly property var editImages: activeSettings.Images || []
     readonly property var editingProfile: profiles[editProfile] || ({id: "A", name: "Profile A", startTime: "07:00"})
     property string profileMessage: ""
     property string cfg_FontFamily: "Monospace"
     property string cfg_RenderDirectory: ""
     property string cfg_RenderedState: ""
+    property int cfg_FrameStride: 1
+    property int cfg_VideoTransitionFrames: 0
     property int cfg_TransitionFrames: 16
     property int cfg_TransitionDuration: 1500
     property string cfg_TransitionType: "glyph-path"
@@ -65,6 +71,8 @@ Item {
     property string cfg_FontFamilyB: "Monospace"
     property string cfg_RenderDirectoryB: ""
     property string cfg_RenderedStateB: ""
+    property int cfg_FrameStrideB: 1
+    property int cfg_VideoTransitionFramesB: 0
     property int cfg_TransitionFramesB: 16
     property int cfg_TransitionDurationB: 1500
     property string cfg_TransitionTypeB: "glyph-path"
@@ -505,11 +513,17 @@ Item {
 
     FileDialog {
         id: imagePicker
-        title: "Select Wallpaper"
+        objectName: "sourcePicker"
+        title: root.editMode === "Video" ? "Select Video"
+            : root.editMode === "Archive" ? "Select Prepared ASCII Archive" : "Select Wallpaper"
 
         currentFolder: StandardPaths.standardLocations(StandardPaths.PicturesLocation)[0]
         fileMode: root.editMode === "Slideshow" ? FileDialog.OpenFiles : FileDialog.OpenFile
-        nameFilters: ["Image files (*.png *.jpg *.jpeg)"]
+        nameFilters: root.editMode === "Video"
+            ? ["Video files (*.mp4 *.mkv *.webm *.avi *.mov *.m4v *.mpeg *.mpg *.gif)", "All files (*)"]
+            : root.editMode === "Archive"
+                ? ["Compressed ASCII archives (*.zip)", "All files (*)"]
+                : ["Image files (*.png *.jpg *.jpeg)"]
 
         onAccepted: {
             if (fileMode === FileDialog.OpenFiles) {
@@ -614,9 +628,12 @@ Item {
 
                 PlaybackController {
                     id: previewPlayback
+                    objectName: "previewPlayback"
                     ready: previewShader.ready && previewShader.displayGeneration === renderer.displayGeneration
                     loading: previewShader.loading
                     slideshowEnabled: renderer.displayPlaybackSettings.mode === "Slideshow"
+                        || (renderer.displayPlaybackSettings.mode === "Archive"
+                            && renderer.displayManifest.image_count > 1)
                     manifest: renderer.displayManifest
                     enabled: previewShader.visible
                     imageCount: renderer.displayImageCount
@@ -794,10 +811,11 @@ Item {
 
             Controls.ComboBox {
                 id: modeCombo
+                objectName: "modeCombo"
                 Kirigami.FormData.label: "Source Type:"
                 Layout.fillWidth: true
 
-                model: ["Image", "Slideshow"]
+                model: ["Image", "Slideshow", "Video", "Archive"]
                 currentIndex: model.indexOf(root.editMode)
 
                 onActivated: index => {
@@ -887,13 +905,16 @@ Item {
 
                                 Controls.TextField {
                                     text: root.cleanPath(imageRow.path)
-                                    placeholderText: "Select a file…"
+                                    placeholderText: root.editMode === "Video" ? "Select a video…"
+                                        : root.editMode === "Archive" ? "Select a prepared archive…" : "Select an image…"
                                     readOnly: true
                                     Layout.fillWidth: true
                                 }
 
                                 Controls.Button {
                                     icon.name: "document-open"
+                                    text: root.editMode === "Video" ? "Select Video"
+                                        : root.editMode === "Archive" ? "Select Archive" : "Select Image"
 
                                     visible: root.editMode !== "Slideshow"
                                     enabled: root.editMode !== "Slideshow"
@@ -961,12 +982,61 @@ Item {
                 }
             }
 
+            Controls.Label {
+                objectName: "archiveSourceHint"
+                visible: root.editMode === "Archive"
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: "Import a prepared compressed ASCII archive. Appearance comes from the archive; video archives keep their recorded frame timing."
+            }
+
             Kirigami.Separator {
+                visible: root.editMode === "Video"
+                Kirigami.FormData.isSection: true
+                Kirigami.FormData.label: "Video"
+            }
+
+            Controls.SpinBox {
+                objectName: "frameStrideSpin"
+                visible: root.editMode === "Video"
+                Kirigami.FormData.label: "Frame Subsampling:"
+                from: 1
+                to: 10000
+                editable: true
+                value: root.activeSettings.FrameStride
+                onValueModified: root.setProfileSetting("FrameStride", value)
+                Controls.ToolTip.text: "Render every Nth source frame. One renders every frame. Playback keeps the video's original duration."
+                Controls.ToolTip.visible: hovered
+            }
+
+            Controls.SpinBox {
+                objectName: "videoTransitionFramesSpin"
+                visible: root.editMode === "Video"
+                Kirigami.FormData.label: "Interpolated Frames:"
+                from: 0
+                to: 118
+                editable: true
+                value: root.activeSettings.VideoTransitionFrames
+                onValueModified: root.setProfileSetting("VideoTransitionFrames", value)
+                Controls.ToolTip.text: "Insert this many transition frames between sampled source frames. Zero disables interpolation."
+                Controls.ToolTip.visible: hovered
+            }
+
+            Controls.Label {
+                visible: root.editMode === "Video"
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: "Video decoding requires FFmpeg and FFprobe. Subsampling reduces rendering work; interpolation fills the time between sampled frames. Playback loops without audio."
+            }
+
+            Kirigami.Separator {
+                visible: root.editMode !== "Archive"
                 Kirigami.FormData.isSection: true
                 Kirigami.FormData.label: "Style"
             }
 
             Controls.ComboBox {
+                visible: root.editMode !== "Archive"
                 objectName: "renderStyleCombo"
                 Kirigami.FormData.label: "Render Style:"
                 Layout.fillWidth: true
@@ -982,6 +1052,7 @@ Item {
             }
 
             Controls.CheckBox {
+                visible: root.editMode !== "Archive"
                 id: invertInkCheck
                 Kirigami.FormData.label: "Ink Polarity:"
                 text: "Dark ink on a light canvas"
@@ -990,6 +1061,7 @@ Item {
             }
 
             Controls.CheckBox {
+                visible: root.editMode !== "Archive"
                 id: grayscaleCheck
                 Kirigami.FormData.label: "Grayscale:"
                 checked: root.activeSettings.Grayscale
@@ -997,11 +1069,13 @@ Item {
             }
 
             Kirigami.Separator {
+                visible: root.editMode !== "Archive"
                 Kirigami.FormData.isSection: true
                 Kirigami.FormData.label: "Appearance"
             }
 
             Controls.ComboBox {
+                visible: root.editMode !== "Archive"
                 id: fontCombo
                 Layout.fillWidth: true
                 editable: true
@@ -1022,6 +1096,7 @@ Item {
             }
 
             ColumnLayout {
+                visible: root.editMode !== "Archive"
                 Kirigami.FormData.label: "Characters:"
                 Layout.fillWidth: true
 
@@ -1062,6 +1137,7 @@ Item {
             }
 
             RowLayout {
+                visible: root.editMode !== "Archive"
                 Kirigami.FormData.label: "Detail Level:"
 
                 Controls.ComboBox {
@@ -1092,7 +1168,7 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Dithering Strength:"
-                visible: root.activeSettings.RenderStyle === "classic"
+                visible: root.editMode !== "Archive" && (root.activeSettings.RenderStyle === "classic")
 
                 Controls.Slider {
                     id: ditherSlider
@@ -1112,7 +1188,7 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Sobel Edge Loss:"
-                visible: root.activeSettings.RenderStyle !== "structure"
+                visible: root.editMode !== "Archive" && (root.activeSettings.RenderStyle !== "structure")
 
                 Controls.Slider {
                     id: gradientLossSlider
@@ -1132,7 +1208,7 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Glyph Luminosity Bonus:"
-                visible: root.activeSettings.RenderStyle !== "structure"
+                visible: root.editMode !== "Archive" && (root.activeSettings.RenderStyle !== "structure")
 
                 Controls.Slider {
                     id: glyphLuminanceBonusSlider
@@ -1152,7 +1228,7 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Glyph Variety:"
-                visible: root.activeSettings.RenderStyle !== "structure"
+                visible: root.editMode !== "Archive" && (root.activeSettings.RenderStyle !== "structure")
 
                 Controls.Slider {
                     id: glyphEntropySlider
@@ -1175,7 +1251,7 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Structure Dither:"
-                visible: root.activeSettings.RenderStyle === "structure"
+                visible: root.editMode !== "Archive" && (root.activeSettings.RenderStyle === "structure")
 
                 Controls.Slider {
                     id: structureDitherSlider
@@ -1195,7 +1271,7 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Flow Influence:"
-                visible: root.activeSettings.RenderStyle === "flow"
+                visible: root.editMode !== "Archive" && (root.activeSettings.RenderStyle === "flow")
                 Controls.Slider {
                     id: flowStrengthSlider
                     objectName: "flowStrengthSlider"
@@ -1214,7 +1290,7 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Eddy Strength:"
-                visible: root.activeSettings.RenderStyle === "flow"
+                visible: root.editMode !== "Archive" && (root.activeSettings.RenderStyle === "flow")
                 Controls.Slider {
                     id: flowEddiesSlider
                     objectName: "flowEddiesSlider"
@@ -1231,7 +1307,7 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Domain Size:"
-                visible: root.activeSettings.RenderStyle === "flow"
+                visible: root.editMode !== "Archive" && (root.activeSettings.RenderStyle === "flow")
                 Controls.Slider {
                     id: flowScaleSlider
                     objectName: "flowScaleSlider"
@@ -1250,14 +1326,14 @@ Item {
 
             Controls.CheckBox {
                 objectName: "flowAnimatedCheck"
-                visible: root.activeSettings.RenderStyle === "flow"
+                visible: root.editMode !== "Archive" && root.editMode !== "Video" && (root.activeSettings.RenderStyle === "flow")
                 Kirigami.FormData.label: "Flow Playback:"
                 text: "Animate flow"
                 checked: root.activeSettings.FlowAnimated
                 onToggled: root.setProfileSetting("FlowAnimated", checked)
             }
             RowLayout {
-                visible: root.activeSettings.RenderStyle === "flow" && root.activeSettings.FlowAnimated
+                visible: root.editMode !== "Archive" && root.editMode !== "Video" && (root.activeSettings.RenderStyle === "flow" && root.activeSettings.FlowAnimated)
                 Kirigami.FormData.label: "Loop Length:"
                 Controls.SpinBox {
                     objectName: "flowLoopSecondsSpin"
@@ -1268,7 +1344,7 @@ Item {
                 Controls.Label { text: "seconds" }
             }
             RowLayout {
-                visible: root.activeSettings.RenderStyle === "flow" && root.activeSettings.FlowAnimated
+                visible: root.editMode !== "Archive" && root.editMode !== "Video" && (root.activeSettings.RenderStyle === "flow" && root.activeSettings.FlowAnimated)
                 Kirigami.FormData.label: "Animation Frames:"
                 Controls.SpinBox {
                     objectName: "flowFpsSpin"
@@ -1279,13 +1355,14 @@ Item {
                 Controls.Label { text: "per second" }
             }
             Controls.Label {
-                visible: root.activeSettings.RenderStyle === "flow" && root.activeSettings.FlowAnimated
+                visible: root.editMode !== "Archive" && root.editMode !== "Video" && (root.activeSettings.RenderStyle === "flow" && root.activeSettings.FlowAnimated)
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
                 text: "Longer loops and more frames take longer to render. Slides change at the end of a complete loop."
             }
 
             RowLayout {
+                visible: root.editMode !== "Archive"
                 Kirigami.FormData.label: "Background:"
 
                 Controls.ComboBox {
@@ -1313,14 +1390,14 @@ Item {
 
             Kirigami.Separator {
                 Kirigami.FormData.isSection: true
-                Kirigami.FormData.label: "Transition"
-                visible: root.editMode === "Slideshow"
+                Kirigami.FormData.label: root.editMode === "Archive" ? "Playback" : "Transition"
+                visible: root.showTransitionControls || root.showSlideshowTiming
             }
 
             Controls.ComboBox {
                 objectName: "transitionType"
                 Kirigami.FormData.label: "Transition Type:"
-                visible: root.editMode === "Slideshow"
+                visible: root.showTransitionControls
                 Layout.fillWidth: true
                 model: ["Glyph paths", "Earth mover"]
                 currentIndex: ["glyph-path", "earth-mover"].indexOf(root.activeSettings.TransitionType)
@@ -1338,7 +1415,7 @@ Item {
 
             Controls.SpinBox {
                 Kirigami.FormData.label: "Transition Time (ms):"
-                visible: root.editMode === "Slideshow"
+                visible: root.showSlideshowTiming
                 from: 100
                 to: 30000
                 stepSize: 100
@@ -1348,7 +1425,7 @@ Item {
 
             Controls.ComboBox {
                 Kirigami.FormData.label: "Transition Pacing:"
-                visible: root.editMode === "Slideshow"
+                visible: root.showTransitionControls
                 Layout.fillWidth: true
                 model: ["Linear", "Ease in", "Ease out", "Ease in and out"]
                 currentIndex: ["linear", "ease-in", "ease-out", "ease-in-out"].indexOf(root.activeSettings.TransitionPace)
@@ -1357,7 +1434,7 @@ Item {
 
             Controls.ComboBox {
                 Kirigami.FormData.label: "Morph Pattern:"
-                visible: root.editMode === "Slideshow"
+                visible: root.showTransitionControls
                 Layout.fillWidth: true
                 model: ["Blue noise dissolve", "Ripple", "Spiral", "Directional flow", "From edges", "Image salience"]
                 currentIndex: ["blue-noise", "ripple", "spiral", "directional", "edge", "salience"].indexOf(root.activeSettings.TransitionField)
@@ -1366,7 +1443,7 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Spatial Stagger:"
-                visible: root.editMode === "Slideshow"
+                visible: root.showTransitionControls
                 Controls.Slider {
                     id: staggerSlider
                     Layout.fillWidth: true
@@ -1381,7 +1458,7 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Slide Interval:"
-                visible: root.editMode === "Slideshow"
+                visible: root.showSlideshowTiming
 
                 Controls.Slider {
                     id: intervalSlider

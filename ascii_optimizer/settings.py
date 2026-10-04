@@ -50,6 +50,15 @@ def normalize_options(raw: Mapping) -> dict:
     if not isinstance(raw, Mapping):
         raise ValueError("Render settings must be an object")
     options = dict(raw)
+    input_format = options.setdefault("input_format", "images")
+    if input_format not in ("images", "video", "archive"):
+        raise ValueError("Unknown input format")
+    options["frame_stride"] = _integer(options.get("frame_stride", 1), "frame_stride", 1, 10000)
+    options["video_transition_frames"] = _integer(options.get("video_transition_frames", 0),
+                                                   "video_transition_frames", 0, 118)
+    if input_format != "video":
+        options["frame_stride"] = 1
+        options["video_transition_frames"] = 0
     # Legacy clients may still send a shortlist size. It no longer affects
     # rendering, and must not create separate cache variants.
     options.pop("candidates", None)
@@ -113,7 +122,7 @@ def normalize_options(raw: Mapping) -> dict:
     animated = options.setdefault("flow_animated", False)
     if not isinstance(animated, bool):
         raise ValueError("flow_animated must be a boolean")
-    options["flow_animated"] = animated and style == "flow"
+    options["flow_animated"] = animated and style == "flow" and input_format != "video"
     for name, default, low, high in (
         ("flow_loop_seconds", DEFAULT_FLOW_LOOP_SECONDS, 1, 30),
         ("flow_fps", DEFAULT_FLOW_FPS, 4, 24),

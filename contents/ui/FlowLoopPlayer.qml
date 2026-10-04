@@ -7,7 +7,17 @@ Item {
     property bool ready: false
     property bool loading: false
     property int frameCount: 120
-    property int duration: 10000
+    property real duration: 10000
+    property var frameDurations: []
+    readonly property var frameOffsets: {
+        if (!frameDurations || frameDurations.length !== frameCount) return []
+        const offsets = [0]
+        for (const hold of frameDurations) {
+            if (!Number.isFinite(Number(hold)) || Number(hold) <= 0) return []
+            offsets.push(offsets[offsets.length - 1] + Number(hold))
+        }
+        return offsets
+    }
     property string clipKey: ""
     property int frameIndex: 0
     property int ticks: 0
@@ -23,6 +33,7 @@ Item {
     onClipKeyChanged: reset()
     onFrameCountChanged: reset()
     onDurationChanged: reset()
+    onFrameOffsetsChanged: reset()
     onPausedChanged: {
         if (!playing) return
         if (paused) {
@@ -55,21 +66,30 @@ Item {
             if (!playing || paused) return
         }
         if (!startedAt) startedAt = Date.now()
-        const deadline = (ticks + 1) * Math.max(1, duration) / frameCount
+        const deadline = nextDeadline()
         frameTimer.interval = Math.max(1, Math.ceil(deadline - (Date.now() - startedAt - pausedDuration)))
         frameTimer.restart()
+    }
+
+    function nextDeadline() {
+        return frameOffsets.length ? Math.floor(ticks / frameCount) * frameOffsets[frameCount]
+            + frameOffsets[frameIndex + 1] : (ticks + 1) * Math.max(1, duration) / frameCount
+    }
+
+    function currentHold() {
+        return frameOffsets.length ? frameOffsets[frameIndex + 1] - frameOffsets[frameIndex]
+            : Math.max(1, duration) / frameCount
     }
 
     Timer {
         id: frameTimer
         onTriggered: {
             if (!player.playing || player.paused) return
-            const deadline = player.startedAt + player.pausedDuration
-                + (player.ticks + 1) * Math.max(1, player.duration) / player.frameCount
+            const deadline = player.startedAt + player.pausedDuration + player.nextDeadline()
             // A blocked event loop shifts the clock too; present every frame
             // with its normal hold instead of bursting through late deadlines.
             const late = Date.now() - deadline
-            if (late >= Math.max(1, player.duration) / player.frameCount)
+            if (late >= player.currentHold())
                 player.pausedDuration += late
             player.ticks++
             player.frameIndex = player.ticks % player.frameCount

@@ -134,13 +134,21 @@ def _screen_size(name: str, fallback: list[int]) -> tuple[int, int]:
 
 
 def _validated_request(raw: dict) -> dict:
-    options = normalize_options(raw)
+    input_format = raw.get("input_format", "images")
     selected = raw.get("images")
     if not isinstance(selected, list) or not 1 <= len(selected) <= 50 or any(not isinstance(path, str) for path in selected):
-        raise ValueError("Select at least one readable image (at most 50).")
+        raise ValueError("Select at least one readable source file (at most 50).")
     images = [str(Path(path).expanduser().resolve()) for path in selected]
     if any(not Path(path).is_file() for path in images):
-        raise ValueError("Select readable image files.")
+        raise ValueError("Select readable source files.")
+    if input_format in ("video", "archive") and len(images) != 1:
+        raise ValueError(f"Select exactly one {input_format} file.")
+    if input_format == "archive":
+        from .archive import read_archive_manifest
+        read_archive_manifest(Path(images[0]))
+        return {"input_format": "archive", "images": images,
+                "image_hashes": [_file_hash(Path(images[0]))]}
+    options = normalize_options(raw)
     hint = validate_size(raw.get("size", [1920, 1080]), 16384)
     size = validate_size(_screen_size(str(raw.get("screen", "")), list(hint)), 16384)
     font = Path(options["font"]).expanduser()
@@ -150,7 +158,8 @@ def _validated_request(raw: dict) -> dict:
         font = Path(result.stdout.strip())
     if not font.is_file():
         raise ValueError("Could not find the selected font")
-    names = ("chars", "detail", "grayscale", "frames", "dither", "structure_dither",
+    names = ("input_format", "frame_stride", "video_transition_frames",
+             "chars", "detail", "grayscale", "frames", "dither", "structure_dither",
              "transition_type", "transition_pace", "transition_field", "transition_spread", "gradient_loss_strength",
              "glyph_luminance_bonus", "glyph_entropy_strength", "style", "invert_ink", "background", "crop", "steps",
              "transition_steps", "seed", "perceptual_loss", "flow_strength", "flow_eddies", "flow_scale",
@@ -241,6 +250,12 @@ class RenderQueue:
             signature = manifest["signature"]
             if (not isinstance(signature, dict) or any(signature.get(name) != value for name, value in settings.items())):
                 return None
+            if settings.get("input_format") in ("video", "archive"):
+                from .archive import manifest_asset_paths
+                if settings["input_format"] == "video" and manifest.get("schema_version") != 3:
+                    return None
+                return manifest if all((directory / path).is_file()
+                                       for path in manifest_asset_paths(manifest)) else None
             count, frames = len(settings["images"]), settings["frames"]
             expected = [directory / "atlas.png", directory / "metadata.png"]
             expected.extend(directory / "stills" / f"{index:04d}" / f"{kind}.png"
@@ -352,7 +367,9 @@ class RenderQueue:
     @staticmethod
     def _public(job: dict, generation: str = "") -> dict:
         result = {name: job[name] for name in ("id", "state", "progress", "stage", "error", "directory", "generation", "settings")}
-        result.update(image_count=len(job["settings"]["images"]), frame_count=job["settings"]["frames"])
+        manifest = job.get("manifest", {})
+        result.update(image_count=manifest.get("image_count", len(job["settings"]["images"])),
+                      frame_count=manifest.get("frame_count", job["settings"].get("frames", 16)))
         if job["state"] == "ready" and generation != job["generation"]:
             result["manifest"] = job["manifest"]
         return result
@@ -499,10 +516,15 @@ class RenderQueue:
 
     def _command(self, job: dict) -> list[str]:
         settings = job["settings"]
+        if settings.get("input_format") == "archive":
+            return [sys.executable, "-m", "ascii_optimizer.launcher", "-m", "ascii_optimizer.cli",
+                    "--input-format", "archive", "--output", job["directory"],
+                    "--generation", job["generation"], "--progress-json", *settings["images"]]
         command = [sys.executable, "-m", "ascii_optimizer.launcher", "-m", "ascii_optimizer.cli", "--output", job["directory"],
                    "--generation", job["generation"], "--still-cache", str(self.cache / "stills"),
                    "--size", f"{settings['size'][0]}x{settings['size'][1]}", "--progress-json"]
-        for name in ("font", "chars", "detail", "frames", "transition_type", "transition_pace", "transition_field",
+        for name in ("input_format", "frame_stride", "video_transition_frames",
+                     "font", "chars", "detail", "frames", "transition_type", "transition_pace", "transition_field",
                      "transition_spread", "dither", "gradient_loss_strength", "glyph_luminance_bonus", "glyph_entropy_strength",
                      "style", "structure_dither", "background", "crop", "steps", "transition_steps", "seed",
                      "flow_strength", "flow_eddies", "flow_scale", "flow_loop_seconds", "flow_fps",

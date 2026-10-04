@@ -90,4 +90,71 @@ TestCase {
         compare(shader.displayedKey, displayed)
         compare(shader.displayGeneration, "loop")
     }
+
+    function videoManifest() {
+        return {schema_version: 3, image_count: 1, frame_count: 4,
+            output_size: [4, 4], cell_size: [2, 2], atlas_count: 1,
+            video: {path: "video", frame_count: 4, duration_ms: 650,
+                    frame_durations_ms: [200, 50, 200, 200]}}
+    }
+
+    function test_video_preserves_frame_holds_and_loading_pause() {
+        const controller = createTemporaryObject(controllerComponent, tests,
+            {ready: true, manifest: videoManifest(), generation: "video"})
+        compare(controller.loopFrame, 0)
+        wait(100)
+        compare(controller.loopFrame, 0)
+        tryCompare(controller, "loopFrame", 1, 400)
+        controller.loading = true
+        wait(120)
+        compare(controller.loopFrame, 1)
+        controller.loading = false
+        tryCompare(controller, "loopFrame", 2, 400)
+        tryCompare(controller, "loopFrame", 3, 400)
+        tryCompare(controller, "loopFrame", 0, 400)
+        controller.generation = "replacement-video"
+        compare(controller.loopFrame, 0)
+    }
+
+    function test_video_descriptor_wrap_and_missing_frame_retains_display() {
+        const shader = createTemporaryObject(shaderComponent, tests,
+            {renderDirectory: TestConfig.fixtureRoot + "/old", generation: "video",
+             manifest: videoManifest(), loopFrame: 3})
+        tryCompare(shader, "loading", false, 2000)
+        verify(shader.displayedKey.indexOf("video/0003") >= 0)
+        shader.loopFrame = 0
+        tryVerify(function() { return shader.displayedKey.indexOf("video/0000") >= 0 }, 2000)
+        const displayed = shader.displayedKey
+        shader.renderDirectory = TestConfig.fixtureRoot + "/partial"
+        shader.generation = "partial-video"
+        tryVerify(function() { return !!shader.frameError }, 2000)
+        compare(shader.displayedKey, displayed)
+    }
+
+    function test_single_frame_video_holds_without_a_timer() {
+        const clip = videoManifest()
+        clip.video.frame_count = 1
+        clip.video.frame_durations_ms = [650]
+        const controller = createTemporaryObject(controllerComponent, tests,
+            {ready: true, manifest: clip})
+        verify(controller.hasLoop)
+        compare(controller.loopFrame, 0)
+        wait(100)
+        compare(controller.loopFrame, 0)
+    }
+
+    function test_switch_between_still_flow_and_video_manifests() {
+        const controller = createTemporaryObject(controllerComponent, tests,
+            {ready: true, enabled: false})
+        compare(controller.hasLoop, false)
+        controller.manifest = videoManifest()
+        compare(controller.hasLoop, true)
+        compare(controller.loopInfo.frame_count, 4)
+        controller.manifest = manifest(1)
+        compare(controller.hasLoop, true)
+        compare(controller.loopInfo.path, "loops/0000")
+        controller.manifest = ({})
+        compare(controller.hasLoop, false)
+        compare(controller.loopFrame, -1)
+    }
 }
