@@ -129,7 +129,8 @@ def test_still_cache_reuses_transition_variants_and_keeps_copies_independent(fas
     cli.build(first)
     assert len(calls) == 2
     old_map = (first.output / "stills/0000/color.png").read_bytes()
-    second = arguments("second", frames=5, transition_steps=7, transition_field="ripple")
+    second = arguments("second", frames=5, transition_steps=7, transition_field="ripple",
+                       transition_type="earth-mover")
     cli.build(second)
     assert len(calls) == 2
     assert (second.output / "stills/0000/color.png").read_bytes() == old_map
@@ -197,15 +198,17 @@ def test_preview_and_manifest_backgrounds_use_the_serialized_maps(tmp_path: Path
         np.testing.assert_array_equal(np.asarray(image), expected)
 
 
-def test_transition_endpoints_copy_exact_still_bytes_and_manifest_describes_every_frame(fast_batch):
+@pytest.mark.parametrize("transition_type", ["glyph-path", "earth-mover"])
+def test_transition_endpoints_copy_exact_still_bytes_and_manifest_describes_every_frame(fast_batch, transition_type):
     arguments, _, _ = fast_batch
-    args = arguments(generation="requested-generation")
+    args = arguments(generation="requested-generation", transition_type=transition_type)
     cli.build(args)
     manifest = json.loads((args.output / "manifest.json").read_text())
     assert manifest["generation"] == "requested-generation"
     assert manifest["output_size"] == [4, 4]
     assert manifest["cell_size"] == [2, 2]
     assert manifest["atlas_count"] == 2
+    assert manifest["signature"]["transition_type"] == transition_type
     assert len(manifest["background_labs"]) == 2 + 2 * args.frames
     for index in range(2):
         following = (index + 1) % 2
@@ -281,6 +284,71 @@ def test_transition_colors_follow_saved_keyframes_without_refitting(
                                       playback_rgb8(endpoint.color))
 
 
+def test_earth_mover_prepared_frame_moves_ink_to_a_middle_cell(fast_batch):
+    arguments, _, masks = fast_batch
+    args = arguments(frames=5, transition_type="earth-mover", transition_pace="linear",
+                     transition_spread=0, size=(10, 2))
+    glyphs = np.array([[1, 0, 0, 0, 0]], np.uint8)
+    colors = np.broadcast_to(np.array([0.8, 0, 0], np.float32), (1, 5, 3)).copy()
+    background = np.zeros(3, np.float32)
+    cli._save_grid(Grid(glyphs, colors, background), args.output / "stills/0000", False, masks, args.size)
+    cli._save_grid(Grid(glyphs[:, ::-1], colors, background), args.output / "stills/0001", False, masks, args.size)
+    cli._render_transition(0, args.images, args.output, args, masks, (2, 2),
+                           cli.glyph_paths(masks), lambda *_: None)
+    midpoint = cli._load_grid(args.output / "transitions/0000-0001/0002")
+    np.testing.assert_array_equal(midpoint.glyph, [[0, 0, 1, 0, 0]])
+    np.testing.assert_array_equal(playback_rgb8(midpoint.color[0, 2]), playback_rgb8(colors[0, 0]))
+
+
+def test_transition_type_changes_reuse_stills_but_regenerate_transitions(fast_batch, monkeypatch):
+    arguments, calls, _ = fast_batch
+    args = arguments()
+    cli.build(args)
+    rendered = []
+    original = cli._render_transition
+
+    def track(index, *args, **kwargs):
+        rendered.append(index)
+        return original(index, *args, **kwargs)
+
+    monkeypatch.setattr(cli, "_render_transition", track)
+    cli.build(arguments(transition_type="earth-mover"))
+    assert calls == [0, 1]
+    assert sorted(rendered) == [0, 1]
+    rendered.clear()
+    cli.build(arguments(transition_type="earth-mover"))
+    assert rendered == []
+
+
+@pytest.mark.parametrize("transition_type", [None, "earth-mover"])
+def test_transition_review_supports_legacy_manifests_and_earth_mover(fast_batch, monkeypatch, transition_type):
+    import sys
+    from scripts import compare_transitions
+
+    arguments, _, _ = fast_batch
+    args = arguments(style="structure", perceptual_loss=False)
+    cli.build(args)
+    original_path = args.output / "manifest.json"
+    manifest = json.loads(original_path.read_text())
+    manifest["signature"].pop("transition_type")
+    original_path.write_text(json.dumps(manifest))
+    original_bytes = original_path.read_bytes()
+    output = args.output.parent / "review"
+    command = ["compare_transitions", str(args.output), "--output", str(output)]
+    if transition_type:
+        command.extend(["--transition-type", transition_type])
+    monkeypatch.setattr(sys, "argv", command)
+    monkeypatch.setattr(compare_transitions.torch, "set_num_threads", lambda _: None)
+    compare_transitions.main()
+    revised = json.loads((output / "interpolated_assets/manifest.json").read_text())
+    assert revised["signature"]["transition_type"] == (transition_type or "glyph-path")
+    report = json.loads((output / "metrics.json").read_text())
+    scene = report["images"]["slideshow"]
+    assert scene["ppd"] == 67
+    assert ("earth_mover" if transition_type else "oklab_interpolation") in scene["variants"]
+    assert original_path.read_bytes() == original_bytes
+
+
 @pytest.mark.parametrize("invert_ink", [False, True])
 @pytest.mark.parametrize("background", ["#000000", "#ffffff", "#203040"])
 def test_fixed_background_is_the_selected_display_color(invert_ink, background):
@@ -328,10 +396,11 @@ def test_transition_pairs_overlap_and_progress_never_goes_backwards(fast_batch, 
     assert progress[-1] == 1
 
 
-def test_parallel_transitions_match_serial_assets(fast_batch):
+@pytest.mark.parametrize("transition_type", ["glyph-path", "earth-mover"])
+def test_parallel_transitions_match_serial_assets(fast_batch, transition_type):
     arguments, _, _ = fast_batch
-    serial = arguments("serial", frames=5, transition_workers=1)
-    parallel = arguments("parallel", frames=5, transition_workers=2)
+    serial = arguments("serial", frames=5, transition_workers=1, transition_type=transition_type)
+    parallel = arguments("parallel", frames=5, transition_workers=2, transition_type=transition_type)
     cli.build(serial)
     cli.build(parallel)
     for path in serial.output.rglob("*.png"):

@@ -307,6 +307,18 @@ def test_service_entropy_defaults_and_changes_job_identity_and_command(tmp_path,
     assert changed["id"] != first["id"]
 
 
+def test_service_transition_type_changes_job_identity_and_command(tmp_path, request_settings):
+    queue = service.RenderQueue(tmp_path / "cache", start_worker=False)
+    first = queue.submit(request_settings)
+    assert queue.jobs[first["id"]]["settings"]["transition_type"] == "glyph-path"
+    changed = queue.submit(dict(request_settings, transition_type="earth-mover"))
+    assert changed["id"] != first["id"]
+    command = queue._command(queue.jobs[changed["id"]])
+    assert command[command.index("--transition-type") + 1] == "earth-mover"
+    with pytest.raises(ValueError, match="transition_type"):
+        normalize_options({"transition_type": "invalid"})
+
+
 @pytest.mark.parametrize("payload", ["[]", "null", "3", "invalid JSON"])
 def test_corrupt_override_falls_back_to_auto(tmp_path, monkeypatch, payload):
     path = tmp_path / "override.json"

@@ -410,3 +410,7 @@ previews for both transition directions. It leaves the input directory intact.
 Choose **original** for A and **oklab interpolation** for B. P plays the whole
 slideshow with short holds at each key frame; Space switches between the
 synchronized versions. The frame slider supports paused comparisons.
+
+Add `--transition-type earth-mover` to compare spatial transport against the saved
+transitions using the same stills and atlas, then select **earth mover** for B.
+The report records the chosen type in the revised asset manifest.

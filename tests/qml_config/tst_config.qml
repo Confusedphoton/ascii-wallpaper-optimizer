@@ -33,6 +33,29 @@ TestCase {
         return properties
     }
 
+    function test_earth_mover_selection_persists_across_profiles() {
+        const item = page({cfg_Mode: "Slideshow", cfg_ModeB: "Slideshow"})
+        item.editProfile = 0
+        const selector = findChild(item, "transitionType")
+        verify(selector.visible)
+        compare(selector.currentIndex, 0)
+        selector.activated(1)
+        compare(item.activeSettings.TransitionType, "earth-mover")
+        compare(findChild(item, "renderClient").requestSettings.transition_type, "earth-mover")
+        item.editProfile = 1
+        compare(item.activeSettings.TransitionType, "glyph-path")
+        item.saveConfig()
+        const saved = snapshot(item)
+        item.destroy()
+        const reopened = page(saved)
+        reopened.editProfile = 0
+        compare(reopened.activeSettings.TransitionType, "earth-mover")
+        compare(findChild(reopened, "transitionType").currentIndex, 1)
+        compare(findChild(reopened, "renderClient").requestSettings.transition_type, "earth-mover")
+        reopened.editProfile = 1
+        compare(reopened.activeSettings.TransitionType, "glyph-path")
+    }
+
     function test_flow_animation_options_persist_across_profiles() {
         const item = page({cfg_ProfileSettingsInitialized: true})
         item.editProfile = 0

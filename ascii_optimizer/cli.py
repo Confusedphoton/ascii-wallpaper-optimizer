@@ -69,16 +69,19 @@ from .tone import (
 from .transition import (
     FIELDS,
     PACES,
+    TYPES,
     ease,
+    earth_mover_destinations,
     glyph_paths,
     local_progress,
     path_glyphs,
     phase_offsets,
+    transport_cells,
 )
 
 MAP_KINDS = ("glyph", "color", "background")
 STILL_KINDS = (*MAP_KINDS, "preview")
-TRANSITION_SETTINGS = {"frames", "transition_steps", "transition_pace", "transition_field", "transition_spread"}
+TRANSITION_SETTINGS = {"frames", "transition_steps", "transition_type", "transition_pace", "transition_field", "transition_spread"}
 
 
 def _atomic_json(path: Path, value: dict) -> None:
@@ -396,17 +399,26 @@ def _cache_loop(source, entry, signature):
 def _render_transition(index: int, images: list[Path], output: Path,
                        args: argparse.Namespace, masks: np.ndarray, cell: tuple[int, int],
                        paths: list[list[list[int]]], report: Callable[[float, str], None]) -> dict:
-    """Walk glyph paths while interpolating the exact saved endpoint colors."""
+    """Prepare glyph morphs or spatial transport from the saved endpoints."""
     following = (index + 1) % len(images)
     base = output / "transitions" / f"{index:04d}-{following:04d}"
     backgrounds = {}
     print(f"Rendering transition {index + 1}/{len(images)}", flush=True)
     start = _load_grid(output / "stills" / f"{index:04d}")
     destination = _load_grid(output / "stills" / f"{following:04d}")
-    previous = start
-    shape = previous.glyph.shape
+    shape = start.glyph.shape
+    destinations = None
+    target_glyphs, target_colors = destination.glyph, destination.color
+    if getattr(args, "transition_type", "glyph-path") == "earth-mover":
+        report(0.0, f"Transition {index + 1}/{len(images)}: matching earth mover regions")
+        destinations = earth_mover_destinations(
+            start.glyph, destination.glyph, start.color, destination.color,
+            start.background, destination.background, masks, invert_ink=args.invert_ink)
+        target_glyphs = destination.glyph.ravel()[destinations]
+        target_colors = destination.color.reshape(-1, 3)[destinations]
+    previous_glyphs = start.glyph
     longest = max(len(paths[int(a)][int(b)]) - 1 for a, b in np.unique(
-        np.stack((previous.glyph.ravel(), destination.glyph.ravel()), axis=1), axis=0))
+        np.stack((start.glyph.ravel(), target_glyphs.ravel()), axis=1), axis=0))
     if longest > args.frames - 1:
         raise ValueError(f"This transition needs at least {longest + 1} frames for adjacent glyph steps")
     source_target = (load_target(images[index], args.size, args.crop, args.grayscale)
@@ -423,14 +435,17 @@ def _render_transition(index: int, images: list[Path], output: Path,
             grid = destination
         else:
             local = local_progress(progress, offsets, args.transition_spread)
-            glyphs = path_glyphs(start.glyph, destination.glyph, local, paths,
-                                previous.glyph, args.frames - 1 - frame)
+            glyphs = path_glyphs(start.glyph, target_glyphs, local, paths,
+                                previous_glyphs, args.frames - 1 - frame)
+            previous_glyphs = glyphs
             # These are already decoded playback OKLab colors. Use the same
             # per-cell clock as the glyphs, anchored to the stills rather than
             # accumulating a fit from the preceding transition frame.
-            color = (1 - local[..., None]) * start.color + local[..., None] * destination.color
+            color = (1 - local[..., None]) * start.color + local[..., None] * target_colors
             # Backgrounds are uniform, so follow the shared eased clock.
             background = (1 - progress) * start.background + progress * destination.background
+            if destinations is not None:
+                glyphs, color = transport_cells(glyphs, color, background, destinations, local, masks)
             grid = Grid(glyphs, color, background)
         frame_dir = base / f"{frame:04d}"
         if frame in (0, args.frames - 1):
@@ -438,7 +453,6 @@ def _render_transition(index: int, images: list[Path], output: Path,
         else:
             grid = _save_grid(grid, frame_dir, False, masks, args.size, args.invert_ink)
         backgrounds[f"transitions/{index:04d}-{following:04d}/{frame:04d}"] = grid.background.tolist()
-        previous = grid
         if frame not in (0, args.frames - 1):
             report(float(frame), f"Transition {index + 1}/{len(images)}: finished frame {frame + 1}/{args.frames}")
     return backgrounds
@@ -504,6 +518,7 @@ def build(args: argparse.Namespace) -> None:
         "crop": args.crop, "grayscale": args.grayscale,
         "frames": args.frames, "steps": args.steps,
         "transition_steps": args.transition_steps,
+        "transition_type": args.transition_type,
         "transition_pace": args.transition_pace, "transition_field": args.transition_field,
         "transition_spread": args.transition_spread,
         "glyph_search": "all" if style != "structure" else "structure",
@@ -550,7 +565,7 @@ def build(args: argparse.Namespace) -> None:
                                if key not in {"images", "image_hashes", *TRANSITION_SETTINGS})
     transition_settings_match = still_settings_match and all(
         old_signature.get(key) == signature[key] for key in
-        ("frames", "transition_steps", "transition_pace", "transition_field", "transition_spread"))
+        TRANSITION_SETTINGS)
     old_hashes = old_signature.get("image_hashes", [])
     if not isinstance(old_hashes, list):
         old_hashes = []
@@ -701,6 +716,8 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--crop", choices=("fill", "fit"), default=defaults["crop"])
     parser.add_argument("--grayscale", action="store_true")
     parser.add_argument("--frames", type=int, default=defaults["frames"], help="Frames per slideshow transition")
+    parser.add_argument("--transition-type", choices=TYPES, default=defaults["transition_type"],
+                        help="Glyph changes in place or earth mover transport across cells")
     parser.add_argument("--transition-pace", choices=PACES, default=defaults["transition_pace"])
     parser.add_argument("--transition-field", choices=FIELDS, default=defaults["transition_field"])
     parser.add_argument("--transition-spread", type=float, default=defaults["transition_spread"])

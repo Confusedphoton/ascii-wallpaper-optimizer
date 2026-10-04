@@ -54,6 +54,7 @@ Item {
     property string cfg_RenderedState: ""
     property int cfg_TransitionFrames: 16
     property int cfg_TransitionDuration: 1500
+    property string cfg_TransitionType: "glyph-path"
     property string cfg_TransitionPace: "ease-in-out"
     property string cfg_TransitionField: "blue-noise"
     property real cfg_TransitionSpread: 0.65
@@ -66,6 +67,7 @@ Item {
     property string cfg_RenderedStateB: ""
     property int cfg_TransitionFramesB: 16
     property int cfg_TransitionDurationB: 1500
+    property string cfg_TransitionTypeB: "glyph-path"
     property string cfg_TransitionPaceB: "ease-in-out"
     property string cfg_TransitionFieldB: "blue-noise"
     property real cfg_TransitionSpreadB: 0.65
@@ -1313,6 +1315,16 @@ Item {
                 Kirigami.FormData.isSection: true
                 Kirigami.FormData.label: "Transition"
                 visible: root.editMode === "Slideshow"
+            }
+
+            Controls.ComboBox {
+                objectName: "transitionType"
+                Kirigami.FormData.label: "Transition Type:"
+                visible: root.editMode === "Slideshow"
+                Layout.fillWidth: true
+                model: ["Glyph paths", "Earth mover"]
+                currentIndex: ["glyph-path", "earth-mover"].indexOf(root.activeSettings.TransitionType)
+                onActivated: index => root.setProfileSetting("TransitionType", ["glyph-path", "earth-mover"][index])
             }
 
             Controls.SpinBox {

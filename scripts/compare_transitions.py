@@ -23,7 +23,7 @@ from ascii_optimizer import cli
 from ascii_optimizer.optimizer import render_grid
 from ascii_optimizer.revision import render_revision
 from ascii_optimizer.tone import display_tone_lab, oklab_to_srgb, srgb_to_oklab
-from ascii_optimizer.transition import glyph_paths
+from ascii_optimizer.transition import TYPES, glyph_paths
 
 
 def main():
@@ -32,6 +32,7 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("rendered/transitions/review"))
     parser.add_argument("--width", type=int, default=1280, help="Review preview width")
     parser.add_argument("--duration-ms", type=int, default=1500, help="Playback duration of each transition")
+    parser.add_argument("--transition-type", choices=TYPES, help="Override the saved transition type")
     args = parser.parse_args()
     original = args.assets.resolve()
     output = args.output.resolve()
@@ -47,6 +48,7 @@ def main():
     options = SimpleNamespace(**(manifest["signature"] | {
         "size": tuple(manifest["output_size"]), "frames": frame_count,
         "invert_ink": manifest["invert_ink"],
+        "transition_type": args.transition_type or manifest["signature"].get("transition_type", "glyph-path"),
     }))
     cell = tuple(manifest["cell_size"])
     with Image.open(original / "atlas.png") as atlas:
@@ -66,17 +68,19 @@ def main():
         backgrounds.update(cli._render_transition(index, [Path(p) for p in options.images],
             revised, options, masks, cell, paths, lambda *_: None))
     updated = manifest | {"background_labs": backgrounds, "generation": "transition-review",
-                          "signature": manifest["signature"] | {"render_revision": render_revision()}}
+                          "signature": manifest["signature"] | {"render_revision": render_revision(),
+                              "transition_type": options.transition_type}}
     (revised / "manifest.json").write_text(json.dumps(updated, indent=2) + "\n")
     scene = output / "slideshow"
     scene.mkdir(exist_ok=True)
     report = {"input_assets": str(original), "input_signature": manifest["signature"],
               "render_revision": render_revision(), "images": {"slideshow": {
-                  "label": "Your slideshow", "ppd": manifest["signature"].get("viewing_ppd", 67),
+                  "label": "Your slideshow", "ppd": manifest["signature"].get("viewing_ppd") or 67,
                   "variants": {}}}}
     preview_size = (min(args.width, options.size[0]),
                     max(1, round(options.size[1] * min(args.width, options.size[0]) / options.size[0])))
-    for variant, assets in (("original", original), ("oklab_interpolation", revised)):
+    revised_variant = "earth_mover" if options.transition_type == "earth-mover" else "oklab_interpolation"
+    for variant, assets in (("original", original), (revised_variant, revised)):
         directory = scene / variant
         directory.mkdir(exist_ok=True)
         frames, metrics = [], {}

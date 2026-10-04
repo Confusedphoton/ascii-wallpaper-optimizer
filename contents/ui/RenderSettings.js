@@ -19,6 +19,7 @@ function request(images, settings) {
         detail: setting("detail", "Detail", 1),
         grayscale: !!setting("grayscale", "Grayscale", false),
         frames: setting("transitionFrames", "TransitionFrames", 16),
+        transition_type: setting("transitionType", "TransitionType", "glyph-path"),
         transition_pace: setting("transitionPace", "TransitionPace", "ease-in-out"),
         transition_field: setting("transitionField", "TransitionField", "blue-noise"),
         transition_spread: setting("transitionSpread", "TransitionSpread", 0.65),

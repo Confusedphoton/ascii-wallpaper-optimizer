@@ -131,6 +131,7 @@ def normalize_options(raw: Mapping) -> dict:
     if style == "structure" and options["glyph_entropy_strength"]:
         raise ValueError("glyph_entropy_strength is only available for headroom rendering")
     for name, default, choices in (
+        ("transition_type", "glyph-path", ("glyph-path", "earth-mover")),
         ("transition_pace", "ease-in-out", ("linear", "ease-in", "ease-out", "ease-in-out")),
         ("transition_field", "blue-noise", ("blue-noise", "ripple", "spiral", "directional", "edge", "salience")),
         ("crop", "fill", ("fill", "fit")),

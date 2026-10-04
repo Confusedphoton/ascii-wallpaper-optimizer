@@ -1,4 +1,4 @@
-"""Font-aware glyph paths and staggered slideshow timing."""
+"""Font-aware glyph paths, spatial transport, and staggered slideshow timing."""
 
 from __future__ import annotations
 
@@ -9,6 +9,162 @@ from .assets import blue_noise
 
 PACES = ("linear", "ease-in", "ease-out", "ease-in-out")
 FIELDS = ("blue-noise", "ripple", "spiral", "directional", "edge", "salience")
+TYPES = ("glyph-path", "earth-mover")
+
+
+def _minimum_assignment(cost: np.ndarray) -> np.ndarray:
+    """Hungarian assignment for a small square cost matrix, without extra deps."""
+    count = len(cost)
+    row_price = np.zeros(count + 1)
+    col_price = np.zeros(count + 1)
+    matched = np.zeros(count + 1, dtype=int)
+    for row in range(1, count + 1):
+        matched[0] = row
+        column = 0
+        minimum = np.full(count + 1, np.inf)
+        used = np.zeros(count + 1, dtype=bool)
+        previous = np.zeros(count + 1, dtype=int)
+        while True:
+            used[column] = True
+            current = matched[column]
+            available = np.flatnonzero(~used[1:]) + 1
+            reduced = cost[current - 1, available - 1] - row_price[current] - col_price[available]
+            better = reduced < minimum[available]
+            minimum[available[better]] = reduced[better]
+            previous[available[better]] = column
+            following = available[np.argmin(minimum[available])]
+            delta = minimum[following]
+            if not np.isfinite(delta):
+                raise ValueError("Transport assignment has no feasible matching")
+            row_price[matched[used]] += delta
+            col_price[used] -= delta
+            minimum[~used] -= delta
+            column = following
+            if matched[column] == 0:
+                break
+        while column:
+            preceding = previous[column]
+            matched[column] = matched[preceding]
+            column = preceding
+    assignment = np.empty(count, dtype=int)
+    assignment[matched[1:] - 1] = np.arange(count)
+    return assignment
+
+
+def _transport_cost(source: np.ndarray, target: np.ndarray) -> np.ndarray:
+    return np.linalg.norm(source[:, None, :] - target[None, :, :], axis=-1)
+
+
+def _spatial_groups(indices: np.ndarray, features: np.ndarray, depth: int = 3) -> list[np.ndarray]:
+    """Split regions into equal-capacity groups along their longest spatial axis."""
+    if depth == 0:
+        return [indices]
+    positions = features[indices, :2]
+    axis = np.argmax(np.ptp(positions, axis=0))
+    ordered = indices[np.argsort(positions[:, axis], kind="stable")]
+    middle = len(ordered) // 2
+    return (_spatial_groups(ordered[:middle], features, depth - 1)
+            + _spatial_groups(ordered[middle:], features, depth - 1))
+
+
+def earth_mover_destinations(start: np.ndarray, end: np.ndarray,
+                             start_color: np.ndarray, end_color: np.ndarray,
+                             start_background: np.ndarray, end_background: np.ndarray,
+                             masks: np.ndarray, *, invert_ink: bool = False) -> np.ndarray:
+    """Balanced cell transport using hierarchical Euclidean earth mover costs.
+
+    Every cell carries equal mass. Position, displayed average OKLab color, and
+    coverage define the ground metric. Small regions solve exact assignments;
+    larger grids first assign equal-capacity spatial regions by their centroids.
+    This approximates global EMD while keeping every cost matrix at most 64x64.
+    The returned flat destination indices form a permutation of the grid.
+    """
+    if start.shape != end.shape or start.ndim != 2:
+        raise ValueError("Transport endpoints must use the same two-dimensional grid")
+    from .tone import display_tone_lab
+
+    rows, cols = start.shape
+    y, x = np.mgrid[:rows, :cols]
+    height, width = masks.shape[1:]
+    scale = max(rows * height, cols * width)
+    positions = np.stack(((x + 0.5) * width, (y + 0.5) * height), axis=-1) / scale
+    coverage = masks.mean((1, 2))
+
+    def features(glyphs, colors, background):
+        ink = coverage[glyphs][..., None]
+        average = ink * colors + (1 - ink) * background
+        displayed = display_tone_lab(average, invert_ink=invert_ink)
+        # Appearance outweighs position so similar content can travel, while
+        # nearby destinations win ties and unchanged images remain stationary.
+        return np.concatenate((0.25 * positions, displayed,
+                               0.5 * ink), axis=-1).reshape(-1, 6)
+
+    source = features(start, start_color, start_background)
+    target = features(end, end_color, end_background)
+    destinations = np.empty(start.size, dtype=int)
+
+    def assign(source_indices, target_indices):
+        if len(source_indices) <= 64:
+            matches = _minimum_assignment(_transport_cost(source[source_indices], target[target_indices]))
+            destinations[source_indices] = target_indices[matches]
+            return
+        source_groups = _spatial_groups(source_indices, source)
+        target_groups = _spatial_groups(target_indices, target)
+        cost = _transport_cost(np.array([source[group].mean(0) for group in source_groups]),
+                               np.array([target[group].mean(0) for group in target_groups]))
+        sizes = np.array([len(group) for group in source_groups])
+        target_sizes = np.array([len(group) for group in target_groups])
+        cost[sizes[:, None] != target_sizes[None, :]] = np.inf
+        for group, match in zip(source_groups, _minimum_assignment(cost)):
+            assign(group, target_groups[match])
+
+    indices = np.arange(start.size)
+    assign(indices, indices)
+    return destinations.reshape(start.shape)
+
+
+def transport_cells(glyphs: np.ndarray, colors: np.ndarray, background: np.ndarray,
+                    destinations: np.ndarray, progress: np.ndarray,
+                    masks: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Splat traveling cells onto the grid, keeping one glyph at each location.
+
+    Bilinear weights soften movement between discrete cells. At collisions the
+    contribution with the most visible ink wins; empty locations use background
+    ink. Decisions are deterministic, including ties, for parallel preparation.
+    """
+    rows, cols = glyphs.shape
+    y, x = np.mgrid[:rows, :cols]
+    target_y, target_x = np.divmod(destinations, cols)
+    moving_y = y + progress * (target_y - y)
+    moving_x = x + progress * (target_x - x)
+    top, left = np.floor(moving_y).astype(int), np.floor(moving_x).astype(int)
+    dy, dx = moving_y - top, moving_x - left
+    coverage = masks.mean((1, 2))[glyphs].ravel()
+    visibility = coverage * np.linalg.norm(colors.reshape(-1, 3) - background, axis=1)
+    locations, particles, weights = [], [], []
+    for oy, ox, weight in ((0, 0, (1 - dy) * (1 - dx)), (0, 1, (1 - dy) * dx),
+                           (1, 0, dy * (1 - dx)), (1, 1, dy * dx)):
+        ty, tx = top + oy, left + ox
+        valid = (ty >= 0) & (ty < rows) & (tx >= 0) & (tx < cols) & (weight > 0)
+        locations.append((ty[valid] * cols + tx[valid]))
+        particles.append(np.flatnonzero(valid))
+        weights.append(weight[valid])
+    locations = np.concatenate(locations)
+    particles = np.concatenate(particles)
+    weights = np.concatenate(weights)
+    priority = weights * (visibility[particles] + 1e-6)
+    # Sort each location by ink strength; particle index breaks equal-strength ties.
+    order = np.lexsort((particles, priority, locations))
+    last = np.r_[locations[order][1:] != locations[order][:-1], True]
+    winners = order[last]
+    occupied = locations[winners]
+    selected = particles[winners]
+    result_glyphs = np.full(glyphs.size, np.argmin(masks.mean((1, 2))), dtype=glyphs.dtype)
+    result_colors = np.broadcast_to(background, (glyphs.size, 3)).copy()
+    result_glyphs[occupied] = glyphs.ravel()[selected]
+    result_colors[occupied] = (background + weights[winners, None]
+                               * (colors.reshape(-1, 3)[selected] - background))
+    return result_glyphs.reshape(glyphs.shape), result_colors.reshape(*glyphs.shape, 3)
 
 
 def ease(t: float, pace: str) -> float:
