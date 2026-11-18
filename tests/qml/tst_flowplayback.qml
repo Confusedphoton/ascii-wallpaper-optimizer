@@ -98,20 +98,24 @@ TestCase {
                     frame_durations_ms: [200, 50, 200, 200]}}
     }
 
-    function test_video_preserves_frame_holds_and_loading_pause() {
+    function test_video_skips_expired_holds_when_playback_falls_behind() {
+        const clip = videoManifest()
+        clip.video.duration_ms = 1000
+        clip.video.frame_durations_ms = [300, 50, 350, 300]
         const controller = createTemporaryObject(controllerComponent, tests,
-            {ready: true, manifest: videoManifest(), generation: "video"})
+            {ready: true, manifest: clip, generation: "video"})
+        const frames = []
+        controller.loopFrameChanged.connect(function() { frames.push(controller.loopFrame) })
+        wait(50)
         compare(controller.loopFrame, 0)
-        wait(100)
-        compare(controller.loopFrame, 0)
-        tryCompare(controller, "loopFrame", 1, 400)
         controller.loading = true
-        wait(120)
-        compare(controller.loopFrame, 1)
+        const until = Date.now() + 350
+        while (Date.now() < until) { /* Simulate a busy compositor/UI thread. */ }
+        tryCompare(controller, "loopFrame", 2, 250)
+        compare(frames[0], 2)
         controller.loading = false
-        tryCompare(controller, "loopFrame", 2, 400)
-        tryCompare(controller, "loopFrame", 3, 400)
-        tryCompare(controller, "loopFrame", 0, 400)
+        tryCompare(controller, "loopFrame", 3, 600)
+        tryCompare(controller, "loopFrame", 0, 600)
         controller.generation = "replacement-video"
         compare(controller.loopFrame, 0)
     }

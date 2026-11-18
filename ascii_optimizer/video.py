@@ -7,6 +7,7 @@ import math
 import shutil
 import subprocess
 import tempfile
+from bisect import bisect_left
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -25,6 +26,12 @@ class VideoInfo:
 
     def sampled_times(self, stride: int) -> tuple[float, ...]:
         return self.frame_times_ms[::stride]
+
+    def prefix(self, maximum_ms: int) -> VideoInfo:
+        if not maximum_ms or self.duration_ms <= maximum_ms:
+            return self
+        end = bisect_left(self.frame_times_ms, maximum_ms)
+        return VideoInfo(self.frame_times_ms[:end], float(maximum_ms))
 
 
 def _executable(name: str) -> str:
@@ -45,9 +52,9 @@ def _number(value) -> float | None:
 def probe_video(source: Path) -> VideoInfo:
     """Read timing metadata, without keeping decoded source images in memory."""
     _executable("ffmpeg")
-    command = [_executable("ffprobe"), "-v", "error", "-select_streams", "v:0",
+    command = [_executable("ffprobe"), "-v", "error", "-select_streams", "V:0",
                "-show_frames", "-show_streams", "-show_format", "-show_entries",
-               "stream=avg_frame_rate,r_frame_rate,duration:format=duration:"
+               "stream=avg_frame_rate,r_frame_rate,duration:format=duration,format_name:"
                "frame=best_effort_timestamp_time,pkt_duration_time,duration_time",
                "-of", "json", str(source)]
     result = subprocess.run(command, capture_output=True, text=True)
@@ -59,6 +66,9 @@ def probe_video(source: Path) -> VideoInfo:
         frames = metadata.get("frames", [])
     except (ValueError, KeyError, IndexError, TypeError):
         raise ValueError("Input does not contain a readable video stream") from None
+    source_format = metadata.get("format", {}).get("format_name", "")
+    if source_format in ("image2", "image2pipe") or source_format.endswith("_pipe"):
+        raise ValueError("Choose a video or an animated image for Video mode.")
     if not frames:
         raise ValueError("Input video contains no decodable frames")
     try:
@@ -112,7 +122,7 @@ def frame_durations(info: VideoInfo, stride: int, transition_frames: int) -> lis
 
 
 def decode_frames(source: Path, size: tuple[int, int], crop: str,
-                  grayscale: bool, stride: int) -> Iterator[np.ndarray]:
+                  grayscale: bool, stride: int, *, limit: int | None = None) -> Iterator[np.ndarray]:
     """Yield sampled RGB targets; FFmpeg's pipe bounds decoded-frame memory."""
     width, height = size
     filters = [f"select=not(mod(n\\,{stride}))"]
@@ -126,8 +136,11 @@ def decode_frames(source: Path, size: tuple[int, int], crop: str,
         raise ValueError(f"Unknown crop mode: {crop}")
     filters.append("setsar=1")
     command = [_executable("ffmpeg"), "-v", "error", "-nostdin", "-i", str(source),
-               "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", ",".join(filters),
-               "-fps_mode", "passthrough", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"]
+               "-map", "0:V:0", "-an", "-sn", "-dn", "-vf", ",".join(filters),
+               "-fps_mode", "passthrough"]
+    if limit is not None:
+        command.extend(("-frames:v", str(limit)))
+    command.extend(("-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"))
     frame_bytes = width * height * 3
     with tempfile.TemporaryFile() as errors:
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL,

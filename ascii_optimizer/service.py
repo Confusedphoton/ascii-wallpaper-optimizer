@@ -1,7 +1,7 @@
 """Small local render queue for the Plasma QML wallpaper.
 
-The HTTP thread imports no numerical libraries. Each render runs in a separate
-process, so loading PyTorch and optimizing pixels never blocks Plasma's UI.
+Rendering runs in a separate process, so loading PyTorch and optimizing pixels
+never blocks Plasma's UI.
 """
 
 from __future__ import annotations
@@ -20,12 +20,13 @@ import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from functools import lru_cache
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from .defaults import PERCEPTUAL_WEIGHTS, ppd_for_width
 from .revision import render_revision
-from .settings import normalize_options, validate_size
+from .settings import VIDEO_PLAYBACK_OPTIONS, normalize_options, validate_size
 
 PORT = 48741
 ADDRESS = "127.0.0.1"
@@ -133,8 +134,10 @@ def _screen_size(name: str, fallback: list[int]) -> tuple[int, int]:
     return int(fallback[0]), int(fallback[1])
 
 
-def _validated_request(raw: dict) -> dict:
+def _source_paths(raw: dict) -> tuple[str, list[str]]:
     input_format = raw.get("input_format", "images")
+    if input_format not in ("images", "video", "archive"):
+        raise ValueError("Unknown input format")
     selected = raw.get("images")
     if not isinstance(selected, list) or not 1 <= len(selected) <= 50 or any(not isinstance(path, str) for path in selected):
         raise ValueError("Select at least one readable source file (at most 50).")
@@ -143,6 +146,41 @@ def _validated_request(raw: dict) -> dict:
         raise ValueError("Select readable source files.")
     if input_format in ("video", "archive") and len(images) != 1:
         raise ValueError(f"Select exactly one {input_format} file.")
+    return input_format, images
+
+
+@lru_cache(maxsize=32)
+def _video_source_info(path: Path, fingerprint: tuple[int, ...]) -> dict:
+    from .video import probe_video
+
+    info = probe_video(path)
+    return {"source_frames": len(info.frame_times_ms), "duration_ms": info.duration_ms}
+
+
+def _inspect_sources(raw: dict) -> dict:
+    input_format, images = _source_paths(raw)
+    if input_format == "archive":
+        from .archive import read_archive_manifest
+
+        manifest = read_archive_manifest(Path(images[0]))
+        return {"video": bool(manifest.get("video")), "image_count": manifest["image_count"]}
+    if input_format == "video":
+        path = Path(images[0])
+        stat = path.stat()
+        return _video_source_info(path, (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+    from PIL import Image
+
+    for source in images:
+        try:
+            with Image.open(source) as image:
+                image.verify()
+        except OSError as error:
+            raise ValueError(f"Could not read image {Path(source).name}.") from error
+    return {}
+
+
+def _validated_request(raw: dict) -> dict:
+    input_format, images = _source_paths(raw)
     if input_format == "archive":
         from .archive import read_archive_manifest
         read_archive_manifest(Path(images[0]))
@@ -164,6 +202,8 @@ def _validated_request(raw: dict) -> dict:
              "glyph_luminance_bonus", "glyph_entropy_strength", "style", "invert_ink", "background", "crop", "steps",
              "transition_steps", "seed", "perceptual_loss", "flow_strength", "flow_eddies", "flow_scale",
              "flow_animated", "flow_loop_seconds", "flow_fps", "flow_frame_steps", "flow_temporal_strength")
+    if input_format == "video":
+        names += ("video_preview_ms",)
     return dict({name: options[name] for name in names}, glyph_search="all" if options["style"] != "structure" else "structure",
                 output_stage=("adam_terminal" if options["perceptual_loss"] else
                               "postprocessed" if options["style"] == "headroom" else "structure"),
@@ -204,6 +244,7 @@ class RenderQueue:
         self.cache.mkdir(parents=True, exist_ok=True)
         self.maximum_cached_renders = 20
         self.clear_stills_pending = False
+        self.active_video_sources: list[Path] = []
         try:
             maximum = json.loads((self.cache / "settings.json").read_text())["maximum"]
             if isinstance(maximum, int) and not isinstance(maximum, bool) and 1 <= maximum <= 1000:
@@ -433,6 +474,7 @@ class RenderQueue:
         protected = {Path(job["directory"]) for job in self.jobs.values()
                      if job["clients"] or job["state"] in ("queued", "running")}
         protected.update(Path(directory) for directory in self.displayed.values())
+        protected.update(self.active_video_sources)
         generations = sorted(self._generations(), key=lambda directory: directory.stat().st_mtime)
         excess = len(generations) if clear else max(0, len(generations) - self.maximum_cached_renders)
         for directory in generations:
@@ -465,16 +507,39 @@ class RenderQueue:
                             shutil.rmtree(generation)
         self.clear_stills_pending = False
 
+    def _reusable_videos(self, settings: dict) -> list[Path]:
+        expected = {name: value for name, value in settings.items()
+                    if name not in VIDEO_PLAYBACK_OPTIONS and name != "images"}
+        directories = []
+        for reference in (self.cache / "variants").glob("*/current.json"):
+            try:
+                directory = Path(json.loads(reference.read_text())["directory"])
+                if directory.parent != reference.parent:
+                    continue
+                with (directory / "manifest.json").open() as stream:
+                    manifest = json.load(stream)
+                if manifest.get("schema_version") == 3 and all(
+                        manifest["signature"].get(name) == value for name, value in expected.items()):
+                    directories.append(((directory / "manifest.json").stat().st_mtime_ns, directory))
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                continue
+        return [directory for _, directory in sorted(directories, reverse=True)]
+
     def _worker(self) -> None:
         while True:
             key, generation = self.pending.get()
+            job = None
             try:
                 with self.lock:
                     self._expire()
-                    job = self.jobs.get(key)
-                    if not job or job["generation"] != generation or job["state"] == "superseded":
+                    candidate = self.jobs.get(key)
+                    if not candidate or candidate["generation"] != generation or candidate["state"] == "superseded":
                         continue
+                    job = candidate
                     job.update(state="running", stage="Starting optimizer")
+                    if job["settings"].get("input_format") == "video" and not job["force"]:
+                        self.active_video_sources = self._reusable_videos(job["settings"])
+                        job["reuse_video_from"] = self.active_video_sources
                 command = self._command(job)
                 recent_lines: list[str] = []
                 with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -504,13 +569,15 @@ class RenderQueue:
                         self._publish(job)
             except Exception as error:
                 with self.lock:
-                    if job["state"] != "superseded":
+                    if job is not None and job["state"] != "superseded":
                         job.update(state="error", stage="Render failed", error=str(error))
                         traceback.print_exc()
             finally:
                 with self.lock:
-                    if "job" in locals() and job:
+                    if job is not None:
                         job.pop("process", None)
+                        job.pop("reuse_video_from", None)
+                    self.active_video_sources = []
                     self._prune_cache()
                 self.pending.task_done()
 
@@ -537,6 +604,10 @@ class RenderQueue:
                 command.append("--" + name.replace("_", "-"))
         if job["force"]:
             command.append("--force")
+        if settings.get("video_preview_ms"):
+            command.extend(("--video-preview-ms", str(settings["video_preview_ms"])))
+        for directory in job.get("reuse_video_from", ()):
+            command.extend(("--reuse-video-from", str(directory)))
         command.extend(settings["images"])
         return command
 
@@ -576,7 +647,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "Unknown endpoint"})
 
     def do_POST(self) -> None:
-        if self.path not in ("/v1/render", "/v1/override", "/v1/profiles", "/v1/cache", "/v1/cache/clear"):
+        if self.path not in ("/v1/render", "/v1/override", "/v1/profiles", "/v1/cache", "/v1/cache/clear", "/v1/source-info"):
             self._json(404, {"error": "Unknown endpoint"})
             return
         if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
@@ -595,6 +666,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, self.queue.configure_cache(request["maximum"]))
             elif self.path == "/v1/cache/clear":
                 self._json(200, self.queue.clear_cache())
+            elif self.path == "/v1/source-info":
+                self._json(200, _inspect_sources(request))
             else:
                 self._json(200, self.queue.submit(request))
         except queue.Full as error:

@@ -35,6 +35,7 @@ Item {
     property var displayRequestSettings: ({})
     property var displayPlaybackSettings: ({})
     property var displayManifest: ({})
+    readonly property bool displayShortPreview: Number(displayRequestSettings.video_preview_ms) > 0
     property string jobId: ""
     property int requestSerial: 0
     property bool currentRequestForced: false
@@ -199,7 +200,7 @@ Item {
         if (renderState === "superseded") {
             jobId = ""
             renderState = displayDirectory ? "ready" : "idle"
-            stage = "Render replaced. Select Render now to retry"
+            stage = "Render replaced. Select Preview changes to retry."
             return
         }
         if (renderState !== "ready" || !directory) return
@@ -276,7 +277,7 @@ Item {
         requestInFlight = false
     }
 
-    function start(force) {
+    function start(force, previewMilliseconds) {
         retry.stop()
         cancelRequest()
         jobId = ""
@@ -284,6 +285,8 @@ Item {
         const request = JSON.parse(settingsKey)
         request.images = (request.images || []).map(path => String(path).trim()).filter(path => path.length)
         currentRequestForced = !!force
+        if (request.input_format === "video" && previewMilliseconds)
+            request.video_preview_ms = previewMilliseconds
         if (!request.images.length) {
             renderState = "idle"
             stage = "Select a source file"
@@ -326,7 +329,7 @@ Item {
                 client.submissionPending = false
                 retry.stop()
                 client.renderState = client.displayDirectory ? "ready" : "idle"
-                client.stage = "Saved render retained. Select Render now to update"
+                client.stage = "Select Preview changes to refresh the saved render."
                 client.error = ""
                 if (client.autoRender) client.start(false)
             } else client.connectionFailed(reply.error || "Lost contact with renderer service.")

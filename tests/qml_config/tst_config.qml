@@ -18,6 +18,7 @@ TestCase {
         const item = createTemporaryObject(configComponent, tests, properties || {})
         verify(item)
         tryCompare(item, "controlsReady", true)
+        findChild(item, "sourceCheck").enabled = false
         findChild(item, "renderClient").serviceUrl = TestConfig.serviceUrl
         findChild(item, "cacheClient").serviceUrl = TestConfig.serviceUrl
         return item
@@ -104,6 +105,7 @@ TestCase {
         verify(!findChild(item, "transitionType").visible)
         const client = findChild(item, "renderClient")
         client.displayPlaybackSettings = {mode: "Archive"}
+        client.displayRequestSettings = client.requestSettings
         client.displayManifest = {image_count: 2}
         verify(findChild(item, "previewPlayback").slideshowEnabled)
         verify(item.showSlideshowTiming)
@@ -227,7 +229,7 @@ TestCase {
         compare(findChild(item, "characterField").text, " .é😀#")
     }
 
-    function test_apply_submits_changed_settings_without_render_now() {
+    function test_apply_submits_changed_settings() {
         const item = page({cfg_Images: ["/apply.png"], cfg_ProfileSettingsInitialized: true})
         item.editProfile = 0
         const client = findChild(item, "renderClient")
@@ -241,16 +243,17 @@ TestCase {
         verify(!client.currentRequestForced)
         verify(!client.settingsPending)
         item.setProfileSetting("BackgroundColor", "#445566")
-        verify(!findChild(item, "previewShader").visible)
+        const previewLabel = findChild(item, "previewLabel")
+        compare(previewLabel.text, "Last render")
         item.setProfileSetting("BackgroundColor", "#112233")
-        verify(findChild(item, "previewShader").visible)
+        tryCompare(previewLabel, "text", "Preview")
         item.setProfileSetting("BackgroundColor", "#445566")
         item.saveConfig()
         tryCompare(client, "displayGeneration", "#445566", 3000)
         verify(findChild(item, "previewShader").visible)
     }
 
-    function test_preview_clears_during_render_and_on_failure() {
+    function test_preview_survives_render_and_failure() {
         const item = page({cfg_Images: ["/preview.png"]})
         const client = findChild(item, "renderClient")
         client.consume({state: "ready", directory: TestConfig.fixtureRoot, generation: "old",
@@ -258,16 +261,41 @@ TestCase {
         const preview = findChild(item, "previewShader")
         tryCompare(preview, "ready", true, 3000)
         client.consume({state: "running", stage: "Rendering", progress: 0.2})
-        compare(preview.renderDirectory, "")
-        verify(!preview.visible)
-        verify(!preview.ready)
+        compare(preview.displayGeneration, "old")
+        compare(findChild(item, "previewLabel").text, "Last render")
         client.consume({state: "error", error: "Render failed"})
-        compare(preview.renderDirectory, "")
-        verify(!preview.visible)
+        compare(preview.displayGeneration, "old")
+        verify(preview.visible)
         client.consume({state: "ready", directory: TestConfig.fixtureRoot, generation: "new",
             image_count: 1, frame_count: 4})
-        tryCompare(preview, "ready", true, 3000)
-        verify(preview.visible)
+        tryCompare(preview, "displayGeneration", "new", 3000)
+    }
+
+    function test_source_choices_survive_mode_switch_and_reopen() {
+        const images = ["/first.jpg", "/second.jpg"]
+        const item = page({cfg_Mode: "Slideshow", cfg_Images: images})
+        item.editProfile = 0
+        const modes = findChild(item, "modeCombo")
+        modes.activated(2)
+        compare(Array.from(item.editImages), [])
+        item.setProfileSetting("Images", ["/clip.mkv"])
+        modes.activated(1)
+        compare(Array.from(item.editImages), images)
+        const saved = snapshot(item)
+        item.destroy()
+        const reopened = page(saved)
+        reopened.editProfile = 0
+        findChild(reopened, "modeCombo").activated(2)
+        compare(Array.from(reopened.editImages), ["/clip.mkv"])
+    }
+
+    function test_custom_23_glyphs_survive_opening_editor() {
+        const chars = "abcdefghijklmnopqrstuvw"
+        const item = page({cfg_Profiles: JSON.stringify([
+            {id: "A", name: "Profile A", startTime: "07:00", settings: {AsciiChars: Array.from(chars)}}
+        ])})
+        compare(findChild(item, "characterField").text, chars)
+        compare(findChild(item, "renderClient").requestSettings.chars, chars)
     }
 
     function test_named_profiles_persist_sources_settings_and_schedule() {

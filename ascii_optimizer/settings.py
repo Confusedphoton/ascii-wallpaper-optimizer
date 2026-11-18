@@ -14,6 +14,12 @@ from .defaults import (DEFAULT_CHARS, STRUCTURE_CHARS, FLOW_CHARS, DEFAULT_FLOW_
                        DEFAULT_GLYPH_ENTROPY_STRENGTH, MAX_GLYPH_ENTROPY_STRENGTH)
 
 
+VIDEO_PLAYBACK_OPTIONS = frozenset({
+    "frame_stride", "video_transition_frames", "video_preview_ms", "frames",
+    "transition_steps", "transition_type", "transition_pace", "transition_field", "transition_spread",
+})
+
+
 def finite_float(value, name: str, minimum: float | None = None,
                  maximum: float | None = None) -> float:
     try:
@@ -56,9 +62,11 @@ def normalize_options(raw: Mapping) -> dict:
     options["frame_stride"] = _integer(options.get("frame_stride", 1), "frame_stride", 1, 10000)
     options["video_transition_frames"] = _integer(options.get("video_transition_frames", 0),
                                                    "video_transition_frames", 0, 118)
+    options["video_preview_ms"] = _integer(options.get("video_preview_ms", 0), "video_preview_ms", 0, 3000)
     if input_format != "video":
         options["frame_stride"] = 1
         options["video_transition_frames"] = 0
+        options["video_preview_ms"] = 0
     # Legacy clients may still send a shortlist size. It no longer affects
     # rendering, and must not create separate cache variants.
     options.pop("candidates", None)

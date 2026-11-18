@@ -4,6 +4,7 @@
 const standardChars = " .´:rszunvcxLOGDQ0KNMW&#\\/=^|[]{}"
 const structureChars = " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&#[]{}"
 const flowChars = Array.from({length: 95}, (_, i) => String.fromCharCode(32 + i)).join("") + "´"
+const sourceModes = ["Image", "Slideshow", "Video", "Archive"]
 const defaults = {
     Mode: "Image", Images: [], FontFamily: "Monospace", AsciiChars: Array.from(standardChars),
     Detail: 1, Grayscale: false, SlideInterval: 10, TransitionFrames: 16,
@@ -23,7 +24,16 @@ function normalizedSettings(settings) {
     if (result.RenderStyle === "flow" && settings.GlyphEntropyStrength === undefined)
         result.GlyphEntropyStrength = 0.02
     delete result.PerceptualLoss
-    result.Images = Array.from(result.Images || [])
+    if (!sourceModes.includes(result.Mode)) result.Mode = defaults.Mode
+    const previousSources = result.Sources || {}
+    result.Sources = {}
+    for (const mode of sourceModes) {
+        const sources = previousSources[mode] === undefined && mode === result.Mode
+            ? result.Images : previousSources[mode]
+        result.Sources[mode] = Array.isArray(sources) || typeof sources?.length === "number"
+            ? Array.from(sources) : []
+    }
+    result.Images = result.Sources[result.Mode]
     let chars = Array.from(result.AsciiChars || defaults.AsciiChars)
     if (chars[0] === "\\s") chars[0] = " "
     const previousDefaults = [
@@ -32,6 +42,8 @@ function normalizedSettings(settings) {
         " .´:rszunvcxLOGDQ0KNMW&@\\=^", " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&@[]{}",
         " .´:-_/|+rszunvcxLOGDQ0KNMW&@[]{}"
     ]
+    const missingLegacySpace = ".´:rszunvcxLOGDQ0KNMW&@"
+    if (chars.join("") === missingLegacySpace) chars.unshift(" ")
     const current = chars.join("")
     if (previousDefaults.includes(current) || [standardChars, structureChars, flowChars].includes(current))
         chars = Array.from(result.RenderStyle === "flow" ? flowChars

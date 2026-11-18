@@ -49,8 +49,13 @@ Item {
     readonly property bool showTransitionControls: editMode === "Slideshow"
         || (editMode === "Video" && activeSettings.VideoTransitionFrames > 0)
     readonly property bool showSlideshowTiming: editMode === "Slideshow"
-        || (editMode === "Archive" && !renderer.displayManifest.video)
+        || (editMode === "Archive" && (sourceCheck.status === "valid" ? !sourceCheck.info.video
+            : renderer.displayMatchesRequest() && !renderer.displayManifest.video))
     readonly property var editImages: activeSettings.Images || []
+    readonly property bool renderBusy: renderer.renderState === "connecting" || renderer.renderState === "queued"
+        || renderer.renderState === "running"
+    readonly property bool previewIsCurrent: !renderer.settingsPending && !renderBusy && renderer.renderState !== "error"
+    readonly property int videoPreviewMilliseconds: 3000
     readonly property var editingProfile: profiles[editProfile] || ({id: "A", name: "Profile A", startTime: "07:00"})
     property string profileMessage: ""
     property string cfg_FontFamily: "Monospace"
@@ -190,8 +195,10 @@ Item {
     function setProfileSetting(name, value) {
         const next = profiles.slice()
         if (!next[editProfile]) return
-        next[editProfile] = Object.assign({}, next[editProfile],
-            {settings: Object.assign({}, next[editProfile].settings, {[name]: value})})
+        const previous = next[editProfile].settings
+        const settings = Object.assign({}, previous, {[name]: value})
+        if (name === "Images") settings.Sources = Object.assign({}, previous.Sources, {[settings.Mode]: value})
+        next[editProfile] = Object.assign({}, next[editProfile], {settings: settings})
         storeProfiles(next)
     }
 
@@ -284,7 +291,9 @@ Item {
         syncToConfig()
         cacheClient.setMaximum()
         Qt.callLater(function() {
-            if (!renderer.displayDirectory || !renderer.displayMatchesRequest() || renderer.renderState === "error")
+            if (sourceCheck.status === "error" || !renderer.requestSettings.images.length) return
+            if (!renderer.displayDirectory || renderer.displayShortPreview || !renderer.displayMatchesRequest()
+                    || renderer.renderState === "error")
                 renderer.start(false)
         })
     }
@@ -342,19 +351,6 @@ Item {
         // Derived bindings can still contain the previous profile while its
         // change handler is running. Read this profile's storage directly.
         let currentImages = Array.from(activeSettings.Images || []);
-
-        let currentChars = Array.from(root.activeSettings.AsciiChars || []);
-        if (currentChars.length && currentChars[0] === "\\s") {
-            currentChars[0] = " ";
-            migrated = true;
-            root.setProfileSetting("AsciiChars", currentChars);
-        }
-        if (currentChars.length === 23 && currentChars[0] !== " ") {
-            currentChars.unshift(" ");
-
-            migrated = true;
-            root.setProfileSetting("AsciiChars", currentChars);
-        }
 
         for (let i = 0; i < currentImages.length; i++) {
             const original = String(currentImages[i]).trim();
@@ -494,11 +490,21 @@ Item {
         playbackSettings: ({mode: root.editMode, slideInterval: root.activeSettings.SlideInterval,
             transitionDuration: root.activeSettings.TransitionDuration})
         onAssetsReady: {
-            if (root.controlsReady && root.activeSettings.RenderDirectory !== displayDirectory)
+            if (!root.controlsReady || displayShortPreview || !displayMatchesRequest()) return
+            if (root.activeSettings.RenderDirectory !== displayDirectory)
                 root.setProfileSetting("RenderDirectory", displayDirectory)
-            if (root.controlsReady && root.activeSettings.RenderedState !== publishedState)
+            if (root.activeSettings.RenderedState !== publishedState)
                 root.setProfileSetting("RenderedState", publishedState)
         }
+    }
+
+    SourceCheck {
+        id: sourceCheck
+        objectName: "sourceCheck"
+        enabled: root.controlsReady
+        serviceUrl: renderer.serviceUrl
+        inputFormat: renderer.requestSettings.input_format
+        paths: renderer.requestSettings.images || []
     }
 
     CacheClient {
@@ -654,9 +660,8 @@ Item {
                     smoothOutput: true
                     mipmapOutput: true
 
-                    renderDirectory: renderer.renderState === "ready" && !renderer.settingsPending
-                        ? renderer.displayDirectory : ""
-                    visible: renderer.renderState === "ready" && !renderer.settingsPending
+                    renderDirectory: renderer.displayDirectory
+                    visible: !!renderDirectory
                     generation: renderer.displayGeneration
                     manifest: renderer.displayManifest
                     imageCount: renderer.displayImageCount
@@ -670,11 +675,9 @@ Item {
 
                 Controls.Label {
                     anchors.centerIn: parent
-                    text: !root.editImages.length ? "Select an image to render"
-                        : renderer.renderState === "connecting" || renderer.renderState === "queued" || renderer.renderState === "running"
-                            ? "Rendering…" : renderer.settingsPending ? "Apply to preview your changes" : "Apply to render"
-                    opacity: 0.5
-                    visible: !previewShader.visible || !previewShader.ready
+                    text: previewShader.frameError || (!root.editImages.length ? "Choose a source to preview"
+                        : root.renderBusy ? "Rendering…" : "Preview your changes here")
+                    visible: !previewShader.ready
                 }
 
                 Rectangle {
@@ -685,12 +688,16 @@ Item {
                     width: previewText.width + (Kirigami.Units.smallSpacing * 2)
                     height: previewText.height + Kirigami.Units.smallSpacing
                     radius: 4
+                    visible: previewShader.ready
                     color: Qt.rgba(0, 0, 0, 0.6)
 
                     Controls.Label {
                         id: previewText
+                        objectName: "previewLabel"
                         anchors.centerIn: parent
-                        text: "Preview"
+                        text: !root.previewIsCurrent || previewShader.displayGeneration !== renderer.displayGeneration
+                            ? "Last render"
+                            : renderer.displayShortPreview ? "Video excerpt" : "Preview"
                         font.pointSize: 8
                         color: "white"
                         font.weight: Font.Bold
@@ -711,23 +718,52 @@ Item {
                 to: 1
                 value: renderer.progress
                 indeterminate: renderer.renderState === "connecting" || (renderer.renderState === "running" && renderer.progress === 0)
-                visible: renderer.renderState !== "idle"
+                visible: root.renderBusy
+            }
+
+            Controls.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                visible: text.length > 0
+                text: sourceCheck.status === "error" ? sourceCheck.message
+                    : root.renderBusy ? renderer.stage
+                    : renderer.renderState === "error" ? renderer.error
+                    : sourceCheck.status === "checking" ? "Checking source…"
+                    : renderer.displayShortPreview && root.previewIsCurrent ? "Apply to render the full video."
+                    : ""
             }
 
             RowLayout {
-                Layout.fillWidth: true
-                Controls.Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.WordWrap
-                    text: renderer.renderState === "error" ? renderer.error
-                        : renderer.renderState === "ready" ? (renderer.settingsPending
-                            ? "Settings changed. Apply to render." : "Render complete")
-                        : renderer.stage
-                }
+                Layout.alignment: Qt.AlignRight
+
                 Controls.Button {
-                    text: renderer.renderState === "error" ? "Retry" : "Render now"
+                    objectName: "previewChangesButton"
+                    text: "Preview changes"
+                    enabled: sourceCheck.status === "valid" && !root.renderBusy
+                    onClicked: {
+                        if (root.editMode === "Video" && root.previewIsCurrent && renderer.displayDirectory
+                                && !renderer.displayShortPreview) {
+                            previewContainer.resetPreview()
+                        } else {
+                            renderer.start(false, root.editMode === "Video" ? root.videoPreviewMilliseconds : 0)
+                        }
+                    }
+                }
+
+                Controls.Button {
+                    text: "Rebuild"
+                    flat: true
+                    enabled: sourceCheck.status === "valid" && !root.renderBusy
+                    Controls.ToolTip.visible: hovered
+                    Controls.ToolTip.text: root.editMode === "Video" ? "Re-render the entire video" : "Render again and refresh cached assets"
                     onClicked: renderer.start(true)
-                    enabled: root.editImages.length > 0
+                }
+
+                Controls.Button {
+                    text: "Check source again"
+                    flat: true
+                    visible: sourceCheck.status === "error"
+                    onClicked: sourceCheck.inspect()
                 }
             }
         }
@@ -815,20 +851,10 @@ Item {
                 Kirigami.FormData.label: "Source Type:"
                 Layout.fillWidth: true
 
-                model: ["Image", "Slideshow", "Video", "Archive"]
+                model: Profiles.sourceModes
                 currentIndex: model.indexOf(root.editMode)
 
-                onActivated: index => {
-                    const newMode = model[index]
-                    root.setProfileSetting("Mode", newMode)
-
-                    if (newMode !== "Slideshow" && imageList.count === 0) {
-                        imageList.append({ "path": "" })
-                        root.syncToConfig()
-                    }
-
-                    root.configurationChanged()
-                }
+                onActivated: index => root.setProfileSetting("Mode", model[index])
             }
 
             ColumnLayout {
@@ -1023,10 +1049,24 @@ Item {
             }
 
             Controls.Label {
+                objectName: "videoWorkEstimate"
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                visible: root.editMode === "Video" && sourceCheck.status === "valid"
+                text: {
+                    const count = Math.ceil(sourceCheck.info.source_frames / root.activeSettings.FrameStride)
+                    const prepared = count + Math.max(0, count - 1) * root.activeSettings.VideoTransitionFrames
+                    const seconds = (sourceCheck.info.duration_ms / 1000).toLocaleString(Qt.locale(), "f", 1)
+                    return qsTr("The full render will optimize %1 source frames and play %2 frames over %3 s.")
+                        .arg(count).arg(prepared).arg(seconds)
+                }
+            }
+
+            Controls.Label {
                 visible: root.editMode === "Video"
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                text: "Video decoding requires FFmpeg and FFprobe. Subsampling reduces rendering work; interpolation fills the time between sampled frames. Playback loops without audio."
+                text: "Preview renders the first three seconds. Playback loops without audio."
             }
 
             Kirigami.Separator {

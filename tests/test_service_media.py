@@ -284,7 +284,7 @@ def test_inactive_video_options_have_one_canonical_cache_identity(input_format):
     assert options == normalize_options({"input_format": input_format})
 
 
-def test_real_video_worker_renders_and_publishes_interpolated_background(tmp_path, monkeypatch):
+def test_real_video_worker_reuses_complete_endpoints_after_still_eviction(tmp_path, monkeypatch, capsys):
     if any(not shutil.which(name) for name in ("ffmpeg", "ffprobe", "fc-match")):
         pytest.skip("Video worker requires FFmpeg and fontconfig")
     source = tmp_path / "short.mkv"
@@ -293,24 +293,35 @@ def test_real_video_worker_renders_and_publishes_interpolated_background(tmp_pat
                    check=True, capture_output=True)
     monkeypatch.setattr(service, "_screen_size", lambda name, fallback: tuple(fallback))
     queue = service.RenderQueue(tmp_path / "cache", start_worker=True)
-    reply = queue.submit({"input_format": "video", "images": [str(source)],
-                          "font": "DejaVu Sans Mono", "size": [4, 4], "chars": " .",
-                          "style": "structure", "grayscale": True, "steps": 1,
-                          "transition_steps": 1, "video_transition_frames": 1,
-                          "transition_type": "earth-mover"})
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        ready = queue.status(reply["id"])
-        if ready["state"] in ("ready", "error"):
-            break
-        time.sleep(0.05)
-    else:
+    queue.configure_cache(1)
+    settings = {"input_format": "video", "images": [str(source)], "font": "DejaVu Sans Mono",
+                "size": [4, 4], "chars": " .", "style": "structure", "grayscale": True,
+                "steps": 1, "transition_steps": 1, "client_id": "video-review"}
+
+    def render(**overrides):
+        reply = queue.submit(dict(settings, **overrides))
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            ready = queue.status(reply["id"], settings["client_id"])
+            if ready["state"] in ("ready", "error"):
+                assert ready["state"] == "ready", ready.get("error")
+                return ready
+            time.sleep(0.05)
         with queue.lock:
             process = queue.jobs[reply["id"]].get("process")
             if process is not None:
                 process.terminate()
         pytest.fail("Video render worker did not finish within 30 seconds")
-    assert ready["state"] == "ready", ready.get("error")
+
+    original = render()
+    capsys.readouterr()
+    ready = render(video_transition_frames=1, transition_type="earth-mover")
+    assert capsys.readouterr().out.count("Reusing cached video frame") == 2
+    for before, after in [(0, 0), (1, 2)]:
+        for name in ("glyph.png", "color.png", "background.png"):
+            old = Path(original["directory"]) / "video" / f"{before:04d}" / name
+            new = Path(ready["directory"]) / "video" / f"{after:04d}" / name
+            assert old.read_bytes() == new.read_bytes()
     assert ready["manifest"]["schema_version"] == 3
     assert ready["manifest"]["video"]["frame_count"] == 3
     assert ready["manifest"]["video"]["duration_ms"] == pytest.approx(250)

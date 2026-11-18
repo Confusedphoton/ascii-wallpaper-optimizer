@@ -56,7 +56,7 @@ from .optimizer import (
 )
 from .revision import render_revision
 from .runtime import select_device
-from .settings import normalize_options, validate_size
+from .settings import VIDEO_PLAYBACK_OPTIONS, normalize_options, validate_size
 from .structure import STRUCTURE_CHARS, solve_structure
 from .tone import (
     display_tone_lab,
@@ -489,10 +489,52 @@ def _video_intermediates(start: Grid, destination: Grid, args: argparse.Namespac
         yield Grid(glyphs, color, background)
 
 
+def _video_endpoint_settings(signature: dict) -> dict:
+    return {**{key: value for key, value in signature.items()
+               if key not in {"images", "image_hashes", "font", *VIDEO_PLAYBACK_OPTIONS}},
+            "image_hash": signature["image_hashes"][0]}
+
+
+def _video_endpoint_sources(directories, signature):
+    """Map source frame numbers to the original maps in compatible generations."""
+    settings = _video_endpoint_settings(signature)
+    endpoints = {}
+    for directory in directories:
+        try:
+            manifest = json.loads((directory / "manifest.json").read_text())
+            if manifest["schema_version"] != 3:
+                continue
+            previous = manifest["signature"]
+            if _video_endpoint_settings(previous) != settings:
+                continue
+            stride = int(previous["frame_stride"])
+            spacing = int(previous["video_transition_frames"]) + 1
+            count = int(manifest["video"]["frame_count"])
+            if stride < 1 or spacing < 1 or count < 1 or (count - 1) % spacing:
+                continue
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError):
+            continue
+        for index, frame in enumerate(range(0, count, spacing)):
+            endpoints.setdefault(index * stride, []).append(directory / "video" / f"{frame:04d}")
+    return endpoints
+
+
+def _read_video_endpoint(paths, size, cell, glyph_count):
+    expected = tuple(math.ceil(dimension / step) for dimension, step in zip(reversed(size), reversed(cell)))
+    for path in paths:
+        try:
+            grid = _load_grid(path)
+            if grid.glyph.shape == expected and grid.color.shape == (*expected, 3) and grid.glyph.max() < glyph_count:
+                return grid
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 def _build_video(args: argparse.Namespace, source: Path, output: Path,
                  signature: dict, masks: np.ndarray, cell: tuple[int, int]) -> None:
     """Optimize only sampled frames, then emit a timestamp-preserving clip."""
-    info = probe_video(source)
+    info = probe_video(source).prefix(args.video_preview_ms)
     times = info.sampled_times(args.frame_stride)
     durations = frame_durations(info, args.frame_stride, args.video_transition_frames)
     count = len(durations)
@@ -514,13 +556,43 @@ def _build_video(args: argparse.Namespace, source: Path, output: Path,
                 return
         except (OSError, ValueError, TypeError, KeyError):
             pass
-    output.mkdir(parents=True, exist_ok=True)
+    # Stage replacements so a compatible previous directory remains readable
+    # throughout an in-place CLI rebuild and until all new frames are ready.
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".ascii-video-", dir=output.parent) as temporary:
+        stage = Path(temporary) / "render"
+        stage.mkdir()
+        reusable = [output, *getattr(args, "reuse_video_from", ())]
+        _write_video(args, source, stage, signature, masks, cell, info, times, durations, reusable)
+        (output / "stills").mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="previous-", dir=temporary) as backup:
+            previous = Path(backup)
+            replaced, installed = [], []
+            try:
+                (previous / "stills").mkdir()
+                names = ("atlas.png", "metadata.png", "video", "stills/0000")
+                for name in ("manifest.json", *names):
+                    if (output / name).exists():
+                        (output / name).rename(previous / name)
+                        replaced.append(name)
+                for name in (*names, "manifest.json"):
+                    (stage / name).rename(output / name)
+                    installed.append(name)
+            except OSError:
+                for name in reversed(installed):
+                    (output / name).rename(stage / name)
+                for name in reversed(replaced):
+                    (previous / name).rename(output / name)
+                raise
+    print(f"Rendered video assets: {output}")
+    if getattr(args, "progress_json", False):
+        print('ASCII_PROGRESS {"progress": 1.0, "stage": "Ready"}', flush=True)
+
+
+def _write_video(args, source, output, signature, masks, cell, info, times, durations, reuse_from):
+    count = len(durations)
     save_atlas(masks, output / "atlas.png")
     save_metadata(args.size, cell, len(args.chars), output / "metadata.png", invert_ink=args.invert_ink)
-    # A failed render must never leave a complete manifest describing mixed old
-    # and new frames; the service also renders into unpublished generations.
-    manifest_path.unlink(missing_ok=True)
-    shutil.rmtree(output / "video", ignore_errors=True)
     backgrounds = {}
     emitted = 0
     completed = 0
@@ -530,10 +602,9 @@ def _build_video(args: argparse.Namespace, source: Path, output: Path,
     still_cache = getattr(args, "still_cache", None)
     if still_cache is not None:
         still_cache = Path(still_cache).expanduser().resolve()
-    endpoint_settings = {key: value for key, value in signature.items()
-                         if key not in {"images", "image_hashes", "font", "frame_stride",
-                                        "video_transition_frames", *TRANSITION_SETTINGS}}
-    endpoint_settings["image_hash"] = signature["image_hashes"][0]
+    endpoint_settings = _video_endpoint_settings(signature)
+    reusable = (_video_endpoint_sources(reuse_from, signature)
+                if not args.force else {})
 
     def report(fraction: float, stage: str) -> None:
         if getattr(args, "progress_json", False):
@@ -549,7 +620,8 @@ def _build_video(args: argparse.Namespace, source: Path, output: Path,
         emitted += 1
         return persisted
 
-    decoded = decode_frames(source, args.size, args.crop, args.grayscale, args.frame_stride)
+    limit = {"limit": len(times)} if args.video_preview_ms else {}
+    decoded = decode_frames(source, args.size, args.crop, args.grayscale, args.frame_stride, **limit)
     sampled_count = 0
     try:
         for index, target in enumerate(decoded):
@@ -562,9 +634,11 @@ def _build_video(args: argparse.Namespace, source: Path, output: Path,
             cache_entry = still_cache / cache_key if still_cache is not None else None
             cached = (_cached_still(cache_entry, endpoint_signature, preview=False)
                       if cache_entry is not None and not args.force else None)
-            if cached is not None:
+            endpoint = (_load_grid(cached) if cached is not None else
+                        _read_video_endpoint(reusable.get(original_index, ()), args.size, cell, len(masks)))
+            reused = endpoint is not None
+            if reused:
                 print(f"Reusing cached video frame {index + 1}/{len(times)}", flush=True)
-                endpoint = _load_grid(cached)
             else:
                 print(f"Optimizing video frame {index + 1}/{len(times)}", flush=True)
                 grid = solve_style(target, masks, style=args.style, invert_ink=args.invert_ink,
@@ -588,7 +662,7 @@ def _build_video(args: argparse.Namespace, source: Path, output: Path,
                     completed += 1
                     report(0.0, f"Finished interpolated video frame {emitted}/{count}")
             previous = save(endpoint)
-            if cache_entry is not None and cached is None:
+            if cache_entry is not None and not reused:
                 _cache_still(output / "video" / f"{emitted - 1:04d}", cache_entry,
                              endpoint_signature, preview=False)
             if index == 0:
@@ -609,7 +683,7 @@ def _build_video(args: argparse.Namespace, source: Path, output: Path,
         video["frame_duration_ms"] = info.duration_ms / count
     else:
         video["frame_durations_ms"] = durations
-    _atomic_json(manifest_path, {
+    _atomic_json(output / "manifest.json", {
         "schema_version": 3, "video": video, "loops": {}, "signature": signature,
         "generation": getattr(args, "generation", None) or uuid.uuid4().hex,
         "image_count": 1, "frame_count": args.frames,
@@ -618,8 +692,6 @@ def _build_video(args: argparse.Namespace, source: Path, output: Path,
         "atlas_count": len(args.chars), "invert_ink": args.invert_ink,
         "background_labs": backgrounds,
     })
-    print(f"Rendered video assets: {output}")
-    report(0.0, "Ready")
 
 
 def _import_archive(args: argparse.Namespace, output: Path) -> None:
@@ -758,7 +830,8 @@ def _build_directory(args: argparse.Namespace) -> None:
     }
     output = args.output.expanduser().resolve()
     if args.input_format == "video":
-        signature.update(frame_stride=args.frame_stride, video_transition_frames=args.video_transition_frames)
+        signature.update(frame_stride=args.frame_stride, video_transition_frames=args.video_transition_frames,
+                         video_preview_ms=args.video_preview_ms)
         _build_video(args, images[0], output, signature, masks, cell)
         return
     still_cache = getattr(args, "still_cache", None)
@@ -952,6 +1025,8 @@ def make_parser() -> argparse.ArgumentParser:
                         help="Render every Nth source video frame without changing playback duration")
     parser.add_argument("--video-transition-frames", type=int, default=0,
                         help="Interpolated frames between sampled video frames (default: 0)")
+    parser.add_argument("--video-preview-ms", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--reuse-video-from", type=Path, action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--font", default=defaults["font"], help="Font family or font file")
     parser.add_argument("--chars", default=DEFAULT_CHARS, help="Distinct characters, including a space")
     parser.add_argument("--detail", type=int, choices=(0, 1, 2, 3, 4), default=defaults["detail"])

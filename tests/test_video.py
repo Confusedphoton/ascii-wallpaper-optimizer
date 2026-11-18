@@ -195,6 +195,33 @@ def test_video_endpoint_cache_reuses_transition_variants_and_original_frame_seed
     assert len(targets) == 5  # Only source frames 1 and 3 were absent.
 
 
+def test_video_preview_preserves_timing_and_full_render_reuses_its_original_frames(video_batch):
+    arguments, targets, _ = video_batch
+    excerpt = arguments("--video-preview-ms", "750", "--frame-stride", "2")
+    cli.build(excerpt)
+    assert len(targets) == 2
+    manifest = json.loads((excerpt.output / "manifest.json").read_text())
+    assert manifest["video"]["duration_ms"] == 750
+    assert manifest["video"]["frame_durations_ms"] == [500, 250]
+
+    # No still cache. Reuse original frames from the excerpt generation.
+    full = arguments("--video-transition-frames", "1")
+    cli.build(full)
+    assert len(targets) == 5  # Only source frames 1, 3, and 4 had no solved grid.
+    manifest = json.loads((full.output / "manifest.json").read_text())
+    assert manifest["video"]["duration_ms"] == 1250
+    assert manifest["video"]["frame_count"] == 9
+
+
+def test_video_probe_rejects_a_still_image(tmp_path):
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg is not installed")
+    source = tmp_path / "image.png"
+    Image.new("RGB", (4, 4)).save(source)
+    with pytest.raises(ValueError, match="Choose a video"):
+        video.probe_video(source)
+
+
 def test_video_archive_export_and_import_need_no_render_settings(video_batch, monkeypatch, tmp_path):
     from ascii_optimizer.archive import read_archive_manifest
 

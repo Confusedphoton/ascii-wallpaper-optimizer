@@ -50,6 +50,7 @@ Item {
         loading: controller.loading
         frameCount: controller.loopInfo ? controller.loopInfo.frame_count : 120
         duration: controller.loopInfo ? controller.loopInfo.duration_ms : 10000
+        followTimeline: !!controller.videoInfo
         frameDurations: controller.videoInfo ? controller.videoInfo.frame_durations_ms || [] : []
         clipKey: controller.generation + ":" + controller.currentIndex
         onCycleCompleted: cycles => {

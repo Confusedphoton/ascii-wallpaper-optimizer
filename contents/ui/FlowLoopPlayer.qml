@@ -6,6 +6,7 @@ Item {
     property bool playing: false
     property bool ready: false
     property bool loading: false
+    property bool followTimeline: false
     property int frameCount: 120
     property real duration: 10000
     property var frameDurations: []
@@ -25,11 +26,12 @@ Item {
     property real startedAt: 0
     property real pausedAt: 0
     property real pausedDuration: 0
-    readonly property bool paused: loading || !ready
+    readonly property bool paused: followTimeline ? !startedAt && !ready : loading || !ready
     readonly property bool timerRunning: frameTimer.running
     signal cycleCompleted(int cycles)
 
     onPlayingChanged: reset()
+    onFollowTimelineChanged: reset()
     onClipKeyChanged: reset()
     onFrameCountChanged: reset()
     onDurationChanged: reset()
@@ -59,6 +61,10 @@ Item {
 
     function schedule() {
         if (!playing || paused || frameCount < 2) return
+        if (followTimeline) {
+            scheduleVideo()
+            return
+        }
         const cycles = Math.floor(ticks / frameCount)
         if (frameIndex === 0 && cycles > reportedCycles) {
             reportedCycles = cycles
@@ -68,6 +74,31 @@ Item {
         if (!startedAt) startedAt = Date.now()
         const deadline = nextDeadline()
         frameTimer.interval = Math.max(1, Math.ceil(deadline - (Date.now() - startedAt - pausedDuration)))
+        frameTimer.restart()
+    }
+
+    function scheduleVideo() {
+        if (!startedAt) startedAt = Date.now()
+        const elapsed = Math.max(0, Date.now() - startedAt)
+        const cycleDuration = frameOffsets.length ? frameOffsets[frameCount] : duration
+        const phase = elapsed % cycleDuration
+        let deadline
+        if (frameOffsets.length) {
+            let low = 0
+            let high = frameCount
+            while (low + 1 < high) {
+                const middle = Math.floor((low + high) / 2)
+                if (frameOffsets[middle] <= phase) low = middle
+                else high = middle
+            }
+            frameIndex = low
+            deadline = frameOffsets[low + 1]
+        } else {
+            const hold = cycleDuration / frameCount
+            frameIndex = Math.min(frameCount - 1, Math.floor(phase / hold))
+            deadline = (frameIndex + 1) * hold
+        }
+        frameTimer.interval = Math.max(1, Math.min(2147483647, Math.ceil(deadline - phase)))
         frameTimer.restart()
     }
 
@@ -85,6 +116,10 @@ Item {
         id: frameTimer
         onTriggered: {
             if (!player.playing || player.paused) return
+            if (player.followTimeline) {
+                player.scheduleVideo()
+                return
+            }
             const deadline = player.startedAt + player.pausedDuration + player.nextDeadline()
             // A blocked event loop shifts the clock too; present every frame
             // with its normal hold instead of bursting through late deadlines.

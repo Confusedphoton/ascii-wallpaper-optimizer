@@ -21,6 +21,8 @@ Item {
     property var cachedDescriptor: null
     property var pendingDescriptor: null
     property bool outputDirty: false
+    property string requestedVideoKey: ""
+    readonly property bool isVideoFrame: manifest.schema_version === 3 && !!manifest.video && loopFrame >= 0
     readonly property var displayedFrame: activeBuffer === 0 ? firstFrame : activeBuffer === 1 ? secondFrame : null
     readonly property bool ready: !!cachedDescriptor
     readonly property string displayGeneration: ready ? cachedDescriptor.generation : ""
@@ -49,6 +51,7 @@ Item {
             activeBuffer = -1
             cachedDescriptor = null
             pendingDescriptor = null
+            requestedVideoKey = ""
         }
     }
     Component.onCompleted: refresh.restart()
@@ -88,13 +91,26 @@ Item {
             return
         }
         const buffer = activeBuffer === 0 ? secondFrame : firstFrame
-        buffer.load(descriptor(currentIndex, nextIndex, frameIndex))
+        const wanted = descriptor(currentIndex, nextIndex, frameIndex)
+        // Allow one in-flight video load to complete even when several
+        // timestamps pass. The next load goes directly to the newest request.
+        if (isVideoFrame && requestedVideoKey && buffer.frameKey === requestedVideoKey
+                && buffer.descriptor.generation === wanted.generation && buffer.descriptor.url === wanted.url
+                && !buffer.ready && !buffer.failed) return
+        requestedVideoKey = isVideoFrame ? wanted.key : ""
+        buffer.load(wanted)
         present(buffer)
     }
 
     function present(buffer) {
-        if (!renderDirectory || pendingDescriptor || !buffer.ready || buffer.frameKey !== desiredKey
-                || width < 1 || height < 1 || displayedKey === desiredKey) return
+        if (!renderDirectory || pendingDescriptor || !buffer.ready || width < 1 || height < 1
+                || buffer.frameKey === displayedKey) return
+        if (buffer.frameKey !== desiredKey) {
+            const wanted = descriptor(currentIndex, nextIndex, frameIndex)
+            if (!isVideoFrame || buffer.frameKey !== requestedVideoKey
+                    || buffer.descriptor.generation !== wanted.generation || buffer.descriptor.url !== wanted.url) return
+        }
+        requestedVideoKey = ""
         const nextBuffer = buffer === firstFrame ? 0 : 1
         activeBuffer = nextBuffer
         capture(buffer.descriptor)
@@ -138,6 +154,14 @@ Item {
         }
     }
 
+    function reportLoadFailure(key) {
+        if (key === desiredKey) frameError = "Could not load a prepared frame."
+        else if (key === requestedVideoKey) {
+            requestedVideoKey = ""
+            refresh.restart()
+        }
+    }
+
     Timer { id: refresh; interval: 0; onTriggered: asciiRoot.updateFrame() }
     Connections {
         target: asciiRoot.Window.window
@@ -156,14 +180,14 @@ Item {
             anchors.fill: parent
             active: asciiRoot.activeBuffer === 0
             onCompleted: asciiRoot.present(firstFrame)
-            onLoadFailed: key => { if (key === asciiRoot.desiredKey) asciiRoot.frameError = "Could not load a prepared frame." }
+            onLoadFailed: key => asciiRoot.reportLoadFailure(key)
         }
         AsciiFrame {
             id: secondFrame
             anchors.fill: parent
             active: asciiRoot.activeBuffer === 1
             onCompleted: asciiRoot.present(secondFrame)
-            onLoadFailed: key => { if (key === asciiRoot.desiredKey) asciiRoot.frameError = "Could not load a prepared frame." }
+            onLoadFailed: key => asciiRoot.reportLoadFailure(key)
         }
     }
     ShaderEffectSource {
