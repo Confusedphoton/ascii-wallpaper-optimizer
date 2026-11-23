@@ -71,14 +71,7 @@ def earth_mover_destinations(start: np.ndarray, end: np.ndarray,
                              start_color: np.ndarray, end_color: np.ndarray,
                              start_background: np.ndarray, end_background: np.ndarray,
                              masks: np.ndarray, *, invert_ink: bool = False) -> np.ndarray:
-    """Balanced cell transport using hierarchical Euclidean earth mover costs.
-
-    Every cell carries equal mass. Position, displayed average OKLab color, and
-    coverage define the ground metric. Small regions solve exact assignments;
-    larger grids first assign equal-capacity spatial regions by their centroids.
-    This approximates global EMD while keeping every cost matrix at most 64x64.
-    The returned flat destination indices form a permutation of the grid.
-    """
+    """Balanced cell transport using hierarchical Euclidean earth mover costs."""
     if start.shape != end.shape or start.ndim != 2:
         raise ValueError("Transport endpoints must use the same two-dimensional grid")
     from .tone import display_tone_lab
@@ -94,8 +87,6 @@ def earth_mover_destinations(start: np.ndarray, end: np.ndarray,
         ink = coverage[glyphs][..., None]
         average = ink * colors + (1 - ink) * background
         displayed = display_tone_lab(average, invert_ink=invert_ink)
-        # Appearance outweighs position so similar content can travel, while
-        # nearby destinations win ties and unchanged images remain stationary.
         return np.concatenate((0.25 * positions, displayed,
                                0.5 * ink), axis=-1).reshape(-1, 6)
 
@@ -125,12 +116,11 @@ def earth_mover_destinations(start: np.ndarray, end: np.ndarray,
 
 def transport_cells(glyphs: np.ndarray, colors: np.ndarray, background: np.ndarray,
                     destinations: np.ndarray, progress: np.ndarray,
-                    masks: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+                    masks: np.ndarray, *,
+                    weights: np.ndarray | None = None):
     """Splat traveling cells onto the grid, keeping one glyph at each location.
 
-    Bilinear weights soften movement between discrete cells. At collisions the
-    contribution with the most visible ink wins; empty locations use background
-    ink. Decisions are deterministic, including ties, for parallel preparation.
+    When `weights` is provided, also returns the transported per-cell SDF weight map.
     """
     rows, cols = glyphs.shape
     y, x = np.mgrid[:rows, :cols]
@@ -141,19 +131,18 @@ def transport_cells(glyphs: np.ndarray, colors: np.ndarray, background: np.ndarr
     dy, dx = moving_y - top, moving_x - left
     coverage = masks.mean((1, 2))[glyphs].ravel()
     visibility = coverage * np.linalg.norm(colors.reshape(-1, 3) - background, axis=1)
-    locations, particles, weights = [], [], []
+    locations, particles, splat_weights = [], [], []
     for oy, ox, weight in ((0, 0, (1 - dy) * (1 - dx)), (0, 1, (1 - dy) * dx),
                            (1, 0, dy * (1 - dx)), (1, 1, dy * dx)):
         ty, tx = top + oy, left + ox
         valid = (ty >= 0) & (ty < rows) & (tx >= 0) & (tx < cols) & (weight > 0)
         locations.append((ty[valid] * cols + tx[valid]))
         particles.append(np.flatnonzero(valid))
-        weights.append(weight[valid])
+        splat_weights.append(weight[valid])
     locations = np.concatenate(locations)
     particles = np.concatenate(particles)
-    weights = np.concatenate(weights)
-    priority = weights * (visibility[particles] + 1e-6)
-    # Sort each location by ink strength; particle index breaks equal-strength ties.
+    splat_weights = np.concatenate(splat_weights)
+    priority = splat_weights * (visibility[particles] + 1e-6)
     order = np.lexsort((particles, priority, locations))
     last = np.r_[locations[order][1:] != locations[order][:-1], True]
     winners = order[last]
@@ -162,9 +151,15 @@ def transport_cells(glyphs: np.ndarray, colors: np.ndarray, background: np.ndarr
     result_glyphs = np.full(glyphs.size, np.argmin(masks.mean((1, 2))), dtype=glyphs.dtype)
     result_colors = np.broadcast_to(background, (glyphs.size, 3)).copy()
     result_glyphs[occupied] = glyphs.ravel()[selected]
-    result_colors[occupied] = (background + weights[winners, None]
+    result_colors[occupied] = (background + splat_weights[winners, None]
                                * (colors.reshape(-1, 3)[selected] - background))
-    return result_glyphs.reshape(glyphs.shape), result_colors.reshape(*glyphs.shape, 3)
+    if weights is None:
+        return result_glyphs.reshape(glyphs.shape), result_colors.reshape(*glyphs.shape, 3)
+    result_weights = np.zeros(glyphs.size, dtype=np.float32)
+    result_weights[occupied] = weights.ravel()[selected]
+    return (result_glyphs.reshape(glyphs.shape),
+            result_colors.reshape(*glyphs.shape, 3),
+            result_weights.reshape(glyphs.shape))
 
 
 def ease(t: float, pace: str) -> float:
@@ -213,8 +208,6 @@ def phase_offsets(shape: tuple[int, int], field: str, seed: int,
         gy[1:] = lightness[1:] - lightness[:-1]
         gx[:, 1:] = lightness[:, 1:] - lightness[:, :-1]
         salience = np.sqrt(gx * gx + gy * gy)
-        # Pool the complete area of each cell. Sampling its center misses thin
-        # edges between centers, making those images transition like flat ones.
         y_edges = np.linspace(0, source.shape[0], rows + 1).astype(int)
         x_edges = np.linspace(0, source.shape[1], cols + 1).astype(int)
         integral = np.pad(salience.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
@@ -242,8 +235,6 @@ def glyph_paths(masks: np.ndarray, neighbors: int = 4) -> list[list[list[int]]]:
     flat = masks.reshape(count, -1).astype(np.float64)
     norms = (flat * flat).sum(1)
     distance = np.sqrt(np.maximum(0, norms[:, None] + norms[None, :] - 2 * flat @ flat.T) / flat.shape[1])
-    # Neighboring coverage levels connect the graph; shape-nearest links allow
-    # shortcuts only between glyphs of comparable visual density.
     links = np.zeros((count, count), dtype=bool)
     coverage = flat.mean(1)
     order = np.argsort(coverage)

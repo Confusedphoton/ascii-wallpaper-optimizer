@@ -24,9 +24,9 @@ from functools import lru_cache
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
-from .defaults import PERCEPTUAL_WEIGHTS, ppd_for_width
+from .defaults import BOOL_OPTIONS, PERCEPTUAL_WEIGHTS, SIGNATURE_OPTION_NAMES, ppd_for_width
 from .revision import render_revision
-from .settings import VIDEO_PLAYBACK_OPTIONS, normalize_options, validate_size
+from .settings import CLI_VALUE_OPTION_NAMES, VIDEO_PLAYBACK_OPTIONS, normalize_options, validate_size
 
 PORT = 48741
 ADDRESS = "127.0.0.1"
@@ -196,17 +196,12 @@ def _validated_request(raw: dict) -> dict:
         font = Path(result.stdout.strip())
     if not font.is_file():
         raise ValueError("Could not find the selected font")
-    names = ("input_format", "frame_stride", "video_transition_frames",
-             "chars", "detail", "grayscale", "frames", "dither", "structure_dither",
-             "transition_type", "transition_pace", "transition_field", "transition_spread", "gradient_loss_strength",
-             "glyph_luminance_bonus", "glyph_entropy_strength", "style", "invert_ink", "background", "crop", "steps",
-             "transition_steps", "seed", "perceptual_loss", "flow_strength", "flow_eddies", "flow_scale",
-             "flow_animated", "flow_loop_seconds", "flow_fps", "flow_frame_steps", "flow_temporal_strength")
-    if input_format == "video":
-        names += ("video_preview_ms",)
-    return dict({name: options[name] for name in names}, glyph_search="all" if options["style"] != "structure" else "structure",
-                output_stage=("adam_terminal" if options["perceptual_loss"] else
-                              "postprocessed" if options["style"] == "headroom" else "structure"),
+    names = SIGNATURE_OPTION_NAMES + (("video_preview_ms",) if input_format == "video" else ())
+    return dict({name: options[name] for name in names},
+                atlas_type="sdf",
+                glyph_search="stroke_graph" if options["style"] == "stroke" else "all",
+                output_stage=("stroke_graph" if options["style"] == "stroke" else
+                              "adam_terminal" if options["perceptual_loss"] else "postprocessed"),
                 perceptual_weights=PERCEPTUAL_WEIGHTS if options["perceptual_loss"] else {},
                 viewing_ppd=ppd_for_width(size[0]) if options["perceptual_loss"] else None,
                 version=__version__, render_revision=render_revision(), images=images,
@@ -590,16 +585,11 @@ class RenderQueue:
         command = [sys.executable, "-m", "ascii_optimizer.launcher", "-m", "ascii_optimizer.cli", "--output", job["directory"],
                    "--generation", job["generation"], "--still-cache", str(self.cache / "stills"),
                    "--size", f"{settings['size'][0]}x{settings['size'][1]}", "--progress-json"]
-        for name in ("input_format", "frame_stride", "video_transition_frames",
-                     "font", "chars", "detail", "frames", "transition_type", "transition_pace", "transition_field",
-                     "transition_spread", "dither", "gradient_loss_strength", "glyph_luminance_bonus", "glyph_entropy_strength",
-                     "style", "structure_dither", "background", "crop", "steps", "transition_steps", "seed",
-                     "flow_strength", "flow_eddies", "flow_scale", "flow_loop_seconds", "flow_fps",
-                     "flow_frame_steps", "flow_temporal_strength"):
+        for name in ("font", *CLI_VALUE_OPTION_NAMES):
             command.extend(("--" + name.replace("_", "-"), str(settings[name])))
         if not settings["perceptual_loss"]:
             command.append("--no-perceptual-loss")
-        for name in ("invert_ink", "grayscale", "flow_animated"):
+        for name in BOOL_OPTIONS:
             if settings[name]:
                 command.append("--" + name.replace("_", "-"))
         if job["force"]:

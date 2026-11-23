@@ -1,7 +1,7 @@
 """Execute packaged shader binaries on an optional, headless Mesa EGL context.
 
-This checks shader math and persisted PNG decoding, independently of Qt's RHI.
-Qt scene graph lifecycle is covered in test_qml.py.
+This checks shader math and persisted PNG decoding (both legacy alpha atlases
+and SDF atlases with per-cell stroke weight) independently of Qt's RHI.
 """
 from __future__ import annotations
 
@@ -40,27 +40,43 @@ def packaged_glsl(tmp_path_factory):
 
 
 @pytest.mark.parametrize("invert_ink", [False, True])
-def test_packaged_shader_pixels_match_persisted_preview(tmp_path, packaged_glsl, invert_ink):
-    from ascii_optimizer.assets import save_atlas, save_metadata
+@pytest.mark.parametrize("use_sdf", [False, True])
+def test_packaged_shader_pixels_match_persisted_preview(tmp_path, packaged_glsl, invert_ink, use_sdf):
+    from ascii_optimizer.assets import glyph_sdf_atlas, resolve_font, save_atlas, save_metadata
     from ascii_optimizer.cli import _save_grid
     from ascii_optimizer.optimizer import Grid
     from ascii_optimizer.tone import srgb_to_oklab
 
-    # Exact atlas byte values avoid changing coverage during PNG serialization.
-    mask = np.array([[0, 64, 128, 255], [255, 128, 64, 0],
-                     [128, 255, 0, 64], [64, 0, 255, 128]], dtype=np.float32) / 255
-    masks = np.stack((mask, mask[:, ::-1]))
+    if use_sdf:
+        masks, sdf_spread = glyph_sdf_atlas(resolve_font("DejaVu Sans Mono"), [" ", "/", "#"], (8, 16))
+        glyph = np.array([[0, 1, 2, 1], [2, 1, 0, 2]], dtype=np.uint8)
+        weight = np.array([[0.0, -0.8, 0.0, 0.9], [-0.5, 0.5, 1.0, -0.9]], dtype=np.float32)
+        cell = (8, 16)
+        size = (32, 32)
+        count = 3
+    else:
+        sdf_spread = 0.0
+        mask = np.array([[0, 64, 128, 255], [255, 128, 64, 0],
+                         [128, 255, 0, 64], [64, 0, 255, 128]], dtype=np.float32) / 255
+        masks = np.stack((mask, mask[:, ::-1]))
+        glyph = np.array([[0, 1, 0, 1], [1, 0, 1, 0]], dtype=np.uint8)
+        weight = None
+        cell = (4, 4)
+        size = (16, 8)
+        count = 2
+
     foreground = np.array([[[255, 0, 0], [0, 0, 255], [128, 128, 128], [0, 255, 0]],
                            [[255, 110, 0], [180, 20, 220], [255, 255, 255], [0, 0, 0]]],
                           dtype=np.float32) / 255
-    grid = Grid(np.array([[0, 1, 0, 1], [1, 0, 1, 0]], dtype=np.uint8),
-                srgb_to_oklab(foreground), srgb_to_oklab(np.array([20, 30, 48], dtype=np.float32) / 255))
-    persisted = _save_grid(grid, tmp_path, True, masks, (16, 8), invert_ink=invert_ink)
+    grid = Grid(glyph, srgb_to_oklab(foreground),
+                srgb_to_oklab(np.array([20, 30, 48], dtype=np.float32) / 255),
+                weight=weight)
+    persisted = _save_grid(grid, tmp_path, True, masks, size, invert_ink=invert_ink, sdf_spread=sdf_spread)
     save_atlas(masks, tmp_path / "atlas.png")
-    save_metadata((16, 8), (4, 4), 2, tmp_path / "metadata.png", invert_ink=invert_ink)
-    request = {"sources": packaged_glsl, "directory": str(tmp_path), "size": [16, 8],
-               "cell": [4, 4], "grid": [4, 2], "count": 2, "invert": invert_ink,
-               "background": persisted.background.tolist()}
+    save_metadata(size, cell, count, tmp_path / "metadata.png", invert_ink=invert_ink, sdf_spread=sdf_spread)
+    request = {"sources": packaged_glsl, "directory": str(tmp_path), "size": list(size),
+               "cell": list(cell), "grid": [4, 2], "count": count, "invert": invert_ink,
+               "sdf_spread": sdf_spread, "background": persisted.background.tolist()}
     request_file = tmp_path / "request.json"
     request_file.write_text(json.dumps(request))
     environment = dict(os.environ, LIBGL_ALWAYS_SOFTWARE="1", EGL_PLATFORM="surfaceless")
@@ -73,7 +89,7 @@ def test_packaged_shader_pixels_match_persisted_preview(tmp_path, packaged_glsl,
     assert result.returncode == 0, result.stdout + result.stderr
     expected = np.asarray(Image.open(tmp_path / "preview.png"), dtype=np.int16)
     for name in ("uniforms", "legacy", "background-texture"):
-        actual = np.fromfile(tmp_path / f"{name}.rgba", dtype=np.uint8).reshape(8, 16, 4)
+        actual = np.fromfile(tmp_path / f"{name}.rgba", dtype=np.uint8).reshape(size[1], size[0], 4)
         assert np.all(actual[..., 3] == 255)
         difference = np.abs(actual[..., :3].astype(np.int16) - expected)
         assert difference.max() <= 2, f"{name}: RGB byte error {difference.max()}"
@@ -188,6 +204,7 @@ def _render_surfaceless(request_file: Path) -> None:
         set_uniform(name, vec2, *values)
     set_uniform("atlasCount", scalar, request["count"])
     set_uniform("invertInk", scalar, int(request["invert"]))
+    set_uniform("sdfSpread", scalar, float(request.get("sdf_spread", 0.0)))
     set_uniform("backgroundLab", vec3, *request["background"])
     vertices = (F * 16)(-1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, 1, 1, 1, 1)
     buffer = U()
@@ -207,7 +224,8 @@ def _render_surfaceless(request_file: Path) -> None:
         pixels = C.create_string_buffer(image.tobytes())
         active_texture(0x84C0 + unit)
         texture_bind(0x0DE1, textures[unit])
-        for parameter, value in ((0x2800, 0x2600), (0x2801, 0x2600), (0x2802, 0x812F), (0x2803, 0x812F)):
+        filt = 0x2601 if (name == "atlas" and float(request.get("sdf_spread", 0.0)) > 0.0) else 0x2600
+        for parameter, value in ((0x2800, filt), (0x2801, filt), (0x2802, 0x812F), (0x2803, 0x812F)):
             texture_parameter(0x0DE1, parameter, value)
         texture_data(0x0DE1, 0, 0x1908, image.width, image.height, 0, 0x1908, 0x1401, pixels)
         integer(uniform(program, name.encode()), unit)

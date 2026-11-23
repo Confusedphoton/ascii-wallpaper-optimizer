@@ -105,7 +105,7 @@ def main():
             flow = {}
             print(f"{name}: {variant} ({len(chars)} glyphs, {size})", flush=True)
             grid = base.solve_style(target, masks, invert_ink=False, background="auto",
-                                    seed=args.seed, steps=args.steps, dither=0.005, structure_dither=0.06,
+                                    seed=args.seed, steps=args.steps, dither=0.005,
                                     device=device, glyph_entropy_strength=args.glyph_variety,
                                     flow_strength=args.flow_strength, flow_diagnostics=flow, **settings)
             shown = base.preview(grid, masks, size)

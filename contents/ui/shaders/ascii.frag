@@ -14,6 +14,7 @@ layout(std140, binding = 0) uniform buf {
     float metadataAvailable;
     vec3 backgroundLab;
     float backgroundAvailable;
+    float sdfSpread;
 };
 
 layout(binding = 1) uniform sampler2D glyphs;
@@ -93,6 +94,7 @@ void main() {
     vec2 glyphSize = cellSize;
     int glyphCount = int(atlasCount);
     bool inkInverted = invertInk > 0.5;
+    float spread = sdfSpread;
     if (metadataAvailable < 0.5) {
         vec3 widthData = texture(metadata, vec2(1.0 / 6.0, 0.5)).rgb;
         vec3 heightData = texture(metadata, vec2(3.0 / 6.0, 0.5)).rgb;
@@ -102,6 +104,7 @@ void main() {
         glyphSize = vec2(floor(widthData.b * 255.0 + 0.5), floor(heightData.b * 255.0 + 0.5));
         glyphCount = int(floor(countData.r * 255.0 + 0.5)) + 1;
         inkInverted = countData.g > 0.001;
+        spread = floor(countData.b * 255.0 + 0.5) / 16.0;
     }
     if (gridSize.x < 1.0 || gridSize.y < 1.0 || min(glyphSize.x, glyphSize.y) < 1.0
             || min(imageSize.x, imageSize.y) < 1.0 || glyphCount < 1) {
@@ -112,12 +115,26 @@ void main() {
     vec2 cell = min(floor(position), gridSize - 1.0);
     vec2 within = fract(position);
     vec2 mapUV = (cell + 0.5) / gridSize;
-    int glyph = clamp(int(floor(texture(glyphs, mapUV).r * 255.0 + 0.5)), 0, glyphCount - 1);
+    vec4 glyphData = texture(glyphs, mapUV);
+    int glyph = clamp(int(floor(glyphData.r * 255.0 + 0.5)), 0, glyphCount - 1);
     vec3 foreground = rgbToOklab(toLinear(texture(colors, mapUV).rgb));
     vec3 background = backgroundAvailable > 0.5 ? backgroundLab
         : rgbToOklab(toLinear(texture(backgrounds, vec2(0.5)).rgb));
-    vec2 atlasUV = vec2((float(glyph) + within.x) / float(glyphCount), within.y);
-    float mask = texture(atlas, atlasUV).a;
+    vec2 sampleWithin = within;
+    if (spread > 0.0) {
+        vec2 halfTexel = 0.5 / glyphSize;
+        sampleWithin = clamp(within, halfTexel, 1.0 - halfTexel);
+    }
+    vec2 atlasUV = vec2((float(glyph) + sampleWithin.x) / float(glyphCount), sampleWithin.y);
+    float atlasSample = texture(atlas, atlasUV).a;
+    float mask = atlasSample;
+    if (spread > 0.0) {
+        float weight = (floor(glyphData.g * 255.0 + 0.5) - 128.0) / 127.0;
+        float bias = weight * mix(0.06, 0.18, step(0.0, weight));
+        float edge = 0.5 - bias;
+        float aa = 0.5 / (2.0 * spread);
+        mask = atlasSample <= 0.004 ? 0.0 : smoothstep(edge - aa, edge + aa, atlasSample);
+    }
     vec3 composedLab = mix(background, foreground, mask);
     vec3 displayed = gamutMap(displayTone(composedLab, inkInverted));
     fragColor = vec4(toSrgb(displayed), 1.0) * qt_Opacity;

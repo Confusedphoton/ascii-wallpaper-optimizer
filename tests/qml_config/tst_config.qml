@@ -343,11 +343,10 @@ TestCase {
         item.editProfile = 0
         compare(item.activeSettings.RenderStyle, "classic")
         const headroom = ["gradientLossSlider", "glyphLuminanceBonusSlider", "glyphEntropySlider"]
-        for (const style of ["classic", "headroom", "structure", "flow"]) {
+        for (const style of ["classic", "headroom", "stroke", "flow"]) {
             item.setProfileSetting("RenderStyle", style)
-            for (const name of headroom) compare(findChild(item, name).visible, style !== "structure")
+            for (const name of headroom) compare(findChild(item, name).visible, style !== "stroke")
             compare(findChild(item, "ditherSlider").visible, style === "classic")
-            compare(findChild(item, "structureDitherSlider").visible, style === "structure")
             for (const name of ["flowStrengthSlider", "flowEddiesSlider", "flowScaleSlider"])
                 compare(findChild(item, name).visible, style === "flow")
             const request = findChild(item, "renderClient").requestSettings
@@ -444,7 +443,5 @@ TestCase {
         compare(findChild(reopened, "glyphEntropySlider").value, 0.025)
         reopened.editProfile = 1
         compare(findChild(reopened, "glyphEntropySlider").value, 0)
-        reopened.setProfileSetting("RenderStyle", "structure")
-        verify(!findChild(reopened, "glyphEntropySlider").visible)
     }
 }

@@ -283,7 +283,7 @@ def test_service_imports_no_numerical_runtime():
                     "assert not {'torch', 'numpy', 'PIL'} & sys.modules.keys()"], check=True)
 
 
-@pytest.mark.parametrize("name", ["gradient_loss_strength", "glyph_luminance_bonus", "glyph_entropy_strength", "dither", "structure_dither", "transition_spread"])
+@pytest.mark.parametrize("name", ["gradient_loss_strength", "glyph_luminance_bonus", "glyph_entropy_strength", "dither", "transition_spread"])
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
 def test_shared_options_reject_nonfinite_values(name, value):
     with pytest.raises(ValueError, match=name):
@@ -369,11 +369,9 @@ def test_http_validation_status_and_manifest_generation(tmp_path, request_settin
         thread.join(timeout=3)
 
 
-def test_worker_publishes_real_default_structure_assets_and_recovers_disk_cache(tmp_path, request_settings):
+def test_worker_publishes_real_default_headroom_assets_and_recovers_disk_cache(tmp_path, request_settings):
     font = subprocess.check_output(["fc-match", "-f", "%{file}", "DejaVu Sans Mono"], text=True).strip()
-    raw = dict(request_settings, font=font, style="structure", chars=service.normalize_options({})["chars"])
-    raw.pop("gradient_loss_strength")
-    raw.pop("glyph_luminance_bonus")
+    raw = dict(request_settings, font=font, style="headroom", chars=service.normalize_options({})["chars"])
     render_queue = service.RenderQueue(tmp_path / "cache")
     submitted = render_queue.submit(raw)
     deadline = time.monotonic() + 20
@@ -383,7 +381,7 @@ def test_worker_publishes_real_default_structure_assets_and_recovers_disk_cache(
             break
         time.sleep(0.02)
     assert result["state"] == "ready", result
-    assert result["manifest"]["signature"]["chars"] == normalize_options({"style": "structure"})["chars"]
+    assert result["manifest"]["signature"]["chars"] == normalize_options({"style": "headroom"})["chars"]
     assert Image.open(Path(result["directory"]) / "stills/0000/preview.png").size == (8, 8)
     restarted = service.RenderQueue(render_queue.cache, start_worker=False)
     assert restarted.submit(raw)["directory"] == result["directory"]

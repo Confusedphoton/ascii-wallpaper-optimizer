@@ -92,7 +92,7 @@ def test_flow_style_zero_weight_reproduces_same_bank_perceptual_output():
     source = rng.random((16, 16, 3), dtype=np.float32)
     masks = rng.random((5, 8, 4), dtype=np.float32)
     common = dict(invert_ink=False, background="auto", seed=2, steps=3,
-                  dither=0.005, structure_dither=0.06, glyph_entropy_strength=0.01, device="cpu")
+                  dither=0.005, glyph_entropy_strength=0.01, device="cpu")
     headroom = cli.solve_style(source, masks, style="headroom", **common)
     zero_flow = cli.solve_style(source, masks, style="flow", flow_strength=0, **common)
     assert np.array_equal(headroom.glyph, zero_flow.glyph)

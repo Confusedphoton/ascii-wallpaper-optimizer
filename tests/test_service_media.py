@@ -295,7 +295,7 @@ def test_real_video_worker_reuses_complete_endpoints_after_still_eviction(tmp_pa
     queue = service.RenderQueue(tmp_path / "cache", start_worker=True)
     queue.configure_cache(1)
     settings = {"input_format": "video", "images": [str(source)], "font": "DejaVu Sans Mono",
-                "size": [4, 4], "chars": " .", "style": "structure", "grayscale": True,
+                "size": [4, 4], "chars": " .", "style": "headroom", "grayscale": True,
                 "steps": 1, "transition_steps": 1, "client_id": "video-review"}
 
     def render(**overrides):

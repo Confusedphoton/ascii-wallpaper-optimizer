@@ -11,6 +11,7 @@ Item {
     readonly property var manifest: descriptor ? descriptor.manifest || ({}) : ({})
     readonly property bool hasMetadata: (manifest.output_size || []).length === 2
         && (manifest.cell_size || []).length === 2 && Number(manifest.atlas_count) > 0
+    readonly property real sdfSpread: Math.max(0, Number(manifest.sdf_spread) || 0)
     readonly property var frameBackground: (manifest.background_labs || ({}))[descriptor ? descriptor.path : ""]
     readonly property bool ready: !!descriptor && glyphMap.status === Image.Ready
         && colorMap.status === Image.Ready && atlasImage.status === Image.Ready
@@ -47,7 +48,7 @@ Item {
     Image { id: glyphMap; visible: false; smooth: false; cache: true; asynchronous: true }
     Image { id: colorMap; visible: false; smooth: false; cache: true; asynchronous: true }
     Image { id: backgroundMap; visible: false; smooth: false; cache: true; asynchronous: true }
-    Image { id: atlasImage; visible: false; smooth: false; cache: true; asynchronous: true }
+    Image { id: atlasImage; visible: false; smooth: frame.sdfSpread > 0; cache: true; asynchronous: true }
     Image { id: metadataImage; visible: false; smooth: false; cache: true; asynchronous: true }
 
     ShaderEffect {
@@ -67,6 +68,7 @@ Item {
         property real metadataAvailable: frame.hasMetadata ? 1 : 0
         property vector3d backgroundLab: frame.frameBackground ? Qt.vector3d(frame.frameBackground[0], frame.frameBackground[1], frame.frameBackground[2]) : Qt.vector3d(0, 0, 0)
         property real backgroundAvailable: frame.frameBackground ? 1 : 0
+        property real sdfSpread: frame.sdfSpread
         vertexShader: "shaders/ascii.vert.qsb"
         fragmentShader: "shaders/ascii.frag.qsb"
     }

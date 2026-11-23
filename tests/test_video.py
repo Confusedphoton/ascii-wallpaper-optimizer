@@ -35,7 +35,7 @@ def video_batch(tmp_path, monkeypatch, clip):
     font.write_bytes(b"test font")
     masks = np.stack((np.zeros((2, 2)), np.ones((2, 2)))).astype(np.float32)
     monkeypatch.setattr(cli, "resolve_font", lambda _: font)
-    monkeypatch.setattr(cli, "glyph_masks", lambda *_: masks)
+    monkeypatch.setattr(cli, "glyph_sdf_atlas", lambda *_: (masks, 0.0))
     targets = []
 
     def solve(target, masks, **kwargs):

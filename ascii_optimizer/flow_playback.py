@@ -9,16 +9,13 @@ import time
 import numpy as np
 import torch
 
+from .assets import sdf_to_mask
 from .flow import simulate_flow_loop, prepare_glyph_flow, glyph_flow_costs
 from .optimizer import Grid
 
 
 def select_cyclic_glyphs(unary, masks, strength, entropy_strength=0, sweeps=8):
-    """Refine the full bank around a circle using actual raster distances.
-
-    Source candidate fits supply the local unary objective. Full-frame image
-    losses remain in subsequent perceptual fixed-glyph color fitting.
-    """
+    """Refine the full bank around a circle using actual raster distances."""
     frames, cells, bank_size = unary.shape
     bank = masks.reshape(bank_size, -1).astype(np.float32)
     distance = np.maximum(0, (bank * bank).mean(1)[:, None] + (bank * bank).mean(1)[None]
@@ -44,7 +41,6 @@ def select_cyclic_glyphs(unary, masks, strength, entropy_strength=0, sweeps=8):
     initial_objective = objective()
     for sweep in range(sweeps):
         changed = 0
-        # Moving the starting phase avoids privileging phase zero's history.
         origin = (sweep * frames // 3) % frames
         direction = 1 if sweep % 2 == 0 else -1
         order = ((origin + direction * i) % frames for i in range(frames))
@@ -68,19 +64,16 @@ def select_cyclic_glyphs(unary, masks, strength, entropy_strength=0, sweeps=8):
 
 def render_flow_clip(source, masks, *, seed, eddies, scale, device, frames,
                      steps, frame_steps, temporal_strength, solve_frame, fit_colors,
-                     flow_strength=.4, glyph_entropy_strength=.02, on_progress=None):
-    """Cyclic layout refinement followed by source-referenced color fitting.
-
-    Repeated short joint Adam solves introduced glyph chatter in the pilot.
-    Use cached full-bank candidate costs, a circular raster objective, and
-    equal color-fitting budgets at every phase instead.
-    """
+                     flow_strength=.4, glyph_entropy_strength=.02,
+                     sdf_spread: float = 0.0, on_progress=None):
+    """Cyclic layout refinement followed by source-referenced color fitting."""
     started = time.perf_counter()
-    loop = simulate_flow_loop(source, masks.shape[1:], seed=seed, eddies=eddies,
+    eval_masks = sdf_to_mask(masks, spread=sdf_spread) if sdf_spread > 0.0 else masks
+    loop = simulate_flow_loop(source, eval_masks.shape[1:], seed=seed, eddies=eddies,
                               scale=scale, device=device, frames=frames,
-                              on_progress=(lambda f, stage: on_progress(.15*f, stage))
+                              on_progress=(lambda f, stage: on_progress(.15 * f, stage))
                               if on_progress else None)
-    atlas = torch.as_tensor(masks, device=device)
+    atlas = torch.as_tensor(eval_masks, device=device)
     descriptors = prepare_glyph_flow(atlas)
     context = {}
 
@@ -94,29 +87,30 @@ def render_flow_clip(source, masks, *, seed, eddies, scale, device, frames,
     cells = rows * cols
     with tempfile.TemporaryDirectory(prefix="ascii-glyph-loop-") as temporary:
         unary = np.memmap(Path(temporary) / "costs.dat", mode="w+", dtype=np.float32,
-                          shape=(frames, cells, len(masks)))
+                          shape=(frames, cells, len(eval_masks)))
         for index in range(frames):
             unary[index] = context["image_unary"] + flow_strength * costs(index).cpu().numpy()
             if on_progress:
-                on_progress(.15 + .15*(index + 1)/frames, f"Matching flow frame {index + 1}/{frames}")
-        labels, layout_diagnostics = select_cyclic_glyphs(unary, masks, temporal_strength, glyph_entropy_strength)
+                on_progress(.15 + .15 * (index + 1) / frames, f"Matching flow frame {index + 1}/{frames}")
+        labels, layout_diagnostics = select_cyclic_glyphs(unary, eval_masks, temporal_strength, glyph_entropy_strength)
         del unary
     colors = context["candidate_colors"]
+    base_weight = prepared.weight.copy() if prepared.weight is not None else None
     grids = [Grid(labels[index].reshape(rows, cols),
-                  colors[np.arange(cells), labels[index]].reshape(rows, cols, 3), prepared.background.copy())
+                  colors[np.arange(cells), labels[index]].reshape(rows, cols, 3),
+                  prepared.background.copy(),
+                  weight=base_weight.copy() if base_weight is not None else None)
              for index in range(frames)]
-    # Equal analytic starts/budgets avoid a color walk around the cycle. Both
-    # neighbors, including last/first, constrain displayed per-cell tone.
     for pass_index, order in enumerate((range(frames), range(frames - 1, -1, -1))):
         for ordinal, index in enumerate(order):
             neighbors = (grids[(index - 1) % frames], grids[(index + 1) % frames])
             grids[index] = fit_colors(grids[index].glyph, neighbors, context)
             if on_progress:
-                on_progress(.3 + .7*(pass_index*frames + ordinal + 1)/(2*frames),
+                on_progress(.3 + .7 * (pass_index * frames + ordinal + 1) / (2 * frames),
                             f"Fitting flow colors {ordinal + 1}/{frames} (pass {pass_index + 1}/2)")
     glyph_changes = [float((grid.glyph != grids[(i + 1) % frames].glyph).mean())
                      for i, grid in enumerate(grids)]
-    color_changes = [float(np.sqrt(np.mean((grid.color - grids[(i + 1) % frames].color)**2)))
+    color_changes = [float(np.sqrt(np.mean((grid.color - grids[(i + 1) % frames].color) ** 2)))
                      for i, grid in enumerate(grids)]
     metadata = dict(loop.diagnostics, **layout_diagnostics, seconds=time.perf_counter() - started,
                     fitting="cyclic-full-bank-layout-and-perceptual-colors", temporal_strength=temporal_strength,

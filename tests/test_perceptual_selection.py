@@ -93,13 +93,13 @@ def test_dithered_terminal_layout_is_returned_even_when_initialization_scores_be
         return noise
     monkeypatch.setattr(optimizer, "_post_logit_noise", force_empty)
     trace = SolverTrace(include_replacements=False)
-    grid = optimizer.solve(source, masks, steps=2, dither=0.01, polish_steps=0,
+    grid = optimizer.solve(source, masks, steps=2, dither=0.01,
                            glyph_entropy_strength=0, perceptual_loss=perceptual,
                            postprocess=True, diagnostics=trace)
     states = {r["stage"]: r["tensors"] for r in trace.records}
     assert states["initial"]["loss"] < states["after_dither"]["loss"]
     assert (grid.glyph == 1).all()
-    torch.testing.assert_close(states["after_dither"]["glyph"], states["pre_refinement"]["glyph"])
+    torch.testing.assert_close(states["after_dither"]["glyph"], states["final"]["glyph"])
     assert "solver_best" not in states
 
 
@@ -116,7 +116,7 @@ def test_default_style_returns_exact_adam_terminal_despite_saved_dither(monkeypa
     trace = SolverTrace(include_replacements=False)
     grid = solve_style(source, masks, style="headroom", invert_ink=invert,
                        background="auto", seed=0, steps=3, dither=0.016,
-                       structure_dither=0.06, device="cpu", diagnostics=trace)
+                       device="cpu", diagnostics=trace)
     states = {r["stage"]: r["tensors"] for r in trace.records}
     terminal = states["solver_final"]
     np.testing.assert_array_equal(grid.glyph.ravel(), terminal["glyph"].numpy())

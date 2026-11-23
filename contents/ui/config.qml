@@ -88,17 +88,9 @@ Item {
     property string cfg_BackgroundColorB: "#202028"
     property bool cfg_PerceptualLossB: true
     property string cfg_RenderStyleB: "headroom"
-    readonly property string standardChars: " .´:rszunvcxLOGDQ0KNMW&#\\/=^|[]{}"
-    readonly property string previousStandardWithAtChars: " .´:rszunvcxLOGDQ0KNMW&@#\\/=^|[]{}"
-    readonly property string previousStandardChars: " .´:rszunvcxLOGDQ0KNMW&@\\/=^|[]{}"
-    readonly property string legacyStandardChars: " .´:rszunvcxLOGDQ0KNMW&@\\=^|[]{}"
-    readonly property string legacyOlderStandardChars: " .´:rszunvcxLOGDQ0KNMW&@"
-    readonly property string legacyOlderStandardWithBasicSymbolsChars: " .´:rszunvcxLOGDQ0KNMW&@\\=^"
-    readonly property string structureChars: " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&#[]{}"
+    readonly property string standardChars: Profiles.standardChars
     readonly property string flowChars: Profiles.flowChars
-    readonly property string previousStructureChars: " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&@[]{}"
-    readonly property string legacyStructureChars: " .´:-_/|+rszunvcxLOGDQ0KNMW&@[]{}"
-    property list<string> cfg_AsciiChars: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "#", "\\", "/", "=", "^", "|", "[", "]", "{", "}"]
+    property list<string> cfg_AsciiChars: Profiles.defaults.AsciiChars
     property list<string> cfg_Images: []
     property var monoFonts: [cfg_FontFamily]
     property var fontFamiliesToCheck: []
@@ -113,13 +105,8 @@ Item {
     }
 
     function applyStyleCharacters(style) {
-        const current = Array.from(activeSettings.AsciiChars || []).join("")
-        const defaults = [standardChars, structureChars, flowChars, previousStandardWithAtChars,
-            previousStandardChars, legacyStandardChars, legacyOlderStandardChars,
-            legacyOlderStandardWithBasicSymbolsChars, previousStructureChars, legacyStructureChars]
-        if (defaults.includes(current))
-            setProfileSetting("AsciiChars", Array.from(style === "flow" ? flowChars
-                : style === "structure" ? structureChars : standardChars))
+        if (Profiles.isDefaultCharSet(activeSettings.AsciiChars))
+            setProfileSetting("AsciiChars", Array.from(Profiles.defaultCharsForStyle(style)))
     }
 
     property int cfg_Detail: 1
@@ -131,7 +118,6 @@ Item {
     property real cfg_GradientLossStrength: 1.5
     property real cfg_GlyphLuminanceBonus: 0.12
     property real cfg_GlyphEntropyStrength: 0.01
-    property real cfg_StructureDither: 0.06
     property real cfg_FlowStrength: 0.4
     property real cfg_FlowEddies: 0.65
     property real cfg_FlowScale: 6.0
@@ -139,14 +125,13 @@ Item {
     property int cfg_FlowLoopSeconds: 10
     property int cfg_FlowFps: 12
     property bool cfg_InvertInk: false
-    property list<string> cfg_AsciiCharsB: [" ", ".", "´", ":", "r", "s", "z", "u", "n", "v", "c", "x", "L", "O", "G", "D", "Q", "0", "K", "N", "M", "W", "&", "#", "\\", "/", "=", "^", "|", "[", "]", "{", "}"]
+    property list<string> cfg_AsciiCharsB: Profiles.defaults.AsciiChars
     property bool cfg_GrayscaleB: false
     property int cfg_SlideIntervalB: 10
     property real cfg_DitherB: 0.005
     property real cfg_GradientLossStrengthB: 1.5
     property real cfg_GlyphLuminanceBonusB: 0.12
     property real cfg_GlyphEntropyStrengthB: 0.01
-    property real cfg_StructureDitherB: 0.06
     property real cfg_FlowStrengthB: 0.4
     property real cfg_FlowEddiesB: 0.65
     property real cfg_FlowScaleB: 6.0
@@ -249,9 +234,7 @@ Item {
     }
 
     function restoreCharacterDefaults() {
-        const chars = activeSettings.RenderStyle === "flow" ? flowChars
-            : activeSettings.RenderStyle === "structure" ? structureChars : standardChars
-        setProfileSetting("AsciiChars", Array.from(chars))
+        setProfileSetting("AsciiChars", Array.from(Profiles.defaultCharsForStyle(activeSettings.RenderStyle)))
         glyphEditorMessage = ""
     }
 
@@ -1080,10 +1063,10 @@ Item {
                 objectName: "renderStyleCombo"
                 Kirigami.FormData.label: "Render Style:"
                 Layout.fillWidth: true
-                model: ["Perceptual headroom", "Classic headroom", "Structure first", "Flow domains"]
-                currentIndex: ["headroom", "classic", "structure", "flow"].indexOf(root.activeSettings.RenderStyle)
+                model: ["Perceptual headroom", "Classic headroom", "Stroke graph", "Flow domains"]
+                currentIndex: ["headroom", "classic", "stroke", "flow"].indexOf(root.activeSettings.RenderStyle)
                 onActivated: index => {
-                    const style = ["headroom", "classic", "structure", "flow"][index]
+                    const style = ["headroom", "classic", "stroke", "flow"][index]
                     root.setProfileSetting("RenderStyle", style)
                     if (style === "flow" && root.activeSettings.GlyphEntropyStrength === 0.01)
                         root.setProfileSetting("GlyphEntropyStrength", 0.02)
@@ -1228,7 +1211,7 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Sobel Edge Loss:"
-                visible: root.editMode !== "Archive" && (root.activeSettings.RenderStyle !== "structure")
+                visible: root.editMode !== "Archive" && (root.activeSettings.RenderStyle !== "stroke")
 
                 Controls.Slider {
                     id: gradientLossSlider
@@ -1248,7 +1231,7 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Glyph Luminosity Bonus:"
-                visible: root.editMode !== "Archive" && (root.activeSettings.RenderStyle !== "structure")
+                visible: root.editMode !== "Archive" && (root.activeSettings.RenderStyle !== "stroke")
 
                 Controls.Slider {
                     id: glyphLuminanceBonusSlider
@@ -1268,7 +1251,7 @@ Item {
 
             RowLayout {
                 Kirigami.FormData.label: "Glyph Variety:"
-                visible: root.editMode !== "Archive" && (root.activeSettings.RenderStyle !== "structure")
+                visible: root.editMode !== "Archive" && (root.activeSettings.RenderStyle !== "stroke")
 
                 Controls.Slider {
                     id: glyphEntropySlider
@@ -1286,26 +1269,6 @@ Item {
                 Controls.Label {
                     Layout.preferredWidth: Kirigami.Units.gridUnit * 10
                     text: glyphEntropySlider.value.toFixed(3)
-                }
-            }
-
-            RowLayout {
-                Kirigami.FormData.label: "Structure Dither:"
-                visible: root.editMode !== "Archive" && (root.activeSettings.RenderStyle === "structure")
-
-                Controls.Slider {
-                    id: structureDitherSlider
-                    objectName: "structureDitherSlider"
-                    Layout.fillWidth: true
-                    from: 0
-                    to: 0.12
-                    stepSize: 0.005
-                    value: root.activeSettings.StructureDither
-                    onMoved: root.setProfileSetting("StructureDither", value)
-                }
-                Controls.Label {
-                    Layout.preferredWidth: Kirigami.Units.gridUnit * 10
-                    text: structureDitherSlider.value.toFixed(3)
                 }
             }
 

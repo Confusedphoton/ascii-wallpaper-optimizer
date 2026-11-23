@@ -1,7 +1,8 @@
 """Shared playback previews, metrics, and reproducibility for render experiments.
 
 Grid colors and composed frames are OKLab. Only source/output image boundaries
-use sRGB; previews round-trip the same RGB8 foreground/background as playback.
+use sRGB; previews round-trip the same RGB8 foreground/background and uint8 SDF
+stroke weights as playback.
 """
 
 from __future__ import annotations
@@ -20,24 +21,42 @@ import torch
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from ascii_optimizer import __version__
-from ascii_optimizer.assets import glyph_masks, load_target, resolve_font, srgb_to_linear
-from ascii_optimizer.cli import solve_style as _solve_style
-from ascii_optimizer.defaults import (DEFAULT_CHARS, DEFAULT_GLYPH_LUMINANCE_BONUS,
-                                      DEFAULT_FLOW_GLYPH_ENTROPY_STRENGTH,
-                                      DEFAULT_GRADIENT_LOSS_STRENGTH, DEFAULT_GLYPH_ENTROPY_STRENGTH)
+from ascii_optimizer.assets import (
+    decode_stroke_weight_u8,
+    encode_stroke_weight_u8,
+    glyph_masks,
+    glyph_sdf_atlas,
+    load_target,
+    resolve_font,
+    sdf_to_mask,
+    srgb_to_linear,
+)
+from ascii_optimizer.defaults import (
+    DEFAULT_CHARS,
+    DEFAULT_FLOW_GLYPH_ENTROPY_STRENGTH,
+    DEFAULT_GLYPH_ENTROPY_STRENGTH,
+    DEFAULT_GLYPH_LUMINANCE_BONUS,
+    DEFAULT_GRADIENT_LOSS_STRENGTH,
+)
 from ascii_optimizer.optimizer import Grid, _sobel_gradients, render_grid
-from ascii_optimizer.tone import (display_tone_lab, headroom_curve, oklab_to_rgb,
-                                  oklab_to_srgb, quantize_playback_lab, srgb_to_oklab)
+from ascii_optimizer.renderers import solve_style as _solve_style
+from ascii_optimizer.tone import (
+    display_tone_lab,
+    headroom_curve,
+    oklab_to_rgb,
+    oklab_to_srgb,
+    quantize_playback_lab,
+    srgb_to_oklab,
+)
 
-
-WIDTH, CELL, STEPS, CANDIDATES, SEED, DITHER = 960, (8, 16), 36, 6, 0, 0.005
+WIDTH, CELL, STEPS, SEED, DITHER = 960, (8, 16), 36, 0, 0.005
 SOURCE = Path("screenshots/test_image.png")
 SIZE = (960, 540)
-EXPANDED_CHARS = " .´:-_/|+rszunvcxLOGDQ0KNMW&@"
 SOURCES = (
     ("test_image", SOURCE, (205, 105, 380, 215)),
     ("tree", Path("screenshots/149254100_p0-被树傀儡抓住惹.jpg"), (140, 95, 270, 215)),
     ("snow", Path("screenshots/149642007_p0-无题.jpg"), (175, 325, 365, 475)),
+    ("viviana", Path("screenshots/143381492_p0-Viviana.jpg"), (160, 120, 420, 340)),
 )
 SNOW_BELT = (365, 215, 480, 310)
 _RUNS: list[dict] = []
@@ -50,7 +69,10 @@ def image(array: np.ndarray) -> Image.Image:
 
 def playback_grid(grid: Grid) -> Grid:
     background = np.zeros(3, np.float32) if grid.background is None else grid.background
-    return Grid(grid.glyph, quantize_playback_lab(grid.color), quantize_playback_lab(background))
+    weight = (decode_stroke_weight_u8(encode_stroke_weight_u8(grid.weight))
+              if grid.weight is not None else None)
+    return Grid(grid.glyph, quantize_playback_lab(grid.color),
+                quantize_playback_lab(background), weight=weight)
 
 
 def _lighten_at_fixed_chroma(lab: np.ndarray, requested: np.ndarray) -> np.ndarray:
@@ -75,23 +97,28 @@ def brighten_structure(grid: Grid, *, ink_gain: float, background_lift: float = 
     persisted = playback_grid(grid)
     color = _lighten_at_fixed_chroma(persisted.color, headroom_curve(persisted.color[..., 0], ink_gain))
     background = _lighten_at_fixed_chroma(persisted.background,
-                                         persisted.background[0] + background_lift)
-    return Grid(grid.glyph.copy(), color, background)
+                                           persisted.background[0] + background_lift)
+    return Grid(grid.glyph.copy(), color, background, weight=persisted.weight)
 
 
 def preview(grid: Grid, masks: np.ndarray, size: tuple[int, int], *,
-            invert_ink: bool = False, display_transform: bool = True) -> np.ndarray:
+            invert_ink: bool = False, display_transform: bool = True,
+            sdf_spread: float = 0.0) -> np.ndarray:
     """Compose serialized maps; return the exact displayed RGB8 colors as floats."""
     masks = np.rint(np.clip(masks, 0, 1) * 255).astype(np.float32) / 255
-    lab = render_grid(playback_grid(grid), masks)[:size[1], :size[0]]
+    lab = render_grid(playback_grid(grid), masks, sdf_spread=sdf_spread)[:size[1], :size[0]]
     if display_transform:
         lab = display_tone_lab(lab, invert_ink=invert_ink)
-    # Metrics measure the saved preview, avoiding a second unquantized output.
     return np.asarray(image(oklab_to_srgb(lab)), dtype=np.float32) / 255
 
 
-def coverage_metrics(grid: Grid, masks: np.ndarray) -> dict[str, float]:
-    coverage = masks[grid.glyph].mean((2, 3))
+def coverage_metrics(grid: Grid, masks: np.ndarray, *, sdf_spread: float = 0.0) -> dict[str, float]:
+    if sdf_spread > 0.0:
+        w = None if grid.weight is None else grid.weight[..., None, None]
+        cell_masks = sdf_to_mask(masks[grid.glyph], w, spread=sdf_spread)
+    else:
+        cell_masks = masks[grid.glyph]
+    coverage = cell_masks.mean((2, 3))
     return {"mean_glyph_coverage": float(coverage.mean()),
             "dense_glyph_fraction": float((coverage >= 0.3).mean())}
 
@@ -110,16 +137,18 @@ def image_metrics(reference: np.ndarray, rendered: np.ndarray) -> dict[str, floa
 
 
 def glyph_metrics(grid: Grid, masks: np.ndarray, chars: str,
-                  base_glyph: np.ndarray | None = None) -> dict:
+                  base_glyph: np.ndarray | None = None, *,
+                  sdf_spread: float = 0.0) -> dict:
+    eval_masks = sdf_to_mask(masks, spread=sdf_spread) if sdf_spread > 0.0 else masks
     indices, counts = np.unique(grid.glyph, return_counts=True)
     probabilities = counts.astype(np.float64) / grid.glyph.size
     entropy = float(-(probabilities * np.log2(probabilities)).sum())
-    coverage = masks.mean((1, 2))
+    coverage = eval_masks.mean((1, 2))
     used_coverage = coverage[grid.glyph]
     ink_lightness = playback_grid(grid).color[..., 0]
     most_common = int(indices[counts.argmax()])
     densest = int(coverage.argmax())
-    metrics = {**coverage_metrics(grid, masks),
+    metrics = {**coverage_metrics(grid, masks, sdf_spread=sdf_spread),
                "distinct_glyphs": len(indices), "glyph_entropy_bits": entropy,
                "effective_glyph_count": float(2 ** entropy),
                "most_common_glyph": chars[most_common],
@@ -216,8 +245,8 @@ def reset_runs() -> None:
 def solve_style(target: np.ndarray, masks: np.ndarray, **kwargs) -> Grid:
     """Measure a solve using production style defaults unless explicitly overridden."""
     style = kwargs.get("style", "headroom")
-    kwargs.setdefault("glyph_luminance_bonus", DEFAULT_GLYPH_LUMINANCE_BONUS if style != "structure" else 0.0)
-    kwargs.setdefault("gradient_loss_strength", DEFAULT_GRADIENT_LOSS_STRENGTH if style != "structure" else 0.0)
+    kwargs.setdefault("glyph_luminance_bonus", DEFAULT_GLYPH_LUMINANCE_BONUS)
+    kwargs.setdefault("gradient_loss_strength", DEFAULT_GRADIENT_LOSS_STRENGTH)
     arguments = inspect.signature(_solve_style).bind(target, masks, **kwargs)
     arguments.apply_defaults()
     device = kwargs.get("device", "cpu")
@@ -233,16 +262,13 @@ def solve_style(target: np.ndarray, masks: np.ndarray, **kwargs) -> Grid:
     effective = {name: value for name, value in arguments.arguments.items()
                  if isinstance(value, (str, bool, int, float)) or value is None}
     if effective.get("gradient_loss_strength") is None:
-        effective["gradient_loss_strength"] = DEFAULT_GRADIENT_LOSS_STRENGTH if style != "structure" else 0.0
+        effective["gradient_loss_strength"] = DEFAULT_GRADIENT_LOSS_STRENGTH
     if effective.get("glyph_entropy_strength") is None:
         effective["glyph_entropy_strength"] = (DEFAULT_FLOW_GLYPH_ENTROPY_STRENGTH if style == "flow" else
-                                                DEFAULT_GLYPH_ENTROPY_STRENGTH if style == "headroom" else 0.0)
+                                               DEFAULT_GLYPH_ENTROPY_STRENGTH)
     if effective.get("saturation_loss_strength") is None:
         effective["saturation_loss_strength"] = 20.0 if effective["glyph_luminance_bonus"] > 0 else 0.0
-    effective["glyphs_per_cell"] = (min(effective["candidates"], len(masks))
-                                   if style == "headroom" and effective["use_shortlist"] else len(masks))
-    if not effective["use_shortlist"] or style != "headroom":
-        effective.pop("candidates", None)
+    effective["glyphs_per_cell"] = len(masks)
     effective.pop("on_progress", None)
     measurements = {"run_index": len(_RUNS), "seconds": elapsed, "effective_objectives": effective,
                     "source_array_sha256": hashlib.sha256(target.tobytes()).hexdigest(),
@@ -291,7 +317,10 @@ def write_report(path: Path, results, *, sources=(), font="Monospace") -> None:
     provenance = {"renderer_version": __version__, "git_revision": revision, "working_tree_dirty": bool(dirty),
                   "python": platform.python_version(), "numpy": np.__version__, "torch": torch.__version__,
                   "font": str(font_path), "font_sha256": _hash_file(font_path),
-                  "renderer_sources_sha256": {source.name: _hash_file(source) for source in sorted(renderer_directory.glob("*.py"))},
+                  "renderer_sources_sha256": {
+                      str(source.relative_to(renderer_directory)): _hash_file(source)
+                      for source in sorted(renderer_directory.rglob("*.py"))
+                  },
                   "experiment_utils_sha256": _hash_file(Path(__file__)),
                   "experiment_source": str(experiment_path),
                   "experiment_source_sha256": _hash_file(experiment_path) if experiment_path.is_file() else None,

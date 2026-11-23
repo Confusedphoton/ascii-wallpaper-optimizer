@@ -7,14 +7,26 @@ from PIL import Image
 
 from ascii_optimizer import optimizer
 from ascii_optimizer.assets import load_target
-from ascii_optimizer.optimizer import (Grid, _FrameObjective, _display_headroom_lab,
-                                       _loss, _playback_color, _project_oklab_colors,
-                                       _saturation_loss,
-                                       fit_fixed_glyphs, render_grid, solve)
-from ascii_optimizer.structure import fit_structure_colors, solve_structure
-from ascii_optimizer.tone import (display_tone_lab, encode_headroom_lab,
-                                  oklab_to_srgb, playback_rgb8,
-                                  quantize_playback_lab, srgb_to_oklab)
+from ascii_optimizer.optimizer import (
+    Grid,
+    _FrameObjective,
+    _display_headroom_lab,
+    _loss,
+    _playback_color,
+    _project_oklab_colors,
+    _saturation_loss,
+    fit_fixed_glyphs,
+    render_grid,
+    solve,
+)
+from ascii_optimizer.tone import (
+    display_tone_lab,
+    encode_headroom_lab,
+    oklab_to_srgb,
+    playback_rgb8,
+    quantize_playback_lab,
+    srgb_to_oklab,
+)
 
 
 def _image_tensor(image: np.ndarray) -> torch.Tensor:
@@ -81,8 +93,8 @@ def test_light_ink_reward_boosts_shadows_and_tapers_at_white():
     slopes = colors.grad[:, 0]
     assert (rewards[1:] > rewards[:-1]).all()
     assert (slopes[:-1] > slopes[1:]).all()
-    assert slopes[1] > 0.5  # useful shadow lift
-    assert slopes[-2] < 0.02  # little incentive to bleach highlights
+    assert slopes[1] > 0.5
+    assert slopes[-2] < 0.02
     assert slopes[-1].abs() < 1e-6
     assert optimizer._ink_lightness_reward(colors, torch.zeros(5)).count_nonzero() == 0
 
@@ -93,8 +105,6 @@ def test_chrominance_correction_preserves_saturation_when_lightness_increases(li
     preserving_saturation = target * lift
     holding_chroma = target.clone()
     holding_chroma[:, :1] *= lift
-    # Absolute chroma alone cannot distinguish these two brighter colors.
-    # The correction must accept constant C/L and reject the washed-out color.
     assert _saturation_loss(target, target, displayed_lab=preserving_saturation) < 1e-10
     assert _saturation_loss(target, target, displayed_lab=holding_chroma) > 1e-5
 
@@ -149,7 +159,7 @@ def test_display_saturation_gradient_tracks_gamut_compression(color):
         visible = srgb_to_oklab(oklab_to_srgb(display_tone_lab(shifted)))
         return (np.linalg.norm(visible[..., 1:], axis=-1) / visible[..., 0]).item()
 
-    epsilon = 0.005  # larger than playback's twelve-step gamut-map tolerance
+    epsilon = 0.005
     difference = (playback_saturation(epsilon) - playback_saturation(-epsilon)) / (2 * epsilon)
     assert tensor.grad[:, 0].item() == pytest.approx(difference, abs=0.015)
 
@@ -159,17 +169,14 @@ def test_display_gradient_is_finite_at_black_white_and_primary_boundaries(invert
     srgb = torch.tensor([[[[0, 0, 0], [1, 1, 1], [1, 0, 0], [0, 1, 0], [0, 0, 1]]]],
                         dtype=torch.float32, requires_grad=True)
     displayed = _display_headroom_lab(_playback_color(srgb).permute(0, 3, 1, 2),
-                                     invert_ink=invert_ink)
+                                      invert_ink=invert_ink)
     displayed.square().sum().backward()
     assert torch.isfinite(srgb.grad).all()
 
 
 @pytest.mark.parametrize("fixed_glyphs", [False, True])
 @pytest.mark.parametrize("bonus", [0.12, 0.5])
-@pytest.mark.parametrize("refinement_sweeps", [0, 2])
-def test_light_ink_bonus_preserves_highlight_saturation_and_lifts_shadows(fixed_glyphs, bonus, refinement_sweeps):
-    # Include pastel highlights and the hue-specific brightness limits of all
-    # three RGB primaries, plus a shadow whose brightness should still improve.
+def test_light_ink_bonus_preserves_highlight_saturation_and_lifts_shadows(fixed_glyphs, bonus):
     swatches = np.array([[0.12, 0.05, 0.08], [0.3, 0.15, 0.22],
                          [1, 0.5, 0.7], [1, 0.85, 0.9],
                          [0.6, 0.8, 1], [0.85, 0.93, 1],
@@ -180,8 +187,6 @@ def test_light_ink_bonus_preserves_highlight_saturation_and_lifts_shadows(fixed_
                       np.ones((4, 4)))).astype(np.float32)
     settings = dict(input_oklab=True, steps=36, saturation_loss_strength=20,
                     saturation_target_oklab=source_lab, gradient_loss_strength=0,
-                    # Isolate the ink reward's legacy calibration from the
-                    # default source-brightness preservation objective.
                     perceptual_loss=False)
 
     def displayed_cells(strength):
@@ -190,9 +195,8 @@ def test_light_ink_bonus_preserves_highlight_saturation_and_lifts_shadows(fixed_
                                     background_oklab=np.zeros(3, dtype=np.float32),
                                     glyph_luminance_bonus=strength, **settings)
         else:
-            grid = solve(target, masks, candidates=4, dither=0, background="#000000",
-                         glyph_luminance_bonus=strength, refinement_sweeps=refinement_sweeps,
-                         glyph_entropy_strength=0, **settings)
+            grid = solve(target, masks, dither=0, background="#000000",
+                         glyph_luminance_bonus=strength, glyph_entropy_strength=0, **settings)
         displayed = srgb_to_oklab(oklab_to_srgb(display_tone_lab(render_grid(grid, masks))))
         return displayed.reshape(1, 4, len(swatches), 4, 3).mean((0, 1, 3))
 
@@ -200,21 +204,11 @@ def test_light_ink_bonus_preserves_highlight_saturation_and_lifts_shadows(fixed_
     source = srgb_to_oklab(swatches)
     saturation = np.linalg.norm(boosted[2:, 1:], axis=-1) / boosted[2:, 0]
     expected = np.linalg.norm(source[2:, 1:], axis=-1) / source[2:, 0]
-    # Near-neutral RGB8 pastels also need an absolute tolerance; their small
-    # chroma makes a relative ratio sensitive to individual color bytes.
     np.testing.assert_allclose(saturation, expected, rtol=0.05, atol=0.001)
-    # Empty glyphs must not collect the bonus and erase the deepest shadow.
     assert boosted[0, 0] > 0.05
     if fixed_glyphs:
         assert boosted[1, 0] > baseline[1, 0] + 0.015
-    elif refinement_sweeps:
-        # Discrete contextual search can already lift one shadow through its
-        # glyph choice. The reward must still lift shadows without undoing it.
-        assert (boosted[:2, 0] >= baseline[:2, 0] - 0.003).all()
-        assert (boosted[:2, 0] - baseline[:2, 0]).max() > 0.015
     else:
-        # Geometry can change with the reward; brighter ink need not increase
-        # a sparse cell's mean displayed lightness. Keep both shadows visible.
         assert (boosted[:2, 0] > 0.05).all()
 
 
@@ -238,7 +232,7 @@ def test_neutral_source_stays_neutral_with_light_ink_bonus(fixed_glyphs):
         grid = fit_fixed_glyphs(target, masks, np.ones((4, 4), dtype=np.uint8),
                                 background_oklab=np.zeros(3, dtype=np.float32), **settings)
     else:
-        grid = solve(target, masks, candidates=4, dither=0.014, background="#000000", **settings)
+        grid = solve(target, masks, dither=0.014, background="#000000", **settings)
     displayed = srgb_to_oklab(oklab_to_srgb(display_tone_lab(render_grid(grid, masks))))
     assert np.abs(displayed[..., 1:]).max() < 0.001
 
@@ -247,12 +241,11 @@ def test_faint_purple_source_does_not_turn_yellow_during_gamut_constrained_solve
     source_lab = srgb_to_oklab(np.full((16, 16, 3), [0.25, 0.24, 0.27], dtype=np.float32))
     masks = _sparse_masks()
     grid = solve(encode_headroom_lab(source_lab), masks, input_oklab=True,
-                 steps=36, candidates=4, dither=0.014, background="#000000",
+                 steps=36, dither=0.014, background="#000000",
                  glyph_luminance_bonus=0.12, saturation_target_oklab=source_lab,
                  gradient_target_oklab=source_lab, gradient_loss_strength=1.5)
     displayed = srgb_to_oklab(oklab_to_srgb(display_tone_lab(render_grid(grid, masks))))
     cells = displayed.reshape(4, 4, 4, 4, 3).mean((1, 3))
-    # Empty dithered cells display the neutral canvas, whose hue is undefined.
     visible = masks[grid.glyph].sum((2, 3)) > 0
     assert visible.any()
     assert (cells[..., 1][visible] > 0).all()
@@ -289,7 +282,7 @@ def test_fixed_glyph_fit_retains_paths_and_steps_improve_the_retained_color_obje
             encoded, source_srgb=None, source_oklab=source_lab, input_oklab=True,
             pad=(0, 0, 0, 0), cell_height=4, device="cpu", viewing_ppd=None,
             masks=masks, background=torch.zeros(3), invert_ink=False)
-        objective = _FrameObjective(_image_tensor(encoded), "default", (4, 3), False,
+        objective = _FrameObjective(_image_tensor(encoded), (4, 3), False,
                                     1.5, 0, _image_tensor(source_lab), spatial_metrics=spatial)
         return objective(_image_tensor(render_grid(grid, masks)))
 
@@ -311,30 +304,14 @@ def test_cached_target_losses_preserve_values_and_compute_target_sobel_once(monk
         return original(image)
 
     monkeypatch.setattr(optimizer, "_sobel_gradients", record)
-    objective = _FrameObjective(target, "default", (4, 4), False, 0.7, 0,
-                                gradient_target=target)
+    objective = _FrameObjective(target, (4, 4), False, 0.7, 0, gradient_target=target)
     torch.testing.assert_close(objective(rendered), expected)
     torch.testing.assert_close(objective(rendered), expected)
-    assert len(calls) == 3  # one target gradient, two rendered gradients
+    assert len(calls) == 3
 
 
-def test_structure_fixed_color_fit_matches_still_ink_without_reselecting_glyphs():
-    source = np.random.default_rng(19).random((8, 8, 3), dtype=np.float32)
-    original = source.copy()
-    masks = np.stack((np.zeros((4, 4)), np.eye(4), np.ones((4, 4)))).astype(np.float32)
-    background = srgb_to_oklab(np.array([0.06, 0.02, 0.08], dtype=np.float32))
-    still = solve_structure(source, masks, background, dither=0)
-    path_glyphs = (still.glyph + 1) % len(masks)
-    fitted = fit_structure_colors(source, masks, path_glyphs, background)
-    np.testing.assert_array_equal(fitted.glyph, path_glyphs)
-    np.testing.assert_array_equal(fitted.color, still.color)
-    np.testing.assert_array_equal(fitted.background, still.background)
-    np.testing.assert_array_equal(source, original)
-
-
-@pytest.mark.parametrize("setting", ["gradient_loss_strength", "gradient_shortlist_strength",
-                                     "saturation_loss_strength", "glyph_luminance_bonus",
-                                     "glyph_error_movement_strength"])
+@pytest.mark.parametrize("setting", ["gradient_loss_strength", "saturation_loss_strength",
+                                     "glyph_luminance_bonus"])
 @pytest.mark.parametrize("value", [float("nan"), float("inf")])
 def test_solver_rejects_nonfinite_objective_weights(setting, value):
     with pytest.raises(ValueError, match=setting):
@@ -342,159 +319,15 @@ def test_solver_rejects_nonfinite_objective_weights(setting, value):
               np.zeros((1, 4, 4), dtype=np.float32), **{setting: value})
 
 
-def test_error_movement_preserves_local_palette_instead_of_averaging_it():
-    # Two colors with the same neighborhood mean: averaging them destroys
-    # palette information; exchanging their positions conserves it.
-    source = torch.tensor([0.65, 0.12, -0.10]).reshape(1, 3, 1, 1).expand(1, 3, 4, 4).clone()
-    source[:, 1:, :, 2:] *= -1
-    directions = _FrameObjective(source, "default", (2, 2), False, 0, 0,
-                                 glyph_error_movement_strength=1).error_movement_directions
-    samples = optimizer._error_movement_samples(source, (2, 2), directions)
-    swapped = source.flip(-1)
-    torch.testing.assert_close(optimizer._error_movement_samples(swapped, (2, 2), directions), samples)
-    averaged = source.mean((-2, -1), keepdim=True).expand_as(source).clone().requires_grad_()
-    loss = (optimizer._error_movement_samples(averaged, (2, 2), directions) - samples).square().mean()
-    assert loss > 0.001
-    loss.backward()
-    assert torch.isfinite(averaged.grad).all()
-    assert averaged.grad.abs().sum() > 0
-
-
-def test_error_movement_cannot_move_color_outside_neighboring_glyphs():
-    source = torch.zeros((1, 3, 4, 12))
-    source[:, 0] = 0.5
-    source[:, 1, :, :2] = 0.2
-    directions = torch.eye(3)
-    samples = optimizer._error_movement_samples(source, (2, 2), directions)
-    moved = source.roll(8, dims=-1)
-    assert (optimizer._error_movement_samples(moved, (2, 2), directions) - samples).square().mean() > 0
-
-
-@pytest.mark.parametrize("invert_ink", [False, True])
-def test_error_movement_compares_displayed_colors_to_original_source(invert_ink):
-    source = np.full((4, 4, 3), [0.7, 0.3, 0.4], np.float32)
-    target = _image_tensor(srgb_to_oklab(source))
-    encoded = _image_tensor(encode_headroom_lab(srgb_to_oklab(source), invert_ink=invert_ink))
-    baseline = _FrameObjective(encoded, "default", (2, 2), invert_ink, 0, 0)
-    movement = _FrameObjective(encoded, "default", (2, 2), invert_ink, 0, 0,
-                               glyph_error_movement_strength=4, error_movement_target=target)
-    torch.testing.assert_close(movement(encoded), baseline(encoded), atol=1e-8, rtol=0)
-
-
-def test_disabled_error_movement_is_identical_and_skips_transport(monkeypatch):
-    def unexpected(*args):
-        raise AssertionError("Disabled error movement must not compute transport")
-    monkeypatch.setattr(optimizer, "_error_movement_samples", unexpected)
-    source = np.random.default_rng(19).random((8, 8, 3), dtype=np.float32)
-    masks = np.stack((np.zeros((4, 4)), np.eye(4), np.ones((4, 4)))).astype(np.float32)
-    baseline = solve(source, masks, steps=2)
-    disabled = solve(source, masks, steps=2, glyph_error_movement_strength=0)
-    np.testing.assert_array_equal(baseline.glyph, disabled.glyph)
-    np.testing.assert_array_equal(baseline.color, disabled.color)
-
-
-@pytest.mark.parametrize("shape", [(3, 3), (3, 9), (9, 3)])
-def test_error_movement_handles_partial_and_single_cell_grids(shape):
-    source = np.random.default_rng(3).random((*shape, 3), dtype=np.float32)
-    masks = np.stack((np.zeros((4, 4)), np.eye(4), np.ones((4, 4)))).astype(np.float32)
-    grid = solve(source, masks, steps=1, glyph_error_movement_strength=4)
-    assert grid.glyph.shape == tuple((side + 3) // 4 for side in shape)
-    assert np.isfinite(grid.color).all()
-
-
-def test_error_movement_rejects_negative_strength_and_mismatched_target():
-    source = np.zeros((4, 4, 3), np.float32)
-    masks = np.ones((1, 4, 4), np.float32)
-    with pytest.raises(ValueError, match="glyph_error_movement_strength"):
-        solve(source, masks, glyph_error_movement_strength=-1)
-    with pytest.raises(ValueError, match="target must match"):
-        solve(source, masks, glyph_error_movement_strength=1,
-              error_movement_target_oklab=np.zeros((3, 3, 3), np.float32))
-
-
-@pytest.mark.parametrize("detail_loss", ["default", "local_color"])
-@pytest.mark.parametrize("with_endpoints", [False, True])
-def test_unshortlisted_solve_includes_every_glyph_and_bypasses_ranking(monkeypatch, detail_loss, with_endpoints):
-    source = np.random.default_rng(5).random((8, 8, 3), dtype=np.float32)
-    masks = np.stack((np.zeros((4, 4)), np.eye(4), np.fliplr(np.eye(4)), np.ones((4, 4)))).astype(np.float32)
-
-    def unexpected(*args, **kwargs):
-        raise AssertionError("All-glyph optimization must bypass shortlist fitting")
-
-    monkeypatch.setattr(optimizer, "_candidate_fit", unexpected)
-    original_softmax = torch.softmax
-    counts = []
-
-    def record(logits, *args, **kwargs):
-        counts.append(logits.shape[1])
-        return original_softmax(logits, *args, **kwargs)
-
-    monkeypatch.setattr(torch, "softmax", record)
-    endpoint_args = {}
-    if with_endpoints:
-        endpoint = Grid(np.zeros((2, 2), np.uint8), np.zeros((2, 2, 3), np.float32))
-        endpoint_args = dict(previous=endpoint, destination=endpoint, progress=0.5)
-    grid = solve(source, masks, use_shortlist=False, candidates=1, steps=2,
-                 detail_loss=detail_loss, glyph_error_movement_strength=4, **endpoint_args)
-    assert counts == [len(masks)] * 2  # endpoint glyphs are already present
-    assert np.isfinite(grid.color).all()
-    np.testing.assert_array_equal(grid.color, quantize_playback_lab(grid.color))
-
-
-def test_unshortlisted_solve_ignores_candidate_limit_and_shortlist_gradient_strength():
-    source = np.random.default_rng(5).random((8, 8, 3), dtype=np.float32)
-    masks = np.stack((np.zeros((4, 4)), np.eye(4), np.ones((4, 4)))).astype(np.float32)
-    first = solve(source, masks, steps=2, use_shortlist=False, candidates=1,
-                  gradient_shortlist_strength=0)
-    second = solve(source, masks, steps=2, use_shortlist=False, candidates=99,
-                   gradient_shortlist_strength=100)
-    np.testing.assert_array_equal(first.glyph, second.glyph)
-    np.testing.assert_array_equal(first.color, second.color)
-
-
-def test_default_full_bank_matches_approved_mode_and_requires_a_boolean(monkeypatch):
-    def unexpected(*args, **kwargs):
-        raise AssertionError("Default rendering must not rank a glyph shortlist")
-    monkeypatch.setattr(optimizer, "_candidate_fit", unexpected)
-    source = np.random.default_rng(5).random((8, 8, 3), dtype=np.float32)
-    masks = np.stack((np.zeros((4, 4)), np.eye(4), np.ones((4, 4)))).astype(np.float32)
-    default = solve(source, masks, steps=2)
-    explicit = solve(source, masks, steps=2, use_shortlist=False)
-    np.testing.assert_array_equal(default.glyph, explicit.glyph)
-    np.testing.assert_array_equal(default.color, explicit.color)
-    with pytest.raises(ValueError, match="use_shortlist"):
-        solve(source, masks, use_shortlist="false")
-
-
-@pytest.mark.parametrize("distribution", ["uniform", "gumbel"])
-def test_post_logit_noise_is_seeded_and_valid_for_each_distribution(distribution):
-    settings = dict(rows=24, cols=24, candidates=3,
-                    distribution=distribution, device="cpu", dtype=torch.float32)
+def test_post_logit_noise_is_seeded_and_bounded():
+    settings = dict(rows=24, cols=24, candidates=3, device="cpu", dtype=torch.float32)
     first = optimizer._post_logit_noise(seed=19, **settings)
     torch.testing.assert_close(first, optimizer._post_logit_noise(seed=19, **settings))
     assert not torch.equal(first, optimizer._post_logit_noise(seed=20, **settings))
     assert first.shape == (576, 3)
     assert torch.isfinite(first).all()
     assert not torch.equal(first[:, 0], first[:, 1])
-    if distribution == "uniform":
-        assert first.min() >= -0.5 and first.max() <= 0.5
-
-
-def test_unit_scale_gumbel_argmax_samples_the_logits_softmax_distribution():
-    probabilities = torch.tensor([0.2, 0.3, 0.5])
-    noise = optimizer._post_logit_noise(200, 200, 3, 61, "gumbel",
-                                        device="cpu", dtype=torch.float32)
-    selected = (probabilities.log() + noise).argmax(1)
-    observed = torch.bincount(selected, minlength=3).float() / len(selected)
-    # A seeded 40k sample keeps this check stable while rejecting correlated,
-    # non-Gumbel noise and incorrect scale/sign transforms.
-    torch.testing.assert_close(observed, probabilities, atol=0.01, rtol=0)
-
-
-def test_post_logit_noise_rejects_unknown_distributions():
-    with pytest.raises(ValueError, match="uniform.*gumbel"):
-        optimizer._post_logit_noise(2, 2, 3, 0, "normal",
-                                    device="cpu", dtype=torch.float32)
+    assert first.min() >= -0.5 and first.max() <= 0.5
 
 
 @pytest.mark.parametrize("grayscale", [False, True])
@@ -506,7 +339,6 @@ def test_fit_crop_preserves_image_extent_and_black_borders_in_both_color_modes(t
     np.testing.assert_array_equal(fitted[[0, 3]], np.zeros((2, 4, 3)))
     expected = np.array([108] * 3 if grayscale else [220, 70, 10], dtype=np.float32) / 255
     np.testing.assert_allclose(fitted[1:3], np.broadcast_to(expected, (2, 4, 3)), atol=1e-7)
-    # Fill occupies the entire requested image instead of retaining fit borders.
     filled = load_target(path, (4, 4), "fill", grayscale)
     np.testing.assert_allclose(filled, np.broadcast_to(expected, (4, 4, 3)), atol=1e-7)
 
@@ -515,14 +347,12 @@ def test_profiled_image_is_converted_to_srgb_before_color_solving(tmp_path):
     from io import BytesIO
     from PIL import ImageCms
 
-    # LAB has a different channel encoding; treating its bytes as RGB produces
-    # a strong hue shift. A tagged TIFF exercises the actual CMS conversion.
     profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("LAB")).tobytes()
     original = Image.new("LAB", (4, 4), (135, 180, 110))
     path = tmp_path / "profiled.tif"
     original.save(path, icc_profile=profile)
     expected = ImageCms.profileToProfile(original, ImageCms.ImageCmsProfile(BytesIO(profile)),
-                                        ImageCms.createProfile("sRGB"), outputMode="RGB")
+                                         ImageCms.createProfile("sRGB"), outputMode="RGB")
     actual = load_target(path, (4, 4), "fill", False)
     np.testing.assert_array_equal(np.rint(actual * 255).astype(np.uint8), np.asarray(expected))
 

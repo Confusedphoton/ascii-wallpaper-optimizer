@@ -19,7 +19,7 @@ dev = ["pytest>=8"]
 ascii-wallpaper-render = "ascii_optimizer.launcher:render_main"
 
 [tool.setuptools]
-packages = ["ascii_optimizer"]
+packages = ["ascii_optimizer", "ascii_optimizer.renderers"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -2,28 +2,49 @@
 .pragma library
 
 const standardChars = " .´:rszunvcxLOGDQ0KNMW&#\\/=^|[]{}"
-const structureChars = " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&#[]{}"
+const strokeChars = " .'`:;-_~+|/\\(){}<>^v*cszoxX#%@&$"
 const flowChars = Array.from({length: 95}, (_, i) => String.fromCharCode(32 + i)).join("") + "´"
 const sourceModes = ["Image", "Slideshow", "Video", "Archive"]
+
+const legacyDefaultCharSets = [
+    " .´:rszunvcxLOGDQ0KNMW&@#\\/=^|[]{}", " .´:rszunvcxLOGDQ0KNMW&@\\/=^|[]{}",
+    " .´:rszunvcxLOGDQ0KNMW&@\\=^|[]{}", " .´:rszunvcxLOGDQ0KNMW&@",
+    " .´:rszunvcxLOGDQ0KNMW&@\\=^", " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&@[]{}",
+    " .´:-_/|+rszunvcxLOGDQ0KNMW&@[]{}", " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&#[]{}"
+]
+const missingLegacySpace = ".´:rszunvcxLOGDQ0KNMW&@"
+
 const defaults = {
     Mode: "Image", Images: [], FontFamily: "Monospace", AsciiChars: Array.from(standardChars),
     Detail: 1, Grayscale: false, SlideInterval: 10, TransitionFrames: 16,
     FrameStride: 1, VideoTransitionFrames: 0,
     TransitionDuration: 1500, TransitionType: "glyph-path", TransitionPace: "ease-in-out", TransitionField: "blue-noise",
     TransitionSpread: 0.65, Dither: 0.005, GradientLossStrength: 1.5,
-    GlyphLuminanceBonus: 0.12, GlyphEntropyStrength: 0.01, StructureDither: 0.06,
+    GlyphLuminanceBonus: 0.12, GlyphEntropyStrength: 0.01,
     FlowStrength: 0.4, FlowEddies: 0.65, FlowScale: 6.0,
     FlowAnimated: false, FlowLoopSeconds: 10, FlowFps: 12,
     InvertInk: false, BackgroundMode: 0, BackgroundColor: "#202028",
     RenderStyle: "headroom", RenderDirectory: "", RenderedState: ""
 }
 
+function defaultCharsForStyle(style) {
+    return style === "flow" ? flowChars : style === "stroke" ? strokeChars : standardChars
+}
+
+function isDefaultCharSet(value) {
+    const text = Array.isArray(value) ? value.join("") : String(value || "")
+    return text === standardChars || text === strokeChars || text === flowChars
+        || legacyDefaultCharSets.includes(text)
+}
+
 function normalizedSettings(settings) {
     const result = Object.assign({}, defaults, settings)
+    if (result.RenderStyle === "structure") result.RenderStyle = "stroke"
     if (result.RenderStyle === "headroom" && result.PerceptualLoss === false) result.RenderStyle = "classic"
     if (result.RenderStyle === "flow" && settings.GlyphEntropyStrength === undefined)
         result.GlyphEntropyStrength = 0.02
     delete result.PerceptualLoss
+    delete result.StructureDither
     if (!sourceModes.includes(result.Mode)) result.Mode = defaults.Mode
     const previousSources = result.Sources || {}
     result.Sources = {}
@@ -36,18 +57,9 @@ function normalizedSettings(settings) {
     result.Images = result.Sources[result.Mode]
     let chars = Array.from(result.AsciiChars || defaults.AsciiChars)
     if (chars[0] === "\\s") chars[0] = " "
-    const previousDefaults = [
-        " .´:rszunvcxLOGDQ0KNMW&@#\\/=^|[]{}", " .´:rszunvcxLOGDQ0KNMW&@\\/=^|[]{}",
-        " .´:rszunvcxLOGDQ0KNMW&@\\=^|[]{}", " .´:rszunvcxLOGDQ0KNMW&@",
-        " .´:rszunvcxLOGDQ0KNMW&@\\=^", " .´:-_/\\=^|+rszunvcxLOGDQ0KNMW&@[]{}",
-        " .´:-_/|+rszunvcxLOGDQ0KNMW&@[]{}"
-    ]
-    const missingLegacySpace = ".´:rszunvcxLOGDQ0KNMW&@"
     if (chars.join("") === missingLegacySpace) chars.unshift(" ")
-    const current = chars.join("")
-    if (previousDefaults.includes(current) || [standardChars, structureChars, flowChars].includes(current))
-        chars = Array.from(result.RenderStyle === "flow" ? flowChars
-                          : result.RenderStyle === "structure" ? structureChars : standardChars)
+    if (isDefaultCharSet(chars))
+        chars = Array.from(defaultCharsForStyle(result.RenderStyle))
     result.AsciiChars = chars
     return result
 }

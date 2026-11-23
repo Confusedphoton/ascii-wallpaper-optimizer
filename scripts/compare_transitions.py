@@ -20,6 +20,7 @@ from PIL import Image
 import torch
 
 from ascii_optimizer import cli
+from ascii_optimizer.assets import sdf_to_mask
 from ascii_optimizer.optimizer import render_grid
 from ascii_optimizer.revision import render_revision
 from ascii_optimizer.tone import display_tone_lab, oklab_to_srgb, srgb_to_oklab
@@ -51,10 +52,12 @@ def main():
         "transition_type": args.transition_type or manifest["signature"].get("transition_type", "glyph-path"),
     }))
     cell = tuple(manifest["cell_size"])
+    sdf_spread = float(manifest.get("sdf_spread", 0.0) or 0.0)
     with Image.open(original / "atlas.png") as atlas:
         alpha = np.asarray(atlas.convert("RGBA"), dtype=np.float32)[..., 3] / 255
     masks = alpha.reshape(cell[1], manifest["atlas_count"], cell[0]).transpose(1, 0, 2)
-    paths = glyph_paths(masks)
+    eval_masks = sdf_to_mask(masks, spread=sdf_spread) if sdf_spread > 0.0 else masks
+    paths = glyph_paths(eval_masks)
     revised = output / "interpolated_assets"
     revised.mkdir(parents=True, exist_ok=True)
     shutil.copytree(original / "stills", revised / "stills", dirs_exist_ok=True)
@@ -66,7 +69,7 @@ def main():
                    if not key.startswith("transitions/")}
     for index in range(count):
         backgrounds.update(cli._render_transition(index, [Path(p) for p in options.images],
-            revised, options, masks, cell, paths, lambda *_: None))
+            revised, options, masks, cell, paths, lambda *_: None, sdf_spread=sdf_spread))
     updated = manifest | {"background_labs": backgrounds, "generation": "transition-review",
                           "signature": manifest["signature"] | {"render_revision": render_revision(),
                               "transition_type": options.transition_type}}
@@ -92,8 +95,8 @@ def main():
             previous = None
             pair_frames = []
             for frame in range(frame_count):
-                grid = cli._load_grid(assets / "transitions" / pair / f"{frame:04d}")
-                lab = display_tone_lab(render_grid(grid, masks)[:options.size[1], :options.size[0]],
+                grid = cli._load_grid(assets / "transitions" / pair / f"{frame:04d}", sdf_spread=sdf_spread)
+                lab = display_tone_lab(render_grid(grid, masks, sdf_spread=sdf_spread)[:options.size[1], :options.size[0]],
                                        invert_ink=options.invert_ink)
                 pixels = np.rint(oklab_to_srgb(lab) * 255).astype(np.uint8)
                 lightness.append(float(srgb_to_oklab(pixels.astype(np.float32) / 255)[..., 0].mean()))

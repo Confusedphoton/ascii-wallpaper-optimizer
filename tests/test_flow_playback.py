@@ -112,7 +112,7 @@ def test_clip_colors_reuse_source_referenced_perceptual_starts():
     context = {}
     cli.solve_style(source, masks, style="flow", steps=0, flow_strength=0,
                     solve_context=context, glyph_entropy_strength=0, device="cpu",
-                    invert_ink=False, background="#000000", seed=0, dither=0, structure_dither=0)
+                    invert_ink=False, background="#000000", seed=0, dither=0)
     glyphs = np.ones((1, 2), np.uint8)
     options = dict(background_oklab=np.zeros(3), input_oklab=True, steps=0,
                    perceptual_target_srgb=source, glyph_luminance_bonus=0,

@@ -6,18 +6,29 @@ import math
 import re
 from collections.abc import Mapping
 
-from .defaults import (DEFAULT_CHARS, STRUCTURE_CHARS, FLOW_CHARS, DEFAULT_FLOW_STRENGTH,
-                       DEFAULT_FLOW_GLYPH_ENTROPY_STRENGTH,
-                       DEFAULT_FLOW_EDDIES, DEFAULT_FLOW_SCALE, DEFAULT_FLOW_LOOP_SECONDS, DEFAULT_FLOW_FPS,
-                       DEFAULT_FLOW_FRAME_STEPS, DEFAULT_FLOW_TEMPORAL_STRENGTH, DEFAULT_PERCEPTUAL_LOSS, DEFAULT_GLYPH_LUMINANCE_BONUS,
-                       DEFAULT_GRADIENT_LOSS_STRENGTH, MAX_GLYPH_LUMINANCE_BONUS,
-                       DEFAULT_GLYPH_ENTROPY_STRENGTH, MAX_GLYPH_ENTROPY_STRENGTH)
+from .defaults import (
+    BOOL_OPTIONS,
+    CHOICE_OPTIONS,
+    DEFAULT_CHARS,
+    FLOAT_OPTION_BOUNDS,
+    FLOW_ANIMATED_OPTIONS,
+    FLOW_OPTIONS,
+    INT_OPTION_BOUNDS,
+    OPTION_DEFAULTS,
+    SIGNATURE_OPTION_NAMES,
+    STYLE_CHARS,
+    TRANSITION_OPTION_NAMES,
+    VIDEO_OPTIONS,
+    style_default,
+)
 
+VIDEO_PLAYBACK_OPTIONS = frozenset({*VIDEO_OPTIONS, *TRANSITION_OPTION_NAMES})
 
-VIDEO_PLAYBACK_OPTIONS = frozenset({
-    "frame_stride", "video_transition_frames", "video_preview_ms", "frames",
-    "transition_steps", "transition_type", "transition_pace", "transition_field", "transition_spread",
-})
+# Options forwarded by the render service as --kebab-case <value> CLI flags.
+CLI_VALUE_OPTION_NAMES: tuple[str, ...] = tuple(
+    name for name in SIGNATURE_OPTION_NAMES
+    if name not in (*BOOL_OPTIONS, "perceptual_loss")
+)
 
 
 def finite_float(value, name: str, minimum: float | None = None,
@@ -56,36 +67,36 @@ def normalize_options(raw: Mapping) -> dict:
     if not isinstance(raw, Mapping):
         raise ValueError("Render settings must be an object")
     options = dict(raw)
-    input_format = options.setdefault("input_format", "images")
-    if input_format not in ("images", "video", "archive"):
-        raise ValueError("Unknown input format")
-    options["frame_stride"] = _integer(options.get("frame_stride", 1), "frame_stride", 1, 10000)
-    options["video_transition_frames"] = _integer(options.get("video_transition_frames", 0),
-                                                   "video_transition_frames", 0, 118)
-    options["video_preview_ms"] = _integer(options.get("video_preview_ms", 0), "video_preview_ms", 0, 3000)
-    if input_format != "video":
-        options["frame_stride"] = 1
-        options["video_transition_frames"] = 0
-        options["video_preview_ms"] = 0
-    # Legacy clients may still send a shortlist size. It no longer affects
-    # rendering, and must not create separate cache variants.
+    # Legacy clients may still send removed options; drop them so they do not
+    # split cache variants.
     options.pop("candidates", None)
-    style = options.setdefault("style", "headroom")
-    if style not in ("headroom", "structure", "flow"):
-        raise ValueError("Unknown render style")
+    options.pop("structure_dither", None)
+
+    for name, choices in CHOICE_OPTIONS.items():
+        value = options.setdefault(name, OPTION_DEFAULTS[name])
+        if value not in choices:
+            if name == "input_format":
+                raise ValueError("Unknown input format")
+            if name == "style":
+                raise ValueError("Unknown render style")
+            raise ValueError(f"Invalid {name}")
+
+    input_format = options["input_format"]
+    style = options["style"]
+
     perceptual_loss = options.get("perceptual_loss")
     if perceptual_loss is None:
-        perceptual_loss = DEFAULT_PERCEPTUAL_LOSS if style != "structure" else False
+        perceptual_loss = style_default(style, "perceptual_loss")
         options["perceptual_loss"] = perceptual_loss
     if not isinstance(perceptual_loss, bool):
         raise ValueError("perceptual_loss must be a boolean")
-    if style == "structure" and perceptual_loss:
-        raise ValueError("perceptual_loss is only available for headroom rendering")
     if style == "flow" and not perceptual_loss:
         raise ValueError("Flow rendering requires perceptual color fitting")
-    options.setdefault("font", "Monospace")
+
+    options.setdefault("font", OPTION_DEFAULTS["font"])
     if not isinstance(options["font"], str) or not options["font"].strip():
         raise ValueError("font must be a nonempty family or path")
+
     chars = options.get("chars", DEFAULT_CHARS)
     if not isinstance(chars, str):
         raise ValueError("chars must be a string")
@@ -93,69 +104,40 @@ def normalize_options(raw: Mapping) -> dict:
         chars = " " + chars[2:]
     if not 1 <= len(chars) <= 256 or len(set(chars)) != len(chars):
         raise ValueError("Characters must be 1 to 256 distinct glyphs")
-    options["chars"] = ({"structure": STRUCTURE_CHARS, "flow": FLOW_CHARS}.get(style, chars)
-                        if chars == DEFAULT_CHARS else chars)
-    for name, default in (("invert_ink", False), ("grayscale", False)):
-        value = options.setdefault(name, default)
+    options["chars"] = STYLE_CHARS.get(style, chars) if chars == DEFAULT_CHARS else chars
+
+    for name in BOOL_OPTIONS:
+        value = options.setdefault(name, OPTION_DEFAULTS[name])
         if not isinstance(value, bool):
             raise ValueError(f"{name} must be a boolean")
-    for name, default, low, high in (
-        ("detail", 1, 0, 4), ("frames", 16, 2, 120),
-        ("steps", 36, 1, None), ("transition_steps", 16, 1, None),
-        ("seed", 0, 0, None),
-    ):
-        options[name] = _integer(options.get(name, default), name, low, high)
-    for name, default, high in (
-        ("dither", 0.005, 0.05), ("structure_dither", 0.06, 0.12),
-        ("transition_spread", 0.65, 0.9),
-        ("gradient_loss_strength", DEFAULT_GRADIENT_LOSS_STRENGTH if style != "structure" else 0.0, 4.0),
-        ("glyph_luminance_bonus", DEFAULT_GLYPH_LUMINANCE_BONUS if style != "structure" else 0.0,
-         MAX_GLYPH_LUMINANCE_BONUS),
-        ("glyph_entropy_strength", DEFAULT_FLOW_GLYPH_ENTROPY_STRENGTH if style == "flow" else
-         DEFAULT_GLYPH_ENTROPY_STRENGTH if style == "headroom" else 0.0,
-         MAX_GLYPH_ENTROPY_STRENGTH),
-    ):
+
+    for name, (low, high) in INT_OPTION_BOUNDS.items():
         value = options.get(name)
-        options[name] = finite_float(default if value is None else value, name, 0, high)
-    for name, default, low, high in (
-        ("flow_strength", DEFAULT_FLOW_STRENGTH, 0, 2),
-        ("flow_eddies", DEFAULT_FLOW_EDDIES, 0, 2),
-        ("flow_scale", DEFAULT_FLOW_SCALE, 1, 24),
-    ):
+        default = style_default(style, name)
+        options[name] = _integer(default if value is None else value, name, low, high)
+
+    for name, (low, high) in FLOAT_OPTION_BOUNDS.items():
         value = options.get(name)
+        default = style_default(style, name)
         options[name] = finite_float(default if value is None else value, name, low, high)
-        if style != "flow":
-            # Inactive settings must not create redundant cache variants.
-            options[name] = default
-    animated = options.setdefault("flow_animated", False)
-    if not isinstance(animated, bool):
-        raise ValueError("flow_animated must be a boolean")
-    options["flow_animated"] = animated and style == "flow" and input_format != "video"
-    for name, default, low, high in (
-        ("flow_loop_seconds", DEFAULT_FLOW_LOOP_SECONDS, 1, 30),
-        ("flow_fps", DEFAULT_FLOW_FPS, 4, 24),
-        ("flow_frame_steps", DEFAULT_FLOW_FRAME_STEPS, 2, 96),
-    ):
-        options[name] = _integer(options.get(name, default), name, low, high)
-        if not options["flow_animated"]:
-            options[name] = default
-    options["flow_temporal_strength"] = finite_float(options.get("flow_temporal_strength",
-        DEFAULT_FLOW_TEMPORAL_STRENGTH), "flow_temporal_strength", 0, 2)
+
+    # Zero out inactive mode/style options so they never split cache keys.
+    if input_format != "video":
+        for name in VIDEO_OPTIONS:
+            options[name] = OPTION_DEFAULTS[name]
+    if style != "flow":
+        for name in FLOW_OPTIONS:
+            options[name] = OPTION_DEFAULTS[name]
+    if style == "stroke":
+        options["perceptual_loss"] = False
+        for name in ("dither", "gradient_loss_strength", "glyph_luminance_bonus", "glyph_entropy_strength"):
+            options[name] = 0.0
+    options["flow_animated"] = bool(options["flow_animated"] and style == "flow" and input_format != "video")
     if not options["flow_animated"]:
-        options["flow_temporal_strength"] = DEFAULT_FLOW_TEMPORAL_STRENGTH
-    if style == "structure" and (options["gradient_loss_strength"] or options["glyph_luminance_bonus"]):
-        raise ValueError("Gradient loss and glyph luminance bonus are only available for headroom rendering")
-    if style == "structure" and options["glyph_entropy_strength"]:
-        raise ValueError("glyph_entropy_strength is only available for headroom rendering")
-    for name, default, choices in (
-        ("transition_type", "glyph-path", ("glyph-path", "earth-mover")),
-        ("transition_pace", "ease-in-out", ("linear", "ease-in", "ease-out", "ease-in-out")),
-        ("transition_field", "blue-noise", ("blue-noise", "ripple", "spiral", "directional", "edge", "salience")),
-        ("crop", "fill", ("fill", "fit")),
-    ):
-        if options.setdefault(name, default) not in choices:
-            raise ValueError(f"Invalid {name}")
-    background = options.setdefault("background", "auto")
+        for name in FLOW_ANIMATED_OPTIONS:
+            options[name] = OPTION_DEFAULTS[name]
+
+    background = options.setdefault("background", OPTION_DEFAULTS["background"])
     if not isinstance(background, str) or (background != "auto" and not re.fullmatch(r"#[0-9a-fA-F]{6}", background)):
         raise ValueError("Background must be auto or a #RRGGBB color")
     options["background"] = background.lower()

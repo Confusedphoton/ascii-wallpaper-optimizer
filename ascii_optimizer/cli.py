@@ -23,45 +23,40 @@ from PIL import Image
 from . import __version__
 from .assets import (
     cell_for_display,
+    decode_stroke_weight_u8,
+    encode_stroke_weight_u8,
     glyph_masks,
+    glyph_sdf_atlas,
     load_target,
     resolve_font,
     save_atlas,
     save_metadata,
+    sdf_to_mask,
 )
 from .defaults import (
     DEFAULT_CHARS,
-    DEFAULT_FLOW_STRENGTH,
     DEFAULT_FLOW_EDDIES,
     DEFAULT_FLOW_SCALE,
-    DEFAULT_FLOW_GLYPH_ENTROPY_STRENGTH,
+    DEFAULT_FLOW_STRENGTH,
     DEFAULT_GLYPH_ENTROPY_STRENGTH,
     DEFAULT_GLYPH_LUMINANCE_BONUS,
-    DEFAULT_GRADIENT_LOSS_STRENGTH,
-    DEFAULT_PERCEPTUAL_LOSS,
-    DEFAULT_POLISH_STEPS,
-    DEFAULT_REFINEMENT_SWEEPS,
-    DEFAULT_USE_SHORTLIST,
     MAX_GLYPH_ENTROPY_STRENGTH,
     MAX_GLYPH_LUMINANCE_BONUS,
+    OPTION_DEFAULTS,
     PERCEPTUAL_WEIGHTS,
+    SIGNATURE_OPTION_NAMES,
+    TRANSITION_OPTION_NAMES,
     ppd_for_width,
 )
-from .optimizer import (
-    Grid,
-    _choose_background,
-    fit_fixed_glyphs,
-    render_grid,
-    solve,
-)
+from .optimizer import Grid, fit_fixed_glyphs, render_grid, solve
+from .renderers import resolve_backgrounds as _backgrounds
+from .renderers import solve_style
 from .revision import render_revision
 from .runtime import select_device
 from .settings import VIDEO_PLAYBACK_OPTIONS, normalize_options, validate_size
-from .structure import STRUCTURE_CHARS, solve_structure
 from .tone import (
     display_tone_lab,
     encode_headroom_lab,
-    invert_source,
     oklab_to_srgb,
     playback_rgb8,
     quantize_playback_lab,
@@ -83,7 +78,7 @@ from .video import decode_frames, frame_durations, probe_video
 
 MAP_KINDS = ("glyph", "color", "background")
 STILL_KINDS = (*MAP_KINDS, "preview")
-TRANSITION_SETTINGS = {"frames", "transition_steps", "transition_type", "transition_pace", "transition_field", "transition_spread"}
+TRANSITION_SETTINGS = TRANSITION_OPTION_NAMES
 
 
 def _atomic_json(path: Path, value: dict) -> None:
@@ -115,35 +110,45 @@ def _file_hash(path: Path) -> str:
 
 
 def _save_grid(grid: Grid, directory: Path, preview: bool, masks: np.ndarray,
-               size: tuple[int, int], invert_ink: bool = False) -> Grid:
+               size: tuple[int, int], invert_ink: bool = False, *,
+               sdf_spread: float = 0.0) -> Grid:
     directory.mkdir(parents=True, exist_ok=True)
     indices = np.zeros((*grid.glyph.shape, 3), dtype=np.uint8)
     indices[:, :, 0] = grid.glyph
+    indices[:, :, 1] = encode_stroke_weight_u8(grid.weight) if grid.weight is not None else 128
     Image.fromarray(indices, "RGB").save(directory / "glyph.png")
     color = playback_rgb8(grid.color)
     Image.fromarray(color, "RGB").save(directory / "color.png")
     background = np.zeros(3, dtype=np.float32) if grid.background is None else grid.background
     background_color = playback_rgb8(background).reshape(1, 1, 3)
     Image.fromarray(background_color, "RGB").save(directory / "background.png")
+    persisted_weight = (decode_stroke_weight_u8(indices[:, :, 1])
+                        if (sdf_spread > 0.0 or grid.weight is not None) else None)
     persisted = Grid(grid.glyph.copy(), srgb_to_oklab(color.astype(np.float32) / 255),
-                     srgb_to_oklab(background_color.astype(np.float32) / 255).reshape(3))
+                     srgb_to_oklab(background_color.astype(np.float32) / 255).reshape(3),
+                     weight=persisted_weight)
     if preview:
-        pixels = display_tone_lab(render_grid(persisted, masks)[:size[1], :size[0]], invert_ink=invert_ink)
+        pixels = display_tone_lab(
+            render_grid(persisted, masks, sdf_spread=sdf_spread)[:size[1], :size[0]],
+            invert_ink=invert_ink,
+        )
         color = oklab_to_srgb(pixels)
         Image.fromarray(np.rint(color * 255).astype(np.uint8), "RGB").save(directory / "preview.png")
     return persisted
 
 
-def _load_grid(directory: Path) -> Grid:
+def _load_grid(directory: Path, *, sdf_spread: float = 0.0) -> Grid:
     with Image.open(directory / "glyph.png") as image:
-        glyph = np.asarray(image.convert("RGB"))[:, :, 0].copy()
+        raw = np.asarray(image.convert("RGB"))
+    glyph = raw[:, :, 0].copy()
+    weight = decode_stroke_weight_u8(raw[:, :, 1]) if sdf_spread > 0.0 else None
     with Image.open(directory / "color.png") as image:
         encoded = np.asarray(image.convert("RGB"), dtype=np.float32) / 255
     color = srgb_to_oklab(encoded)
     with Image.open(directory / "background.png") as image:
         encoded_background = np.asarray(image.convert("RGB"), dtype=np.float32) / 255
     background = srgb_to_oklab(encoded_background).reshape(3)
-    return Grid(glyph, color, background)
+    return Grid(glyph, color, background, weight=weight)
 
 
 def _copy_grid(source: Path, destination: Path, *, preview: bool = False) -> None:
@@ -195,142 +200,17 @@ def _cache_still(source: Path, entry: Path, signature: dict, *, preview: bool = 
         shutil.rmtree(temporary, ignore_errors=True)
 
 
-def _backgrounds(source_lab: np.ndarray, background: str,
-                 invert_ink: bool) -> tuple[np.ndarray, np.ndarray]:
-    original = _choose_background(torch.from_numpy(source_lab).permute(2, 0, 1), background).numpy()
-    encoded = (np.zeros(3, dtype=np.float32) if invert_ink and background == "auto"
-               else encode_headroom_lab(original.reshape(1, 1, 3), invert_ink=invert_ink)[0, 0])
-    return original, quantize_playback_lab(encoded)
-
-
-def solve_style(target: np.ndarray, masks: np.ndarray, *, style: str,
-                invert_ink: bool, background: str, seed: int, steps: int,
-                candidates: int = 6, dither: float, structure_dither: float,
-                use_shortlist: bool = DEFAULT_USE_SHORTLIST,
-                logit_noise_distribution: str = "uniform",
-                device: str, previous: Grid | None = None,
-                destination: Grid | None = None, progress: float | None = None,
-                on_progress: Callable[[float, str], None] | None = None,
-                detail_loss: str = "default",
-                objective_space: str = "oklab",
-                glyph_luminance_bonus: float = 0.0,
-                saturation_loss_strength: float | None = None,
-                glyph_error_movement_strength: float = 0.0,
-                glyph_entropy_strength: float | None = None,
-                gradient_loss_strength: float | None = None,
-                refinement_sweeps: int = DEFAULT_REFINEMENT_SWEEPS,
-                polish_steps: int = DEFAULT_POLISH_STEPS,
-                postprocess: bool | None = None,
-                perceptual_loss: bool | None = None,
-                viewing_ppd: float | None = None,
-                flow_strength: float = DEFAULT_FLOW_STRENGTH,
-                flow_eddies: float = DEFAULT_FLOW_EDDIES,
-                flow_scale: float = DEFAULT_FLOW_SCALE,
-                flow_diagnostics: dict | None = None,
-                flow_costs=None,
-                solve_context: dict | None = None,
-                diagnostics=None) -> Grid:
-    """Prepare a grid whose displayed pixels follow the chosen ink polarity."""
-    if style not in ("headroom", "structure", "flow"):
-        raise ValueError(f"Unknown render style: {style}")
-    if objective_space != "oklab":
-        raise ValueError("The renderer operates only in OKLab.")
-    if gradient_loss_strength is None:
-        gradient_loss_strength = DEFAULT_GRADIENT_LOSS_STRENGTH if style != "structure" else 0.0
-    if glyph_entropy_strength is None:
-        glyph_entropy_strength = (DEFAULT_FLOW_GLYPH_ENTROPY_STRENGTH if style == "flow" else
-                                  DEFAULT_GLYPH_ENTROPY_STRENGTH if style == "headroom" else 0.0)
-    if perceptual_loss is None:
-        perceptual_loss = DEFAULT_PERCEPTUAL_LOSS and style != "structure"
-    if not isinstance(perceptual_loss, bool):
-        raise ValueError("perceptual_loss must be a boolean")
-    if style == "flow" and not perceptual_loss:
-        raise ValueError("Flow rendering requires perceptual color fitting")
-    if style == "structure" and perceptual_loss:
-        raise ValueError("perceptual_loss is only available for the headroom objective")
-    if style == "structure" and glyph_luminance_bonus:
-        raise ValueError("glyph_luminance_bonus is only available for the headroom objective")
-    if style == "structure" and saturation_loss_strength:
-        raise ValueError("saturation_loss_strength is only available for the headroom objective")
-    if style == "structure" and gradient_loss_strength:
-        raise ValueError("gradient_loss_strength is only available for the headroom objective")
-    if style == "structure" and glyph_error_movement_strength:
-        raise ValueError("glyph_error_movement_strength is only available for the headroom objective")
-    if style == "structure" and glyph_entropy_strength:
-        raise ValueError("glyph_entropy_strength is only available for the headroom objective")
-    if style == "structure" and detail_loss != "default":
-        raise ValueError("Feature/detail losses are not implemented for structure-first glyph selection")
-    source_lab = srgb_to_oklab(target)
-    original_background, solve_background = _backgrounds(source_lab, background, invert_ink)
-
-    if style in ("headroom", "flow"):
-        solve_progress = on_progress
-        if style == "flow":
-            from .flow import simulate_flow, glyph_flow_costs
-            from .settings import finite_float
-            flow_strength = finite_float(flow_strength, "flow_strength", 0, 2)
-            flow_eddies = finite_float(flow_eddies, "flow_eddies", 0, 2)
-            flow_scale = finite_float(flow_scale, "flow_scale", 1, 24)
-            if flow_strength and flow_costs is None:
-                field = simulate_flow(target, masks.shape[1:], seed=seed, eddies=flow_eddies,
-                                      scale=flow_scale, device=device,
-                                      on_progress=(lambda f, stage: on_progress(0.15 * f, stage))
-                                      if on_progress is not None else None)
-                flow_costs, summary = glyph_flow_costs(field, torch.as_tensor(masks, device=device))
-                if flow_diagnostics is not None:
-                    flow_diagnostics.update(field=field, costs=flow_costs, **field.diagnostics, **summary)
-                if diagnostics is not None:
-                    diagnostics.metadata["flow"] = {**field.diagnostics, **summary}
-                if on_progress is not None:
-                    solve_progress = lambda f, stage: on_progress(0.15 + 0.85 * f, stage)
-        encoded_target = encode_headroom_lab(source_lab, invert_ink=invert_ink)
-        return solve(encoded_target, masks, seed=seed, steps=steps,
-                     candidates=candidates, dither=dither,
-                     use_shortlist=use_shortlist,
-                     logit_noise_distribution=logit_noise_distribution,
-                     background_oklab=solve_background, device=device,
-                     input_oklab=True,
-                     previous=previous, destination=destination,
-                     progress=progress, on_progress=solve_progress,
-                     detail_loss=detail_loss,
-                     objective_space=objective_space,
-                     glyph_luminance_bonus=glyph_luminance_bonus,
-                     saturation_loss_strength=saturation_loss_strength,
-                     saturation_target_oklab=source_lab,
-                     glyph_error_movement_strength=glyph_error_movement_strength,
-                     glyph_entropy_strength=glyph_entropy_strength,
-                     error_movement_target_oklab=source_lab,
-                     gradient_loss_strength=gradient_loss_strength,
-                     gradient_target_oklab=source_lab,
-                     refinement_sweeps=refinement_sweeps, polish_steps=polish_steps,
-                     postprocess=postprocess,
-                     perceptual_loss=perceptual_loss, perceptual_target_srgb=target,
-                     viewing_ppd=viewing_ppd,
-                     flow_costs=flow_costs, flow_strength=flow_strength if flow_costs is not None else 0.0,
-                     solve_context=solve_context,
-                     **({"diagnostics": diagnostics} if diagnostics is not None else {}),
-                     invert_ink=invert_ink)
-
-    selection_target = invert_source(target) if invert_ink else target
-    selection_background = solve_background if invert_ink else original_background
-    grid = solve_structure(selection_target, masks, selection_background,
-                           seed=seed, dither=structure_dither,
-                           previous=previous, destination=destination,
-                           progress=progress, on_progress=on_progress)
-    grid.background = solve_background
-    return grid
-
-
-def _render_flow_image(target, masks, args, loop_dir, seed, on_progress):
+def _render_flow_image(target, masks, args, loop_dir, seed, on_progress, *, sdf_spread: float = 0.0):
     from .flow_playback import render_flow_clip
+
     count = args.flow_loop_seconds * args.flow_fps
     common = dict(style="flow", invert_ink=args.invert_ink, background=args.background,
-                  seed=seed, dither=args.dither, structure_dither=args.structure_dither,
+                  seed=seed, dither=args.dither,
                   device=args.device, glyph_luminance_bonus=args.glyph_luminance_bonus,
                   glyph_entropy_strength=args.glyph_entropy_strength,
                   gradient_loss_strength=args.gradient_loss_strength,
                   flow_strength=args.flow_strength, flow_eddies=args.flow_eddies,
-                  flow_scale=args.flow_scale, perceptual_loss=True)
+                  flow_scale=args.flow_scale, perceptual_loss=True, sdf_spread=sdf_spread)
     if not args.flow_strength:
         grid = solve_style(target, masks, steps=args.steps, **common)
         grids, diagnostics = [grid] * count, {"method": "static-zero-influence"}
@@ -338,25 +218,32 @@ def _render_flow_image(target, masks, args, loop_dir, seed, on_progress):
         def solve_frame(costs, steps, context):
             return solve_style(target, masks, steps=steps, flow_costs=costs,
                                solve_context=context, **common)
+
         source_lab = srgb_to_oklab(target)
         _, fixed_background = _backgrounds(source_lab, args.background, args.invert_ink)
         encoded = encode_headroom_lab(source_lab, invert_ink=args.invert_ink)
+
         def fit_colors(glyphs, neighbors, context):
-            return fit_fixed_glyphs(encoded, masks, glyphs, background_oklab=fixed_background,
+            return fit_fixed_glyphs(
+                encoded, masks, glyphs, background_oklab=fixed_background,
                 input_oklab=True, steps=args.flow_frame_steps, device=args.device,
                 glyph_luminance_bonus=args.glyph_luminance_bonus,
                 gradient_loss_strength=args.gradient_loss_strength, gradient_target_oklab=source_lab,
                 saturation_target_oklab=source_lab, perceptual_target_srgb=target,
-                perceptual_loss=True, invert_ink=args.invert_ink,
+                perceptual_loss=True, invert_ink=args.invert_ink, sdf_spread=sdf_spread,
                 solve_context=context, temporal_neighbors=neighbors,
                 temporal_strength=args.flow_temporal_strength)
-        grids, diagnostics = render_flow_clip(target, masks, seed=seed, eddies=args.flow_eddies,
+
+        grids, diagnostics = render_flow_clip(
+            target, masks, seed=seed, eddies=args.flow_eddies,
             scale=args.flow_scale, device=args.device, frames=count, steps=args.steps,
             frame_steps=args.flow_frame_steps, temporal_strength=args.flow_temporal_strength,
             solve_frame=solve_frame, fit_colors=fit_colors, flow_strength=args.flow_strength,
-            glyph_entropy_strength=args.glyph_entropy_strength, on_progress=on_progress)
+            glyph_entropy_strength=args.glyph_entropy_strength, sdf_spread=sdf_spread,
+            on_progress=on_progress)
     for frame, grid in enumerate(grids):
-        _save_grid(grid, loop_dir / f"{frame:04d}", False, masks, args.size, args.invert_ink)
+        _save_grid(grid, loop_dir / f"{frame:04d}", False, masks, args.size, args.invert_ink,
+                   sdf_spread=sdf_spread)
     info = {"frame_count": count, "duration_ms": args.flow_loop_seconds * 1000,
             "loop": True, "anchor_frame": 0, "closure": diagnostics}
     _atomic_json(loop_dir / "clip.json", info)
@@ -378,7 +265,7 @@ def _cached_loop(entry, signature, count):
             grid = _load_grid(directory / f"{frame:04d}")
             width, height = signature["size"]
             cw, ch = signature["cell"]
-            if (grid.glyph.shape != (math.ceil(height/ch), math.ceil(width/cw))
+            if (grid.glyph.shape != (math.ceil(height / ch), math.ceil(width / cw))
                     or grid.color.shape != (*grid.glyph.shape, 3)
                     or grid.glyph.max() >= len(signature["chars"])):
                 return None
@@ -401,24 +288,30 @@ def _cache_loop(source, entry, signature):
 
 def _render_transition(index: int, images: list[Path], output: Path,
                        args: argparse.Namespace, masks: np.ndarray, cell: tuple[int, int],
-                       paths: list[list[list[int]]], report: Callable[[float, str], None]) -> dict:
+                       paths: list[list[list[int]]], report: Callable[[float, str], None],
+                       *, sdf_spread: float = 0.0) -> dict:
     """Prepare glyph morphs or spatial transport from the saved endpoints."""
+    eval_masks = sdf_to_mask(masks, spread=sdf_spread) if sdf_spread > 0.0 else masks
     following = (index + 1) % len(images)
     base = output / "transitions" / f"{index:04d}-{following:04d}"
     backgrounds = {}
     print(f"Rendering transition {index + 1}/{len(images)}", flush=True)
-    start = _load_grid(output / "stills" / f"{index:04d}")
-    destination = _load_grid(output / "stills" / f"{following:04d}")
+    start = _load_grid(output / "stills" / f"{index:04d}", sdf_spread=sdf_spread)
+    destination = _load_grid(output / "stills" / f"{following:04d}", sdf_spread=sdf_spread)
     shape = start.glyph.shape
     destinations = None
     target_glyphs, target_colors = destination.glyph, destination.color
+    start_weights = start.weight
+    target_weights = destination.weight
     if getattr(args, "transition_type", "glyph-path") == "earth-mover":
         report(0.0, f"Transition {index + 1}/{len(images)}: matching earth mover regions")
         destinations = earth_mover_destinations(
             start.glyph, destination.glyph, start.color, destination.color,
-            start.background, destination.background, masks, invert_ink=args.invert_ink)
+            start.background, destination.background, eval_masks, invert_ink=args.invert_ink)
         target_glyphs = destination.glyph.ravel()[destinations]
         target_colors = destination.color.reshape(-1, 3)[destinations]
+        if target_weights is not None:
+            target_weights = target_weights.ravel()[destinations]
     previous_glyphs = start.glyph
     longest = max(len(paths[int(a)][int(b)]) - 1 for a, b in np.unique(
         np.stack((start.glyph.ravel(), target_glyphs.ravel()), axis=1), axis=0))
@@ -439,22 +332,26 @@ def _render_transition(index: int, images: list[Path], output: Path,
         else:
             local = local_progress(progress, offsets, args.transition_spread)
             glyphs = path_glyphs(start.glyph, target_glyphs, local, paths,
-                                previous_glyphs, args.frames - 1 - frame)
+                                 previous_glyphs, args.frames - 1 - frame)
             previous_glyphs = glyphs
-            # These are already decoded playback OKLab colors. Use the same
-            # per-cell clock as the glyphs, anchored to the stills rather than
-            # accumulating a fit from the preceding transition frame.
             color = (1 - local[..., None]) * start.color + local[..., None] * target_colors
-            # Backgrounds are uniform, so follow the shared eased clock.
             background = (1 - progress) * start.background + progress * destination.background
+            weight = ((1 - local) * start_weights + local * target_weights
+                      if start_weights is not None and target_weights is not None else None)
             if destinations is not None:
-                glyphs, color = transport_cells(glyphs, color, background, destinations, local, masks)
-            grid = Grid(glyphs, color, background)
+                if weight is not None:
+                    glyphs, color, weight = transport_cells(
+                        glyphs, color, background, destinations, local, eval_masks, weights=weight)
+                else:
+                    glyphs, color = transport_cells(
+                        glyphs, color, background, destinations, local, eval_masks)
+            grid = Grid(glyphs, color, background, weight=weight)
         frame_dir = base / f"{frame:04d}"
         if frame in (0, args.frames - 1):
             _copy_grid(output / "stills" / f"{index if frame == 0 else following:04d}", frame_dir)
         else:
-            grid = _save_grid(grid, frame_dir, False, masks, args.size, args.invert_ink)
+            grid = _save_grid(grid, frame_dir, False, masks, args.size, args.invert_ink,
+                              sdf_spread=sdf_spread)
         backgrounds[f"transitions/{index:04d}-{following:04d}/{frame:04d}"] = grid.background.tolist()
         if frame not in (0, args.frames - 1):
             report(float(frame), f"Transition {index + 1}/{len(images)}: finished frame {frame + 1}/{args.frames}")
@@ -463,30 +360,39 @@ def _render_transition(index: int, images: list[Path], output: Path,
 
 def _video_intermediates(start: Grid, destination: Grid, args: argparse.Namespace,
                          masks: np.ndarray, paths: list[list[list[int]]],
-                         source: np.ndarray, index: int):
+                         source: np.ndarray, index: int, *, sdf_spread: float = 0.0):
     """Sample the transition at any requested budget, including a single frame."""
+    eval_masks = sdf_to_mask(masks, spread=sdf_spread) if sdf_spread > 0.0 else masks
     destinations = None
     target_glyphs, target_colors = destination.glyph, destination.color
+    start_weights, target_weights = start.weight, destination.weight
     if args.transition_type == "earth-mover":
         destinations = earth_mover_destinations(
             start.glyph, destination.glyph, start.color, destination.color,
-            start.background, destination.background, masks, invert_ink=args.invert_ink)
+            start.background, destination.background, eval_masks, invert_ink=args.invert_ink)
         target_glyphs = destination.glyph.ravel()[destinations]
         target_colors = destination.color.reshape(-1, 3)[destinations]
+        if target_weights is not None:
+            target_weights = target_weights.ravel()[destinations]
     offsets = phase_offsets(start.glyph.shape, args.transition_field,
                             args.seed + index * 10007,
                             source if args.transition_field == "salience" else None)
     for frame in range(1, args.video_transition_frames + 1):
         progress = ease(frame / (args.video_transition_frames + 1), args.transition_pace)
         local = local_progress(progress, offsets, args.transition_spread)
-        # Videos specify an exact interpolation count. Sampling a glyph path
-        # directly lets a short interval skip glyphs rather than rejecting it.
         glyphs = path_glyphs(start.glyph, target_glyphs, local, paths)
         color = (1 - local[..., None]) * start.color + local[..., None] * target_colors
         background = (1 - progress) * start.background + progress * destination.background
+        weight = ((1 - local) * start_weights + local * target_weights
+                  if start_weights is not None and target_weights is not None else None)
         if destinations is not None:
-            glyphs, color = transport_cells(glyphs, color, background, destinations, local, masks)
-        yield Grid(glyphs, color, background)
+            if weight is not None:
+                glyphs, color, weight = transport_cells(
+                    glyphs, color, background, destinations, local, eval_masks, weights=weight)
+            else:
+                glyphs, color = transport_cells(
+                    glyphs, color, background, destinations, local, eval_masks)
+        yield Grid(glyphs, color, background, weight=weight)
 
 
 def _video_endpoint_settings(signature: dict) -> dict:
@@ -519,11 +425,11 @@ def _video_endpoint_sources(directories, signature):
     return endpoints
 
 
-def _read_video_endpoint(paths, size, cell, glyph_count):
+def _read_video_endpoint(paths, size, cell, glyph_count, *, sdf_spread: float = 0.0):
     expected = tuple(math.ceil(dimension / step) for dimension, step in zip(reversed(size), reversed(cell)))
     for path in paths:
         try:
-            grid = _load_grid(path)
+            grid = _load_grid(path, sdf_spread=sdf_spread)
             if grid.glyph.shape == expected and grid.color.shape == (*expected, 3) and grid.glyph.max() < glyph_count:
                 return grid
         except (OSError, ValueError):
@@ -532,7 +438,8 @@ def _read_video_endpoint(paths, size, cell, glyph_count):
 
 
 def _build_video(args: argparse.Namespace, source: Path, output: Path,
-                 signature: dict, masks: np.ndarray, cell: tuple[int, int]) -> None:
+                 signature: dict, masks: np.ndarray, cell: tuple[int, int],
+                 sdf_spread: float) -> None:
     """Optimize only sampled frames, then emit a timestamp-preserving clip."""
     info = probe_video(source).prefix(args.video_preview_ms)
     times = info.sampled_times(args.frame_stride)
@@ -556,14 +463,12 @@ def _build_video(args: argparse.Namespace, source: Path, output: Path,
                 return
         except (OSError, ValueError, TypeError, KeyError):
             pass
-    # Stage replacements so a compatible previous directory remains readable
-    # throughout an in-place CLI rebuild and until all new frames are ready.
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".ascii-video-", dir=output.parent) as temporary:
         stage = Path(temporary) / "render"
         stage.mkdir()
         reusable = [output, *getattr(args, "reuse_video_from", ())]
-        _write_video(args, source, stage, signature, masks, cell, info, times, durations, reusable)
+        _write_video(args, source, stage, signature, masks, cell, info, times, durations, reusable, sdf_spread)
         (output / "stills").mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="previous-", dir=temporary) as backup:
             previous = Path(backup)
@@ -589,16 +494,18 @@ def _build_video(args: argparse.Namespace, source: Path, output: Path,
         print('ASCII_PROGRESS {"progress": 1.0, "stage": "Ready"}', flush=True)
 
 
-def _write_video(args, source, output, signature, masks, cell, info, times, durations, reuse_from):
+def _write_video(args, source, output, signature, masks, cell, info, times, durations, reuse_from, sdf_spread):
     count = len(durations)
     save_atlas(masks, output / "atlas.png")
-    save_metadata(args.size, cell, len(args.chars), output / "metadata.png", invert_ink=args.invert_ink)
+    save_metadata(args.size, cell, len(args.chars), output / "metadata.png",
+                  invert_ink=args.invert_ink, sdf_spread=sdf_spread)
     backgrounds = {}
     emitted = 0
     completed = 0
     previous = None
     previous_target = None
-    paths = glyph_paths(masks) if args.video_transition_frames else None
+    eval_masks = sdf_to_mask(masks, spread=sdf_spread) if sdf_spread > 0.0 else masks
+    paths = glyph_paths(eval_masks) if args.video_transition_frames else None
     still_cache = getattr(args, "still_cache", None)
     if still_cache is not None:
         still_cache = Path(still_cache).expanduser().resolve()
@@ -615,7 +522,8 @@ def _write_video(args, source, output, signature, masks, cell, info, times, dura
     def save(grid: Grid) -> Grid:
         nonlocal emitted
         directory = output / "video" / f"{emitted:04d}"
-        persisted = _save_grid(grid, directory, False, masks, args.size, args.invert_ink)
+        persisted = _save_grid(grid, directory, False, masks, args.size, args.invert_ink,
+                               sdf_spread=sdf_spread)
         backgrounds[f"video/{emitted:04d}"] = persisted.background.tolist()
         emitted += 1
         return persisted
@@ -634,8 +542,9 @@ def _write_video(args, source, output, signature, masks, cell, info, times, dura
             cache_entry = still_cache / cache_key if still_cache is not None else None
             cached = (_cached_still(cache_entry, endpoint_signature, preview=False)
                       if cache_entry is not None and not args.force else None)
-            endpoint = (_load_grid(cached) if cached is not None else
-                        _read_video_endpoint(reusable.get(original_index, ()), args.size, cell, len(masks)))
+            endpoint = (_load_grid(cached, sdf_spread=sdf_spread) if cached is not None else
+                        _read_video_endpoint(reusable.get(original_index, ()), args.size, cell,
+                                             len(masks), sdf_spread=sdf_spread))
             reused = endpoint is not None
             if reused:
                 print(f"Reusing cached video frame {index + 1}/{len(times)}", flush=True)
@@ -643,21 +552,22 @@ def _write_video(args, source, output, signature, masks, cell, info, times, dura
                 print(f"Optimizing video frame {index + 1}/{len(times)}", flush=True)
                 grid = solve_style(target, masks, style=args.style, invert_ink=args.invert_ink,
                                    seed=args.seed + original_index, steps=args.steps, dither=args.dither,
-                                   structure_dither=args.structure_dither, background=args.background,
+                                   background=args.background,
                                    device=args.device, glyph_luminance_bonus=args.glyph_luminance_bonus,
                                    glyph_entropy_strength=args.glyph_entropy_strength,
                                    gradient_loss_strength=float(args.gradient_loss_strength),
                                    perceptual_loss=args.perceptual_loss, flow_strength=args.flow_strength,
                                    flow_eddies=args.flow_eddies, flow_scale=args.flow_scale,
+                                   sdf_spread=sdf_spread,
                                    on_progress=lambda fraction, stage, index=index: report(
                                        fraction, f"Video frame {index + 1}/{len(times)}: {stage}"))
-                # Quantize endpoints before interpolating, exactly like slideshows.
                 endpoint = Grid(grid.glyph, quantize_playback_lab(grid.color),
-                                quantize_playback_lab(grid.background))
+                                quantize_playback_lab(grid.background), weight=grid.weight)
             if previous is not None and args.video_transition_frames:
                 report(0.0, f"Video transition {index}/{len(times) - 1}: {args.transition_type}")
                 for intermediate in _video_intermediates(
-                        previous, endpoint, args, masks, paths, previous_target, index - 1):
+                        previous, endpoint, args, masks, paths, previous_target, index - 1,
+                        sdf_spread=sdf_spread):
                     save(intermediate)
                     completed += 1
                     report(0.0, f"Finished interpolated video frame {emitted}/{count}")
@@ -667,7 +577,8 @@ def _write_video(args, source, output, signature, masks, cell, info, times, dura
                              endpoint_signature, preview=False)
             if index == 0:
                 anchor = output / "stills/0000"
-                _save_grid(previous, anchor, True, masks, args.size, args.invert_ink)
+                _save_grid(previous, anchor, True, masks, args.size, args.invert_ink,
+                           sdf_spread=sdf_spread)
                 _copy_grid(output / "video/0000", anchor)
                 backgrounds["stills/0000"] = previous.background.tolist()
             previous_target = target if args.video_transition_frames else None
@@ -689,7 +600,8 @@ def _write_video(args, source, output, signature, masks, cell, info, times, dura
         "image_count": 1, "frame_count": args.frames,
         "grid": [previous.glyph.shape[1], previous.glyph.shape[0]],
         "output_size": list(args.size), "cell_size": list(cell),
-        "atlas_count": len(args.chars), "invert_ink": args.invert_ink,
+        "atlas_count": len(args.chars), "atlas_type": "sdf" if sdf_spread > 0.0 else "alpha",
+        "sdf_spread": sdf_spread, "invert_ink": args.invert_ink,
         "background_labs": backgrounds,
     })
 
@@ -766,9 +678,6 @@ def _build_directory(args: argparse.Namespace) -> None:
     args.device = select_device(args.device)
     args.size = validate_size(args.size)
     style, invert_ink = args.style, args.invert_ink
-    glyph_luminance_bonus = args.glyph_luminance_bonus
-    gradient_loss_strength = args.gradient_loss_strength
-    structure_dither = args.structure_dither
     if not args.images:
         raise ValueError("At least one source image is required")
     if args.input_format == "video" and len(args.images) != 1:
@@ -786,53 +695,44 @@ def _build_directory(args: argparse.Namespace) -> None:
 
     report(0.0, "Preparing input images")
     font = resolve_font(args.font)
-    effective_chars = args.chars  # normalize_options already resolves style defaults
+    effective_chars = args.chars
     chars = list(effective_chars)
     if not chars or len(chars) > 256 or len(set(chars)) != len(chars):
         raise ValueError("Characters must be 1 to 256 distinct glyphs")
     cell = validate_size(args.cell or cell_for_display(args.size, args.detail), max_dimension=255)
-    masks = glyph_masks(font, chars, cell)
+    masks, sdf_spread = glyph_sdf_atlas(font, chars, cell)
+    eval_masks = sdf_to_mask(masks, spread=sdf_spread) if sdf_spread > 0.0 else masks
     loop_count = args.flow_loop_seconds * args.flow_fps if args.flow_animated else 0
-    cells = math.ceil(args.size[0]/cell[0]) * math.ceil(args.size[1]/cell[1])
+    cells = math.ceil(args.size[0] / cell[0]) * math.ceil(args.size[1] / cell[1])
     if loop_count and cells * loop_count * len(args.images) > 40_000_000:
         raise ValueError("Animated render is too large; reduce detail, loop length, frame rate or image count")
     images = [path.expanduser().resolve() for path in args.images]
     for path in images:
         if not path.is_file():
             raise FileNotFoundError(path)
-    signature = {
-        "input_format": args.input_format,
-        "frame_stride": args.frame_stride, "video_transition_frames": args.video_transition_frames,
-        "version": __version__, "render_revision": render_revision(), "images": [str(path) for path in images],
+
+    signature = {name: getattr(args, name) for name in SIGNATURE_OPTION_NAMES}
+    signature.update({
+        "version": __version__,
+        "render_revision": render_revision(),
+        "atlas_type": "sdf" if sdf_spread > 0.0 else "alpha",
+        "sdf_spread": sdf_spread,
+        "images": [str(path) for path in images],
         "image_hashes": [_file_hash(path) for path in images],
-        "font": str(font), "font_hash": _file_hash(font),
-        "size": list(args.size), "cell": list(cell), "detail": args.detail, "chars": effective_chars,
-        "style": style, "invert_ink": invert_ink, "structure_dither": structure_dither,
-        "flow_strength": args.flow_strength, "flow_eddies": args.flow_eddies, "flow_scale": args.flow_scale,
-        **{name: getattr(args, name) for name in ("flow_animated", "flow_loop_seconds", "flow_fps",
-           "flow_frame_steps", "flow_temporal_strength")},
-        "gradient_loss_strength": float(gradient_loss_strength),
-        "glyph_luminance_bonus": glyph_luminance_bonus,
-        "glyph_entropy_strength": args.glyph_entropy_strength,
-        "perceptual_loss": args.perceptual_loss,
-        "output_stage": ("adam_terminal" if args.perceptual_loss else
-                         "postprocessed" if style == "headroom" else "structure"),
+        "font": str(font),
+        "font_hash": _file_hash(font),
+        "size": list(args.size),
+        "cell": list(cell),
+        "output_stage": ("stroke_graph" if style == "stroke" else
+                         "adam_terminal" if args.perceptual_loss else "postprocessed"),
         "perceptual_weights": PERCEPTUAL_WEIGHTS if args.perceptual_loss else {},
         "viewing_ppd": ppd_for_width(args.size[0]) if args.perceptual_loss else None,
-        "crop": args.crop, "grayscale": args.grayscale,
-        "frames": args.frames, "steps": args.steps,
-        "transition_steps": args.transition_steps,
-        "transition_type": args.transition_type,
-        "transition_pace": args.transition_pace, "transition_field": args.transition_field,
-        "transition_spread": args.transition_spread,
-        "glyph_search": "all" if style != "structure" else "structure",
-        "dither": args.dither, "background": args.background, "seed": args.seed,
-    }
+        "glyph_search": "stroke_graph" if style == "stroke" else "all",
+    })
     output = args.output.expanduser().resolve()
     if args.input_format == "video":
-        signature.update(frame_stride=args.frame_stride, video_transition_frames=args.video_transition_frames,
-                         video_preview_ms=args.video_preview_ms)
-        _build_video(args, images[0], output, signature, masks, cell)
+        signature["video_preview_ms"] = args.video_preview_ms
+        _build_video(args, images[0], output, signature, masks, cell, sdf_spread)
         return
     still_cache = getattr(args, "still_cache", None)
     if still_cache is not None:
@@ -845,10 +745,10 @@ def _build_directory(args: argparse.Namespace) -> None:
             if not isinstance(old, dict):
                 old = {}
             expected_stills = [output / "stills" / f"{i:04d}" / f"{kind}.png"
-                               for i in range(len(images)) for kind in ("glyph", "color", "background", "preview")]
-            expected_pairs = [output / "transitions" / f"{i:04d}-{(i+1)%len(images):04d}" / f"{frame:04d}" / f"{kind}.png"
+                               for i in range(len(images)) for kind in STILL_KINDS]
+            expected_pairs = [output / "transitions" / f"{i:04d}-{(i + 1) % len(images):04d}" / f"{frame:04d}" / f"{kind}.png"
                               for i in range(len(images)) for frame in range(args.frames)
-                              for kind in ("glyph", "color", "background")] if len(images) > 1 else []
+                              for kind in MAP_KINDS] if len(images) > 1 else []
             expected_loops = [output / "loops" / f"{i:04d}" / f"{frame:04d}" / f"{kind}.png"
                               for i in range(len(images)) for frame in range(loop_count) for kind in MAP_KINDS]
             if (old.get("signature") == signature and (output / "atlas.png").exists()
@@ -866,20 +766,18 @@ def _build_directory(args: argparse.Namespace) -> None:
             pass
     output.mkdir(parents=True, exist_ok=True)
     save_atlas(masks, output / "atlas.png")
-    save_metadata(args.size, cell, len(chars), output / "metadata.png", invert_ink=invert_ink)
+    save_metadata(args.size, cell, len(chars), output / "metadata.png",
+                  invert_ink=invert_ink, sdf_spread=sdf_spread)
     old_signature = old.get("signature", {})
     if not isinstance(old_signature, dict):
         old_signature = {}
     still_settings_match = all(old_signature.get(key) == value for key, value in signature.items()
                                if key not in {"images", "image_hashes", *TRANSITION_SETTINGS})
     transition_settings_match = still_settings_match and all(
-        old_signature.get(key) == signature[key] for key in
-        TRANSITION_SETTINGS)
+        old_signature.get(key) == signature[key] for key in TRANSITION_SETTINGS)
     old_hashes = old_signature.get("image_hashes", [])
     if not isinstance(old_hashes, list):
         old_hashes = []
-    # Keep grids on disk. Each transition worker loads only its active pair,
-    # so source-image memory is bounded by worker count, not slideshow length.
     background_labs: dict[str, list[float]] = {}
     grid_shape = None
     loops = {}
@@ -901,13 +799,16 @@ def _build_directory(args: argparse.Namespace) -> None:
                 info = json.loads((loop_dir / "clip.json").read_text())
             else:
                 target = load_target(image, args.size, args.crop, args.grayscale)
-                info = _render_flow_image(target, masks, args, loop_dir, args.seed + index,
-                    lambda fraction, stage: report(fraction, f"Image {index + 1}/{len(images)}: {stage}"))
+                info = _render_flow_image(
+                    target, masks, args, loop_dir, args.seed + index,
+                    lambda fraction, stage: report(fraction, f"Image {index + 1}/{len(images)}: {stage}"),
+                    sdf_spread=sdf_spread)
                 del target
                 if loop_cache is not None:
                     _cache_loop(loop_dir, loop_cache, still_signature)
             loops[f"{index:04d}"] = dict(info, path=f"loops/{index:04d}")
-            grid = _save_grid(_load_grid(loop_dir / "0000"), still_dir, True, masks, args.size, invert_ink)
+            grid = _save_grid(_load_grid(loop_dir / "0000", sdf_spread=sdf_spread),
+                              still_dir, True, masks, args.size, invert_ink, sdf_spread=sdf_spread)
             _copy_grid(loop_dir / "0000", still_dir)
             for frame in range(loop_count):
                 background_labs[f"loops/{index:04d}/{frame:04d}"] = grid.background.tolist()
@@ -915,29 +816,29 @@ def _build_directory(args: argparse.Namespace) -> None:
                 and old_hashes[index] == signature["image_hashes"][index]
                 and all((still_dir / f"{kind}.png").exists() for kind in STILL_KINDS)):
             print(f"Reusing still {index + 1}/{len(images)}", flush=True)
-            grid = _load_grid(still_dir)
+            grid = _load_grid(still_dir, sdf_spread=sdf_spread)
             if cache_entry is not None and cached is None:
                 _cache_still(still_dir, cache_entry, still_signature)
         elif cached is not None:
             print(f"Reusing cached still {index + 1}/{len(images)}", flush=True)
             _copy_grid(cached, still_dir, preview=True)
-            grid = _load_grid(still_dir)
+            grid = _load_grid(still_dir, sdf_spread=sdf_spread)
         else:
             print(f"Optimizing still {index + 1}/{len(images)}: {image}", flush=True)
             target = load_target(image, args.size, args.crop, args.grayscale)
             grid = solve_style(target, masks, style=style, invert_ink=invert_ink,
-                         seed=args.seed + index, steps=args.steps,
-                         dither=args.dither, structure_dither=structure_dither,
-                         background=args.background, device=args.device,
-                         glyph_luminance_bonus=glyph_luminance_bonus,
-                         glyph_entropy_strength=args.glyph_entropy_strength,
-                         gradient_loss_strength=float(gradient_loss_strength),
-                         perceptual_loss=args.perceptual_loss,
-                         flow_strength=args.flow_strength, flow_eddies=args.flow_eddies,
-                         flow_scale=args.flow_scale,
-                         on_progress=lambda fraction, stage, index=index: report(
-                             fraction, f"Image {index + 1}/{len(images)}: {stage}"))
-            grid = _save_grid(grid, still_dir, True, masks, args.size, invert_ink)
+                               seed=args.seed + index, steps=args.steps,
+                               dither=args.dither,
+                               background=args.background, device=args.device,
+                               glyph_luminance_bonus=args.glyph_luminance_bonus,
+                               glyph_entropy_strength=args.glyph_entropy_strength,
+                               gradient_loss_strength=float(args.gradient_loss_strength),
+                               perceptual_loss=args.perceptual_loss,
+                               flow_strength=args.flow_strength, flow_eddies=args.flow_eddies,
+                               flow_scale=args.flow_scale, sdf_spread=sdf_spread,
+                               on_progress=lambda fraction, stage, index=index: report(
+                                   fraction, f"Image {index + 1}/{len(images)}: {stage}"))
+            grid = _save_grid(grid, still_dir, True, masks, args.size, invert_ink, sdf_spread=sdf_spread)
             del target
             if cache_entry is not None:
                 _cache_still(still_dir, cache_entry, still_signature)
@@ -947,7 +848,7 @@ def _build_directory(args: argparse.Namespace) -> None:
         completed_units += 1
         report(0.0, f"Finished image {index + 1}/{len(images)}")
     if len(images) > 1:
-        paths = glyph_paths(masks)
+        paths = glyph_paths(eval_masks)
         pending_pairs = []
         for index in range(len(images)):
             following = (index + 1) % len(images)
@@ -956,7 +857,7 @@ def _build_directory(args: argparse.Namespace) -> None:
                     and old_hashes[index] == signature["image_hashes"][index]
                     and old_hashes[following] == signature["image_hashes"][following]
                     and all((base / f"{frame:04d}" / f"{kind}.png").exists()
-                            for frame in range(args.frames) for kind in ("glyph", "color", "background"))):
+                            for frame in range(args.frames) for kind in MAP_KINDS)):
                 print(f"Reusing transition {index + 1}/{len(images)}", flush=True)
                 for frame in range(args.frames):
                     key = f"transitions/{index:04d}-{following:04d}/{frame:04d}"
@@ -986,7 +887,8 @@ def _build_directory(args: argparse.Namespace) -> None:
             def render_pair(index: int) -> dict:
                 pair_report(index, 0.0, f"Starting transition {index + 1}/{len(images)}")
                 return _render_transition(index, images, output, args, masks, cell, paths,
-                                          lambda units, stage: pair_report(index, units, stage))
+                                          lambda units, stage: pair_report(index, units, stage),
+                                          sdf_spread=sdf_spread)
 
             try:
                 with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ascii-transition") as executor:
@@ -1003,80 +905,81 @@ def _build_directory(args: argparse.Namespace) -> None:
                 if workers > 1:
                     torch.set_num_threads(old_threads)
             completed_units += len(pending_pairs) * (args.frames - 2)
-    _atomic_json(manifest, {"schema_version": 2, "loops": loops, "signature": signature, "generation": getattr(args, "generation", None) or uuid.uuid4().hex,
-                            "image_count": len(images), "frame_count": args.frames,
-                            "grid": [grid_shape[1], grid_shape[0]], "output_size": list(args.size),
-                            "cell_size": list(cell), "atlas_count": len(chars), "invert_ink": invert_ink,
-                            "background_labs": background_labs})
+    _atomic_json(manifest, {
+        "schema_version": 2, "loops": loops, "signature": signature,
+        "generation": getattr(args, "generation", None) or uuid.uuid4().hex,
+        "image_count": len(images), "frame_count": args.frames,
+        "grid": [grid_shape[1], grid_shape[0]], "output_size": list(args.size),
+        "cell_size": list(cell), "atlas_count": len(chars),
+        "atlas_type": "sdf" if sdf_spread > 0.0 else "alpha",
+        "sdf_spread": sdf_spread, "invert_ink": invert_ink,
+        "background_labs": background_labs,
+    })
     print(f"Rendered assets: {output}")
     report(1.0, "Ready")
 
 
 def make_parser() -> argparse.ArgumentParser:
-    defaults = normalize_options({})
+    d = OPTION_DEFAULTS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("images", nargs="+", type=Path, help="Source images, one video, or one ASCII archive")
-    parser.add_argument("--input-format", choices=("images", "video", "archive"), default="images")
+    parser.add_argument("--input-format", choices=("images", "video", "archive"), default=d["input_format"])
     parser.add_argument("--output", type=Path, required=True, help="Generated asset directory or compressed archive")
     parser.add_argument("--output-format", choices=("directory", "zip"), default="directory",
                         help="Directory of assets or an explicitly compressed ZIP archive")
     parser.add_argument("--size", type=_size, help="Wallpaper size, WIDTHxHEIGHT (required when rendering)")
-    parser.add_argument("--frame-stride", type=int, default=1,
+    parser.add_argument("--frame-stride", type=int, default=d["frame_stride"],
                         help="Render every Nth source video frame without changing playback duration")
-    parser.add_argument("--video-transition-frames", type=int, default=0,
+    parser.add_argument("--video-transition-frames", type=int, default=d["video_transition_frames"],
                         help="Interpolated frames between sampled video frames (default: 0)")
-    parser.add_argument("--video-preview-ms", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--video-preview-ms", type=int, default=d["video_preview_ms"], help=argparse.SUPPRESS)
     parser.add_argument("--reuse-video-from", type=Path, action="append", default=[], help=argparse.SUPPRESS)
-    parser.add_argument("--font", default=defaults["font"], help="Font family or font file")
+    parser.add_argument("--font", default=d["font"], help="Font family or font file")
     parser.add_argument("--chars", default=DEFAULT_CHARS, help="Distinct characters, including a space")
-    parser.add_argument("--detail", type=int, choices=(0, 1, 2, 3, 4), default=defaults["detail"])
+    parser.add_argument("--detail", type=int, choices=(0, 1, 2, 3, 4), default=d["detail"])
     parser.add_argument("--cell", type=_size, help="Override cell dimensions")
-    parser.add_argument("--crop", choices=("fill", "fit"), default=defaults["crop"])
+    parser.add_argument("--crop", choices=("fill", "fit"), default=d["crop"])
     parser.add_argument("--grayscale", action="store_true")
-    parser.add_argument("--frames", type=int, default=defaults["frames"], help="Frames per slideshow transition")
-    parser.add_argument("--transition-type", choices=TYPES, default=defaults["transition_type"],
+    parser.add_argument("--frames", type=int, default=d["frames"], help="Frames per slideshow transition")
+    parser.add_argument("--transition-type", choices=TYPES, default=d["transition_type"],
                         help="Glyph changes in place or earth mover transport across cells")
-    parser.add_argument("--transition-pace", choices=PACES, default=defaults["transition_pace"])
-    parser.add_argument("--transition-field", choices=FIELDS, default=defaults["transition_field"])
-    parser.add_argument("--transition-spread", type=float, default=defaults["transition_spread"])
-    parser.add_argument("--steps", type=int, default=defaults["steps"], help="Still optimization steps")
-    # Accepted for saved settings and old commands; transitions interpolate.
-    parser.add_argument("--transition-steps", type=int, default=defaults["transition_steps"],
-                        help=argparse.SUPPRESS)
-    # Accept old commands without restricting the full glyph-bank solve.
+    parser.add_argument("--transition-pace", choices=PACES, default=d["transition_pace"])
+    parser.add_argument("--transition-field", choices=FIELDS, default=d["transition_field"])
+    parser.add_argument("--transition-spread", type=float, default=d["transition_spread"])
+    parser.add_argument("--steps", type=int, default=d["steps"], help="Still optimization steps")
+    parser.add_argument("--transition-steps", type=int, default=d["transition_steps"], help=argparse.SUPPRESS)
     parser.add_argument("--candidates", type=int, help=argparse.SUPPRESS)
-    parser.add_argument("--dither", type=float, default=defaults["dither"],
-                        help="Glyph-logit noise for classic headroom; perceptual headroom returns the raw Adam terminal without post-optimization noise")
+    parser.add_argument("--dither", type=float, default=d["dither"],
+                        help="Glyph-logit noise for classic headroom")
     parser.add_argument("--gradient-loss-strength", type=float, default=None,
                         help="Weight for displayed OKLab Sobel gradients (default: 1.5 for headroom)")
     parser.add_argument("--glyph-entropy-strength", type=float, default=None,
                         help=("Weight for frame-wide glyph variety; 0 disables "
-                              f"(default: {DEFAULT_GLYPH_ENTROPY_STRENGTH:g} for headroom, "
-                              f"0 for structure; max: {MAX_GLYPH_ENTROPY_STRENGTH:g})"))
+                              f"(default: {DEFAULT_GLYPH_ENTROPY_STRENGTH:g} for headroom; "
+                              f"max: {MAX_GLYPH_ENTROPY_STRENGTH:g})"))
     parser.add_argument("--glyph-luminance-bonus", type=float, default=None,
                         help=("Bonus for lighter glyph ink with automatic chrominance correction "
                               f"(default: {DEFAULT_GLYPH_LUMINANCE_BONUS:g}, "
                               f"max: {MAX_GLYPH_LUMINANCE_BONUS:g})"))
-    parser.add_argument("--style", choices=("headroom", "structure", "flow"), default=defaults["style"])
+    parser.add_argument("--style", choices=("headroom", "stroke", "flow"), default=d["style"])
     parser.add_argument("--flow-strength", type=float, default=DEFAULT_FLOW_STRENGTH,
-                        help="Flow influence in glyph selection, 0–2 (0 reproduces perceptual headroom with the same glyph bank)")
+                        help="Flow influence in glyph selection, 0–2")
     parser.add_argument("--flow-eddies", type=float, default=DEFAULT_FLOW_EDDIES,
                         help="Eddy forcing strength, 0–2")
     parser.add_argument("--flow-scale", type=float, default=DEFAULT_FLOW_SCALE,
                         help="Domain size in glyph widths, 1–24")
     parser.add_argument("--flow-animated", action="store_true", help="Prepare a looping offline flow animation")
-    parser.add_argument("--flow-loop-seconds", type=int, default=defaults["flow_loop_seconds"])
-    parser.add_argument("--flow-fps", type=int, default=defaults["flow_fps"])
-    parser.add_argument("--flow-frame-steps", type=int, default=defaults["flow_frame_steps"], help="Optimization updates per animated frame")
-    parser.add_argument("--flow-temporal-strength", type=float, default=defaults["flow_temporal_strength"], help="Cyclic raster/color coherence weight")
+    parser.add_argument("--flow-loop-seconds", type=int, default=d["flow_loop_seconds"])
+    parser.add_argument("--flow-fps", type=int, default=d["flow_fps"])
+    parser.add_argument("--flow-frame-steps", type=int, default=d["flow_frame_steps"], help="Optimization updates per animated frame")
+    parser.add_argument("--flow-temporal-strength", type=float, default=d["flow_temporal_strength"], help="Cyclic raster/color coherence weight")
     parser.add_argument("--no-perceptual-loss", dest="perceptual_loss", action="store_false",
                         help="Disable the default perceptual objective for headroom rendering")
     parser.set_defaults(perceptual_loss=None)
     parser.add_argument("--invert-ink", action="store_true", help="Dark ink on a light canvas")
-    parser.add_argument("--structure-dither", type=float, default=defaults["structure_dither"],
-                        help="Blue-noise coverage dither for the structure style")
-    parser.add_argument("--background", default=defaults["background"], help="auto or a fixed #RRGGBB color")
-    parser.add_argument("--seed", type=int, default=defaults["seed"])
+    parser.add_argument("--structure-dither", type=float, help=argparse.SUPPRESS)
+    parser.add_argument("--background", default=d["background"], help="auto or a fixed #RRGGBB color")
+    parser.add_argument("--seed", type=int, default=d["seed"])
     parser.add_argument("--device", default="auto", help="auto, cpu, or cuda (also used for ROCm)")
     parser.add_argument("--transition-workers", type=int,
                         default=os.environ.get("ASCII_WALLPAPER_TRANSITION_WORKERS", "2"),

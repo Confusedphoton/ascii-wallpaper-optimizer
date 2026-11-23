@@ -9,16 +9,24 @@ import pytest
 import torch
 from PIL import Image
 
-from ascii_optimizer.assets import blue_noise, cell_for_display, glyph_masks, linear_to_srgb, resolve_font, srgb_to_linear
+from ascii_optimizer import optimizer, service
+from ascii_optimizer.assets import (
+    blue_noise,
+    cell_for_display,
+    glyph_sdf_atlas,
+    linear_to_srgb,
+    resolve_font,
+    sdf_spread_for_cell,
+    sdf_to_mask,
+    srgb_to_linear,
+)
 from ascii_optimizer.cli import DEFAULT_CHARS, build, make_parser, solve_style
 from ascii_optimizer.defaults import DEFAULT_GRADIENT_LOSS_STRENGTH
-from ascii_optimizer.optimizer import Grid, _local_color_weight, _loss, render_grid, solve
-from ascii_optimizer.settings import normalize_options
+from ascii_optimizer.optimizer import Grid, _loss, render_grid, solve
 from ascii_optimizer.service import _validated_request
-from ascii_optimizer.structure import STRUCTURE_CHARS
+from ascii_optimizer.settings import normalize_options
 from ascii_optimizer.tone import display_tone, encode_headroom, srgb_to_oklab
 from ascii_optimizer.transition import ease, glyph_paths, local_progress, path_glyphs, phase_offsets
-from ascii_optimizer import service
 
 
 @pytest.fixture(autouse=True)
@@ -54,6 +62,47 @@ def test_uniform_background_fills_glyph_gaps_without_changing_full_coverage():
     np.testing.assert_allclose(image[0, 0], [0.2, 0.3, 0.4], atol=1e-6)
     np.testing.assert_allclose(image[0, 1], [0.5, 0.35, 0.3], atol=1e-6)
     np.testing.assert_allclose(image[1, 0], [0.8, 0.4, 0.2], atol=1e-6)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_cell_composition_matches_expanded_frame_pixels_and_gradients(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("No CUDA/ROCm device")
+    generator = torch.Generator().manual_seed(8)
+    mask = torch.rand((6, 15), generator=generator).to(device).requires_grad_()
+    color = torch.rand((6, 3), generator=generator).to(device).requires_grad_()
+    background = torch.tensor([.12, .01, -.02], device=device, requires_grad=True)
+    actual = optimizer._render(mask, color, 2, 3, 3, 5, background)
+    coverage = mask.reshape(2, 3, 3, 5).permute(0, 2, 1, 3).reshape(6, 15)
+    foreground = color.reshape(2, 3, 3).repeat_interleave(3, 0).repeat_interleave(5, 1)
+    expected = (coverage[..., None] * foreground + (1 - coverage[..., None]) * background).permute(2, 0, 1)[None]
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    weight = torch.rand(actual.shape, generator=generator).to(device)
+    actual_grad = torch.autograd.grad((actual * weight).sum(), (mask, color, background), retain_graph=True)
+    expected_grad = torch.autograd.grad((expected * weight).sum(), (mask, color, background))
+    for left, right in zip(actual_grad, expected_grad):
+        torch.testing.assert_close(left, right, atol=1e-6, rtol=1e-6)
+
+
+def test_hard_selection_cannot_render_a_complementary_glyph_blend():
+    logits = torch.tensor([[0.1, 0.0]], requires_grad=True)
+    masks = torch.tensor([[[1., 0.], [0., 1.]]])
+    weights = optimizer._hard_weights(logits, 0.7)
+    rendered = (weights[..., None] * masks).sum(1)
+    torch.testing.assert_close(rendered, masks[:, 0])
+    rendered[:, 0].sum().backward()
+    assert torch.isfinite(logits.grad).all()
+    assert logits.grad.abs().sum() > 0
+
+
+def test_equal_coverage_glyphs_follow_subglyph_pixel_arrangement():
+    left = np.zeros((4, 4), np.float32)
+    left[:, :2] = 1
+    masks = np.stack((left[:, ::-1], left))
+    source = np.repeat((left * 0.6)[..., None], 3, axis=-1)
+    grid = optimizer.solve(source, masks, steps=0, dither=0, background="#000000",
+                           gradient_loss_strength=0, glyph_entropy_strength=0)
+    assert grid.glyph[0, 0] == 1
 
 
 def test_fixed_and_dynamic_background_use_one_color_for_the_whole_grid():
@@ -92,7 +141,6 @@ def test_plasma_defaults_match_shared_options(suffix):
                          ("GradientLossStrength", "gradient_loss_strength"),
                          ("GlyphLuminanceBonus", "glyph_luminance_bonus"),
                          ("GlyphEntropyStrength", "glyph_entropy_strength"),
-                         ("StructureDither", "structure_dither"),
                          ("TransitionFrames", "frames"), ("TransitionSpread", "transition_spread")):
         assert float(entries[name + suffix].find("k:default", namespace).text) == defaults[option]
 
@@ -103,24 +151,7 @@ def test_full_frame_loss_couples_cells_across_boundary():
     rendered[:, :, :, 4:] = 0.4
     rendered.requires_grad_()
     _loss(rendered, target).backward()
-    # The left cell is locally exact; its gradient comes from multiscale context.
     assert rendered.grad[:, :, :, 3].abs().sum() > 0
-
-
-def test_local_color_objective_prioritizes_errors_at_small_colored_details():
-    target = torch.zeros((1, 3, 8, 8))
-    target[:, 0] = 0.5
-    target[:, 1:, 3, 3] = torch.tensor([0.2, -0.1])
-    at_detail = target.clone()
-    at_detail[:, 0, 3, 3] += 0.1
-    elsewhere = target.clone()
-    elsewhere[:, 0, 4, 4] += 0.1
-    weight = _local_color_weight(target)
-    # Equal lightness errors at symmetric positions cost the same in the base
-    # objective; local weighting gives the unusual color additional influence.
-    torch.testing.assert_close(_loss(at_detail, target), _loss(elsewhere, target))
-    assert _loss(at_detail, target, detail_loss="local_color", local_weight=weight) > _loss(
-        elsewhere, target, detail_loss="local_color", local_weight=weight) * 2
 
 
 def test_blue_noise_is_seeded_and_low_frequency_suppressed():
@@ -222,20 +253,25 @@ def test_batch_transition_endpoints_equal_stills(tmp_path: Path, capsys, batch_a
     for kind in ("glyph", "color", "background"):
         assert (pair / "0000" / f"{kind}.png").read_bytes() == (output / "stills" / "0000" / f"{kind}.png").read_bytes()
         assert (pair / "0002" / f"{kind}.png").read_bytes() == (output / "stills" / "0001" / f"{kind}.png").read_bytes()
-    font_paths = glyph_paths(glyph_masks(resolve_font(args.font), list(args.chars), args.cell))
+    sdf_atlas, spread = glyph_sdf_atlas(resolve_font(args.font), list(args.chars), args.cell)
+    font_paths = glyph_paths(sdf_to_mask(sdf_atlas, spread=spread))
     frames = [np.asarray(Image.open(pair / f"{frame:04d}" / "glyph.png"))[:, :, 0]
               for frame in range(args.frames)]
     for row, col in np.ndindex(frames[0].shape):
         path = font_paths[int(frames[0][row, col])][int(frames[-1][row, col])]
         steps = [path.index(int(frame[row, col])) for frame in frames]
         assert all(next_step - step in (0, 1) for step, next_step in zip(steps, steps[1:]))
-    assert json.loads((output / "manifest.json").read_text())["frame_count"] == 3
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["frame_count"] == 3
+    assert manifest["atlas_type"] == "sdf"
+    assert manifest["sdf_spread"] == spread
     assert Image.open(output / "stills" / "0000" / "preview.png").size == (13, 9)
     assert Image.open(output / "stills" / "0000" / "background.png").size == (1, 1)
     metadata = np.asarray(Image.open(output / "metadata.png"))
     assert tuple(metadata[0, 0]) == (0, 13, 3)
     assert tuple(metadata[0, 1]) == (0, 9, 4)
-    assert json.loads((output / "manifest.json").read_text())["signature"]["gradient_loss_strength"] == DEFAULT_GRADIENT_LOSS_STRENGTH
+    assert metadata[0, 2, 2] == round(spread * 16)
+    assert manifest["signature"]["gradient_loss_strength"] == DEFAULT_GRADIENT_LOSS_STRENGTH
     build(args)
     assert "Already rendered" in capsys.readouterr().out
     args.dither = 0.02
@@ -254,28 +290,10 @@ def test_headroom_encoding_restores_source_colors_after_display():
     displayed = display_tone(srgb_to_linear(torch.from_numpy(encoded)).numpy())
     restored = linear_to_srgb(torch.from_numpy(displayed)).numpy()
     np.testing.assert_allclose(restored, colors, atol=0.002)
-    # Mid-gamut colors also survive a solver-side polarity change.
     inverted = encode_headroom(colors[:, 1:2], invert_ink=True)
     output = display_tone(srgb_to_linear(torch.from_numpy(inverted)).numpy(), invert_ink=True)
     np.testing.assert_allclose(linear_to_srgb(torch.from_numpy(output)).numpy(),
                                colors[:, 1:2], atol=0.002)
-
-
-def test_inverting_structure_changes_selected_glyphs():
-    source = np.zeros((8, 8, 3), dtype=np.float32)
-    source[:, :4] = 0.04
-    source[:, 4:] = 0.96
-    masks = np.zeros((3, 4, 4), dtype=np.float32)
-    masks[1, :2, :2] = 1
-    masks[2, :3, :3] = 1
-    settings = dict(style="structure", background="auto", seed=1, steps=2,
-                    candidates=3, dither=0, structure_dither=0, device="cpu")
-    normal = solve_style(source, masks, invert_ink=False, **settings)
-    inverted = solve_style(source, masks, invert_ink=True, **settings)
-    assert not np.array_equal(normal.glyph, inverted.glyph)
-    assert "|" in STRUCTURE_CHARS and all(char in STRUCTURE_CHARS for char in "[]{}")
-    with pytest.raises(ValueError, match="not implemented for structure-first"):
-        solve_style(source, masks, invert_ink=False, detail_loss="local_color", **settings)
 
 
 def test_inverting_headroom_changes_solved_ink():
@@ -284,7 +302,7 @@ def test_inverting_headroom_changes_solved_ink():
     masks[1, :2, :2] = 1
     masks[2, :3, :3] = 1
     settings = dict(style="headroom", background="auto", seed=1, steps=2,
-                    candidates=3, dither=0, structure_dither=0, device="cpu")
+                    dither=0, device="cpu")
     normal = solve_style(source, masks, invert_ink=False, **settings)
     inverted = solve_style(source, masks, invert_ink=True, **settings)
     from ascii_optimizer.tone import display_tone_lab
@@ -301,31 +319,21 @@ def test_render_style_and_inversion_are_saved_with_assets(tmp_path: Path, batch_
     args = batch_args(images=[image, second], output=tmp_path / "out", size=(12, 8),
         font="DejaVu Sans Mono", chars=" .#", cell=(3, 4), detail=1,
         crop="fill", grayscale=False, frames=3, steps=2, transition_steps=2,
-        candidates=3, dither=0.003, structure_dither=0.06, style="structure",
+        candidates=3, dither=0.003, style="headroom",
         invert_ink=True, background="auto", seed=1, device="cpu", force=False)
     build(args)
     metadata = np.asarray(Image.open(args.output / "metadata.png"))
-    assert tuple(metadata[0, 2]) == (2, 1, 0)
+    expected_spread_byte = round(sdf_spread_for_cell((3, 4)) * 16)
+    assert tuple(metadata[0, 2]) == (2, 1, expected_spread_byte)
     manifest = json.loads((args.output / "manifest.json").read_text())
-    assert manifest["signature"]["style"] == "structure"
+    assert manifest["signature"]["style"] == "headroom"
     assert manifest["signature"]["invert_ink"] is True
-    assert manifest["signature"]["gradient_loss_strength"] == 0
     for kind in ("glyph", "color", "background"):
         assert (args.output / "transitions/0000-0001/0000" / f"{kind}.png").read_bytes() == (args.output / "stills/0000" / f"{kind}.png").read_bytes()
         assert (args.output / "transitions/0000-0001/0002" / f"{kind}.png").read_bytes() == (args.output / "stills/0001" / f"{kind}.png").read_bytes()
     assert (args.output / "transitions/0000-0001/0001/glyph.png").exists()
     request = _validated_request({"images": [str(image)], "font": "Monospace",
         "chars": " .#", "detail": 1, "grayscale": False, "frames": 2,
-        "dither": 0.005, "structure_dither": 0.06, "style": "structure",
+        "dither": 0.005, "style": "headroom",
         "invert_ink": True, "size": [12, 8], "screen": "nonexistent"})
-    assert request["style"] == "structure" and request["invert_ink"] is True
-
-    default_args = batch_args(images=[image], output=tmp_path / "default-structure", size=(12, 8),
-        font="DejaVu Sans Mono", chars=DEFAULT_CHARS, cell=(3, 4), detail=1,
-        crop="fill", grayscale=False, frames=2, steps=2, transition_steps=2,
-        candidates=3, dither=0.003, structure_dither=0.06, style="structure",
-        invert_ink=False, background="auto", seed=1, device="cpu", force=False)
-    build(default_args)
-    default_manifest = json.loads((default_args.output / "manifest.json").read_text())
-    assert default_manifest["signature"]["chars"] == STRUCTURE_CHARS
-    assert default_manifest["signature"]["gradient_loss_strength"] == 0
+    assert request["style"] == "headroom" and request["invert_ink"] is True

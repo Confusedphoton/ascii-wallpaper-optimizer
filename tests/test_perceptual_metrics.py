@@ -112,7 +112,7 @@ def test_experimental_objective_matches_independent_weighted_metrics_and_gradien
     model = metrics.SpatialMetrics(source, ppd=60)
     target = optimizer._rgb_to_oklab(source.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
     base = optimizer._FrameObjective(
-        target, "default", (4, 4), False, 1.5, 0, target, None
+        target, (4, 4), False, 1.5, 0, target, None
     )
     weights = {
         "spatial_lightness": 2.0,
@@ -144,10 +144,10 @@ def test_default_objective_matches_weighted_displayed_terms_and_gradients(metric
     model = metrics.SpatialMetrics(source, ppd=60, cell_height=8)
     target = optimizer._rgb_to_oklab(source.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
     baseline = optimizer._FrameObjective(
-        target, "default", (8, 8), False, 1.5, 20, target, target
+        target, (8, 8), False, 1.5, 20, target, target
     )
     production = optimizer._FrameObjective(
-        target, "default", (8, 8), False, 1.5, 20, target, target, spatial_metrics=model
+        target, (8, 8), False, 1.5, 20, target, target, spatial_metrics=model
     )
     candidate = (target * 0.9).detach().requires_grad_()
     baseline_components = {}
@@ -192,10 +192,8 @@ def test_default_solver_uses_original_source_and_logs_perceptual_losses(
         background="auto",
         seed=0,
         dither=0,
-        structure_dither=0.06,
         device="cpu",
         steps=2,
-        polish_steps=2,
         diagnostics=trace,
     )
     assert trace.metadata["perceptual_loss"] is True
@@ -203,7 +201,6 @@ def test_default_solver_uses_original_source_and_logs_perceptual_losses(
     from ascii_optimizer.defaults import PERCEPTUAL_WEIGHTS
     assert trace.metadata["coefficients"]["spatial_lightness"] == PERCEPTUAL_WEIGHTS["spatial_lightness"]
     assert "reference_range_linear_rgb" in trace.metadata
-    assert trace.metadata["replacement_diagnostics"].startswith("Disabled")
     for row in trace.records:
         assert {
             "loss/spatial_lightness",
@@ -212,9 +209,6 @@ def test_default_solver_uses_original_source_and_logs_perceptual_losses(
             "loss/glyph_stroke_alignment",
         } <= row["tensors"].keys()
         assert torch.isfinite(row["tensors"]["loss"])
-    assert not trace.replacements
-    with pytest.raises(ValueError, match="perceptual_loss=False"):
-        optimizer.solve(source, masks, refinement_sweeps=1)
 
 
 def test_source_features_are_cached_and_original_rgb_is_used(metrics, monkeypatch):
@@ -242,7 +236,6 @@ def test_source_features_are_cached_and_original_rgb_is_used(metrics, monkeypatc
         background="auto",
         seed=0,
         dither=0,
-        structure_dither=0.06,
         device="cpu",
     )
     expected = srgb_to_linear(torch.from_numpy(source).permute(2, 0, 1)[None])

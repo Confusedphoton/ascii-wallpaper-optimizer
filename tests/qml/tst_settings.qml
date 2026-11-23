@@ -52,14 +52,10 @@ TestCase {
         compare(config.glyph_entropy_strength, 0.024)
     }
 
-    function test_structure_clears_unavailable_objectives_and_normalizes_space() {
-        const request = RenderSettings.request([], {RenderStyle: "structure",
-            AsciiChars: ["\\s", ".", "@"], GradientLossStrength: 1.5, GlyphLuminanceBonus: 0.12,
-            GlyphEntropyStrength: 0.01})
+    function test_normalizes_leading_space_escape() {
+        const request = RenderSettings.request([], {RenderStyle: "headroom",
+            AsciiChars: ["\\s", ".", "@"]})
         compare(request.chars, " .@")
-        compare(request.gradient_loss_strength, 0)
-        compare(request.glyph_luminance_bonus, 0)
-        compare(request.glyph_entropy_strength, 0)
     }
 
     function test_zero_entropy_setting_is_preserved() {
@@ -67,21 +63,22 @@ TestCase {
         compare(RenderSettings.request([], {glyphEntropyStrength: 0}).glyph_entropy_strength, 0)
     }
 
-    function test_render_styles_select_distinct_objectives_and_ignore_unused_settings() {
-        const perceptual = RenderSettings.request([], {RenderStyle: "headroom", StructureDither: 0.12})
-        const classic = RenderSettings.request([], {RenderStyle: "classic", StructureDither: 0})
-        const structure = RenderSettings.request([], {RenderStyle: "structure", Dither: 0.05,
-            GradientLossStrength: 4, GlyphLuminanceBonus: 0.5, GlyphEntropyStrength: 0.1})
+    function test_render_styles_select_distinct_objectives() {
+        const perceptual = RenderSettings.request([], {RenderStyle: "headroom"})
+        const classic = RenderSettings.request([], {RenderStyle: "classic"})
+        const stroke = RenderSettings.request([], {RenderStyle: "stroke", GradientLossStrength: 2.0})
+        const flow = RenderSettings.request([], {RenderStyle: "flow"})
         compare(perceptual.style, "headroom")
         compare(perceptual.perceptual_loss, true)
         compare(classic.style, "headroom")
         compare(classic.perceptual_loss, false)
-        compare(perceptual.structure_dither, classic.structure_dither)
         compare(classic.gradient_loss_strength, 1.5)
-        compare(structure.perceptual_loss, false)
-        compare(structure.dither, 0)
-        compare(structure.gradient_loss_strength, 0)
-        compare(structure.glyph_luminance_bonus, 0)
-        compare(structure.glyph_entropy_strength, 0)
+        compare(stroke.style, "stroke")
+        compare(stroke.perceptual_loss, false)
+        compare(stroke.gradient_loss_strength, 0)
+        compare(stroke.glyph_luminance_bonus, 0)
+        compare(stroke.glyph_entropy_strength, 0)
+        compare(flow.style, "flow")
+        compare(flow.perceptual_loss, true)
     }
 }

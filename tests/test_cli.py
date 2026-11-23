@@ -22,7 +22,7 @@ def fast_batch(tmp_path: Path, monkeypatch):
     font.write_bytes(b"test font content")
     masks = np.stack((np.zeros((2, 2)), np.ones((2, 2)))).astype(np.float32)
     monkeypatch.setattr(cli, "resolve_font", lambda _: font)
-    monkeypatch.setattr(cli, "glyph_masks", lambda *_: masks)
+    monkeypatch.setattr(cli, "glyph_sdf_atlas", lambda *_: (masks, 0.0))
     calls = []
 
     def solve_still(target, masks, **kwargs):
@@ -87,10 +87,9 @@ def test_entropy_reaches_solver_and_invalidates_still_cache(fast_batch, monkeypa
     assert json.loads((args.output / "manifest.json").read_text())["signature"]["glyph_entropy_strength"] == 0
 
 
-def test_structure_entropy_defaults_to_zero_and_rejects_nonzero():
-    assert normalize_options({"style": "structure"})["glyph_entropy_strength"] == 0
-    with pytest.raises(ValueError, match="glyph_entropy_strength"):
-        normalize_options({"style": "structure", "glyph_entropy_strength": 0.01})
+def test_legacy_structure_style_is_rejected():
+    with pytest.raises(ValueError, match="Unknown render style"):
+        normalize_options({"style": "structure"})
 
 
 def test_legacy_candidate_flag_does_not_restrict_rendering_or_split_cache(fast_batch):
@@ -109,11 +108,7 @@ def test_legacy_candidate_flag_does_not_restrict_rendering_or_split_cache(fast_b
     assert parser.parse_args(["image.png", "--output", "render", "--size", "8x8", "--candidates", "1"]).candidates == 1
 
 
-def test_batch_uses_full_glyph_bank_with_legacy_candidate_limit(tmp_path, monkeypatch):
-    from ascii_optimizer import optimizer
-    def unexpected(*args, **kwargs):
-        raise AssertionError("CLI rendering must not call shortlist ranking")
-    monkeypatch.setattr(optimizer, "_candidate_fit", unexpected)
+def test_batch_uses_full_glyph_bank_with_legacy_candidate_limit(tmp_path):
     source = tmp_path / "source.png"
     Image.new("RGB", (8, 8), (190, 120, 140)).save(source)
     output = tmp_path / "output"
@@ -247,7 +242,7 @@ def test_slideshow_source_memory_is_bounded_by_workers(fast_batch, monkeypatch, 
 
 
 @pytest.mark.parametrize("style,perceptual", [("headroom", True), ("headroom", False),
-                                             ("flow", True), ("structure", False)])
+                                             ("flow", True)])
 @pytest.mark.parametrize("invert_ink", [False, True])
 def test_transition_colors_follow_saved_keyframes_without_refitting(
         fast_batch, monkeypatch, style, perceptual, invert_ink):
@@ -326,7 +321,7 @@ def test_transition_review_supports_legacy_manifests_and_earth_mover(fast_batch,
     from scripts import compare_transitions
 
     arguments, _, _ = fast_batch
-    args = arguments(style="structure", perceptual_loss=False)
+    args = arguments(style="headroom", perceptual_loss=False)
     cli.build(args)
     original_path = args.output / "manifest.json"
     manifest = json.loads(original_path.read_text())
